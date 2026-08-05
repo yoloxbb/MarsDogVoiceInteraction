@@ -1,0 +1,26 @@
+g uò l ái @COME
+w ò sh ǒu @SHAKE_HAND
+j ī zh ǎng @HIGH_FIVE
+z uò x ià @SIT
+p ā x ià @LIE_DOWN
+zh àn q ǐ l ái @STAND_UP
+d ěng y ī x ià @WAIT
+g ēn zh e w ǒ @FOLLOW
+f ān g ǔn @ROLL_OVER
+zh uàn q uān @SPIN
+h uí l ái @RETURN
+t ǔ d iào @DROP
+zh uāng s ǐ @PLAY_DEAD
+K AH1 M HH IY1 R @COME
+SH EY1 K HH AE1 N D Z @SHAKE_HAND
+HH AY1 F AY1 V @HIGH_FIVE
+S IH1 T @SIT
+L AY1 D AW1 N @LIE_DOWN
+S T AE1 N D AH1 P @STAND_UP
+W EY1 T @WAIT
+F AA1 L OW0 M IY1 @FOLLOW
+R OW1 L OW1 V ER0 @ROLL_OVER
+S P IH1 N @SPIN
+K AH1 M B AE1 K @RETURN
+D R AA1 P IH1 T @DROP
+P L EY1 D EH1 D @PLAY_DEAD

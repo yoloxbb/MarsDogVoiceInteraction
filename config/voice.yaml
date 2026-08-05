@@ -1,0 +1,90 @@
+logging:
+  level: INFO
+  dir: log
+
+mock:
+  enabled: false
+  mode: pipeline
+  event_interval_sec: 5.0
+  avoid_immediate_repeat: true
+
+storage:
+  root: /home/cat/xbb/MarsDogVoiceInteraction/data
+
+topics:
+  audio_event: /perception/audio_event
+  enrollment_event: /perception/voice/enrollment_event
+  voice_task: /perception/voice/task
+
+interaction:
+  idle_timeout_sec: 30.0
+
+providers:
+  wakeup:
+    type: xfyun_serial
+    enabled: true
+    config:
+      port: /dev/ttyACM0
+      baudrate: 115200
+      timeout: 0.2
+      reconnect_interval_sec: 2.0
+      voice_wake_event_types: [4]
+  audio:
+    type: sherpa
+    enabled: true
+    config:
+      vad_model: /home/cat/xbb/models/vad/silero_vad.onnx
+      sample_rate: 16000
+      max_duration_sec: 8.0
+      vad_threshold: 0.7
+      min_silence_dur: 0.5
+      min_speech_dur: 0.4
+      num_threads: 4
+  kws:
+    type: sherpa
+    enabled: true
+    config:
+      model_dir: /home/cat/xbb/models/wakeup/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
+      keywords_file: /home/cat/xbb/MarsDogVoiceInteraction/config/kws_keywords.txt
+      sample_rate: 16000
+      num_threads: 2
+      keywords_score: 1.0
+      keywords_threshold: 0.25
+      num_trailing_blanks: 1
+      event_confidence: 0.9
+  asr:
+    type: sherpa
+    enabled: true
+    config:
+      model_type: paraformer
+      asr_model: /home/cat/xbb/models/asr/sherpa-onnx-paraformer-zh-2024-03-09/model.int8.onnx
+      tokens: /home/cat/xbb/models/asr/sherpa-onnx-paraformer-zh-2024-03-09/tokens.txt
+      sample_rate: 16000
+      language: zh
+      use_itn: true
+      num_threads: 4
+  speaker:
+    type: sherpa
+    enabled: true
+    config:
+      speaker_model: /home/cat/xbb/models/speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
+      match_threshold: 0.5
+      num_threads: 2
+  intent_rule:
+    type: rule
+    enabled: true
+    config: {}
+  intent_llm:
+    type: rkllm
+    enabled: true
+    config:
+      model: /home/cat/xbb/models/llm/qwen2_5_5b_rk3588_260722_w8a8.rkllm
+      lib_path: /home/cat/xbb/MarsDogVoiceInteraction/lib/librkllmrt.so
+      platform: rk3588
+      max_context_len: 512
+      max_new_tokens: 16
+      top_k: 1
+      top_p: 1.0
+      temperature: 0.0
+      repeat_penalty: 1.0
+      system_prompt: "Classify the utterance. Output EMOTION|ACTION|CONTROL only."

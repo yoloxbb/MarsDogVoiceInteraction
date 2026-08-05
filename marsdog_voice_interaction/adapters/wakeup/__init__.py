@@ -1,0 +1,1 @@
+"""Wakeup hardware adapters."""

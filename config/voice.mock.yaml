@@ -1,0 +1,16 @@
+logging:
+  level: INFO
+  dir: log
+mock:
+  enabled: true
+  mode: event
+  event_interval_sec: 0.1
+storage:
+  root: /tmp/marsdog_voice_mock_data
+topics:
+  audio_event: /perception/audio_event
+  enrollment_event: /perception/voice/enrollment_event
+  voice_task: /perception/voice/task
+interaction:
+  idle_timeout_sec: 10.0
+providers: {}

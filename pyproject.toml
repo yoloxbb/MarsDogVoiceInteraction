@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marsdog-voice-interaction"
+version = "0.1.0"
+description = "Independent MarsDog wakeup, ASR, speaker and intent ROS2 node"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+license = "Apache-2.0"
+maintainers = [
+  { name = "MarsDog Voice Team", email = "noreply@marsdog.dev" },
+]
+dependencies = [
+  "numpy>=1.26,<2",
+  "pyserial>=3.5,<4",
+  "pyyaml>=6,<7",
+  "scipy>=1.11,<2",
+  "setuptools==81.0.0",
+  "sherpa-onnx==1.13.3",
+  "sherpa-onnx-core==1.13.3",
+  "sounddevice>=0.5,<0.6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+marsdog-voice-interaction = "marsdog_voice_interaction.main:main"
+
+[tool.setuptools.packages.find]
+include = ["marsdog_voice_interaction*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
