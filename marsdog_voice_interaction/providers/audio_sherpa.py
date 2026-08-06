@@ -63,6 +63,7 @@ class AudioSherpaProvider(BaseProvider):
         self._vad_threshold = float(config.get("vad_threshold", 0.6))
         self._min_silence_dur = float(config.get("min_silence_dur", 0.5))
         self._min_speech_dur = float(config.get("min_speech_dur", 0.4))
+        self._pre_roll_sec = max(0.0, float(config.get("pre_roll_sec", 0.3)))
         self._num_threads = int(config.get("num_threads", 4))
         self._device = config.get("device")  # None = default mic
 
@@ -108,13 +109,15 @@ class AudioSherpaProvider(BaseProvider):
             logger.info(
                 "AudioSherpaProvider (streaming VAD) started — "
                 "model=%s sr=%d chunk=%dms threshold=%.2f "
-                "min_speech=%.1fs min_silence=%.1fs max=%.0fs backend=%s",
+                "min_speech=%.2fs min_silence=%.1fs pre_roll=%.1fs "
+                "max=%.0fs backend=%s",
                 self._model_path,
                 self._sample_rate,
                 int(_CHUNK_SAMPLES / self._sample_rate * 1000),
                 self._vad_threshold,
                 self._min_speech_dur,
                 self._min_silence_dur,
+                self._pre_roll_sec,
                 self._max_duration_sec,
                 _CAPTURE_BACKEND or "none",
             )
@@ -343,7 +346,10 @@ class AudioSherpaProvider(BaseProvider):
                 if not self._vad.empty():
                     # VAD found a complete utterance!
                     segment = self._vad.front
-                    samples = np.array(segment.samples, dtype=np.float32)
+                    samples = self._segment_with_pre_roll(
+                        segment,
+                        np.asarray(all_audio, dtype=np.float32),
+                    )
                     if len(samples) > 0:
                         speech_segment = samples
                         self._vad.pop()
@@ -360,7 +366,10 @@ class AudioSherpaProvider(BaseProvider):
                     self._vad.flush()
                     while not self._vad.empty():
                         seg = self._vad.front
-                        s = np.array(seg.samples, dtype=np.float32)
+                        s = self._segment_with_pre_roll(
+                            seg,
+                            np.asarray(all_audio, dtype=np.float32),
+                        )
                         if len(s) > 0:
                             speech_segment = (
                                 np.concatenate([speech_segment, s])
@@ -465,9 +474,9 @@ class AudioSherpaProvider(BaseProvider):
 
                 if not self._vad.empty():
                     segment = self._vad.front
-                    speech_segment = np.asarray(
-                        segment.samples,
-                        dtype=np.float32,
+                    speech_segment = self._segment_with_pre_roll(
+                        segment,
+                        np.concatenate(all_audio),
                     )
                     self._vad.pop()
                     if speech_segment.size:
@@ -481,9 +490,14 @@ class AudioSherpaProvider(BaseProvider):
                 speech_parts: list[np.ndarray] = []
                 while not self._vad.empty():
                     segment = self._vad.front
-                    samples = np.asarray(
-                        segment.samples,
-                        dtype=np.float32,
+                    captured = (
+                        np.concatenate(all_audio)
+                        if all_audio
+                        else np.array([], dtype=np.float32)
+                    )
+                    samples = self._segment_with_pre_roll(
+                        segment,
+                        captured,
                     )
                     if samples.size:
                         speech_parts.append(samples)
@@ -537,6 +551,24 @@ class AudioSherpaProvider(BaseProvider):
         if audio_data is not None:
             return audio_data.get("has_voice", False)
         return False
+
+    def _segment_with_pre_roll(
+        self,
+        segment: Any,
+        captured_audio: np.ndarray,
+    ) -> np.ndarray:
+        """Prepend raw audio before the VAD start so quiet initials survive."""
+        samples = np.asarray(segment.samples, dtype=np.float32)
+        if samples.size == 0 or self._pre_roll_sec <= 0:
+            return samples
+
+        segment_start = int(getattr(segment, "start", 0))
+        prefix_end = min(max(segment_start, 0), captured_audio.size)
+        prefix_samples = int(self._pre_roll_sec * self._sample_rate)
+        prefix_start = max(0, prefix_end - prefix_samples)
+        if prefix_start == prefix_end:
+            return samples
+        return np.concatenate((captured_audio[prefix_start:prefix_end], samples))
 
     def _notify_chunk(self, samples: np.ndarray) -> None:
         callback = self._chunk_callback

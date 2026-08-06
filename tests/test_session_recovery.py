@@ -7,6 +7,8 @@ import types
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
+
 from marsdog_voice_interaction.core.interaction_state_machine import (
     Trigger,
     VoiceInteractionStateMachine,
@@ -33,6 +35,26 @@ from marsdog_voice_interaction.providers import wakeup_xfyun_serial as wakeup_mo
 from marsdog_voice_interaction.providers.wakeup_xfyun_serial import (
     WakeupXFYunSerialProvider,
 )
+
+
+def test_vad_segment_includes_configured_pre_roll() -> None:
+    provider = AudioSherpaProvider({"sample_rate": 10, "pre_roll_sec": 0.3})
+    captured = np.arange(10, dtype=np.float32)
+    segment = SimpleNamespace(start=6, samples=[60.0, 61.0])
+
+    result = provider._segment_with_pre_roll(segment, captured)
+
+    assert result.tolist() == [3.0, 4.0, 5.0, 60.0, 61.0]
+
+
+def test_vad_segment_pre_roll_is_clamped_at_capture_start() -> None:
+    provider = AudioSherpaProvider({"sample_rate": 10, "pre_roll_sec": 0.3})
+    captured = np.arange(10, dtype=np.float32)
+    segment = SimpleNamespace(start=1, samples=[60.0])
+
+    result = provider._segment_with_pre_roll(segment, captured)
+
+    assert result.tolist() == [0.0, 60.0]
 
 
 class _FakeEnrollment:

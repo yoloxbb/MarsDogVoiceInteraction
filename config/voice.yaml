@@ -36,9 +36,10 @@ providers:
       vad_model: /home/cat/xbb/models/vad/silero_vad.onnx
       sample_rate: 16000
       max_duration_sec: 8.0
-      vad_threshold: 0.7
+      vad_threshold: 0.5
       min_silence_dur: 0.5
-      min_speech_dur: 0.4
+      min_speech_dur: 0.25
+      pre_roll_sec: 0.3
       num_threads: 4
   kws:
     type: sherpa
