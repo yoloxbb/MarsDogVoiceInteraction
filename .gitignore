@@ -1,9 +1,46 @@
+# Python environments and caches
 .venv/
-build/
-dist/
-install/
-log/
+venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python packaging
+dist/
+*.whl
+
+# ROS2 / colcon outputs
+build/
+install/
+log/
+.colcon/
+
+# Runtime data: voice prints are biometric and machine-local
+data/speaker_registry.json
+data/speaker_registry.tmp
+data/speakers/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local agent metadata
+.agents/
+.codex/
