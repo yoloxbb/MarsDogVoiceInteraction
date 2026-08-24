@@ -7,6 +7,7 @@ import random
 import time
 from typing import Any
 
+from marsdog_voice_interaction.messages.audio_event import WAKE_ANGLE_FRAME_ID
 from marsdog_voice_interaction.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ class MockWakeupProvider(BaseProvider):
         self._schedule_next()
 
         return {
+            "header": {"frame_id": WAKE_ANGLE_FRAME_ID},
             "event_type": "wakeup",
             "wake_word": "你好小狗",
             "wake_angle": 0.0,

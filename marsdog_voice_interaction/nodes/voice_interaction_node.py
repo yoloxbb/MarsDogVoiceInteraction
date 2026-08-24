@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import re
+import threading
 import time
 import uuid
 import wave
@@ -99,14 +101,20 @@ class VoiceInteractionNode(Node):
         self._enrollment = SpeakerEnrollmentManager()
         self._state_machine = VoiceInteractionStateMachine()
         self._providers: dict[str, BaseProvider | None] = {}
+        self._interaction_lock = threading.RLock()
         self._interaction_active = False
         self._interaction_id = ""
         self._last_interaction_time = 0.0
+        self._interaction_holds: dict[str, dict[str, Any]] = {}
         self._latest_audio: dict[str, Any] | None = None
         self._command_tracker = UtteranceCommandTracker()
 
         interaction = self._config.get("interaction", {})
         self._idle_timeout = float(interaction.get("idle_timeout_sec", 10))
+        self._hold_max_lease_sec = max(
+            0.1,
+            float(interaction.get("hold_max_lease_sec", 30.0)),
+        )
         self._init_providers()
         self._wire_speaker_enrollment()
         self._sync_speaker_registry()
@@ -300,15 +308,92 @@ class VoiceInteractionNode(Node):
         provider.start()
         return provider
 
+    def _begin_interaction(self, interaction_id: str | None = None) -> str:
+        """Start one session and return its immutable interaction ID."""
+        with self._interaction_lock:
+            if self._interaction_active:
+                return self._interaction_id
+            self._interaction_id = interaction_id or uuid.uuid4().hex
+            self._interaction_active = True
+            self._interaction_holds.clear()
+            self._last_interaction_time = time.time()
+            self._state_machine.trigger(Trigger.WAKEUP)
+            return self._interaction_id
+
+    def _refresh_interaction_activity(self, now: float | None = None) -> None:
+        with self._interaction_lock:
+            if self._interaction_active:
+                self._last_interaction_time = time.time() if now is None else now
+
+    def _is_interaction_active(self) -> bool:
+        with self._interaction_lock:
+            return self._interaction_active
+
+    def _prune_interaction_holds_locked(self, now: float) -> None:
+        expired = [
+            token for token, hold in self._interaction_holds.items()
+            if float(hold["deadline_monotonic"]) <= now
+        ]
+        for token in expired:
+            self._interaction_holds.pop(token, None)
+            logger.info("Interaction hold lease expired: token=%s", token)
+
+    def _timeout_interaction_id(self, now: float) -> str:
+        """Return the session ID only when it is safe to idle-timeout."""
+        with self._interaction_lock:
+            if not self._interaction_active:
+                return ""
+            self._prune_interaction_holds_locked(time.monotonic())
+            if self._interaction_holds:
+                return ""
+            if now - self._last_interaction_time <= self._idle_timeout:
+                return ""
+            return self._interaction_id
+
+    def _poll_direct_mock(self, direct_mock: BaseProvider) -> None:
+        """Run event mock through the same bounded session lifecycle."""
+        event = direct_mock.poll_event()  # type: ignore[attr-defined]
+        if event is not None:
+            event_type = str(event.get("event_type", ""))
+            if event_type == EVT_VOICE_CALL_NAME:
+                self._begin_interaction()
+                self._publish(event)
+            elif not self._is_interaction_active():
+                logger.debug(
+                    "Ignoring direct mock event outside an interaction: %s",
+                    event_type,
+                )
+                complete = getattr(direct_mock, "complete_interaction", None)
+                if callable(complete):
+                    complete()
+            else:
+                self._state_machine.trigger(Trigger.SPEECH_START)
+                should_execute = bool(
+                    event.get("should_trigger_behavior_tree")
+                )
+                if should_execute:
+                    self._state_machine.trigger(Trigger.INTENT_PARSED)
+                else:
+                    self._state_machine.trigger(Trigger.SPEECH_END)
+                event["state"] = self._state_machine.state.value
+                event["previous_state"] = (
+                    self._state_machine.previous_state.value
+                )
+                event.setdefault("utterance_id", uuid.uuid4().hex)
+                self._refresh_interaction_activity()
+                self._publish(event)
+
+        timed_out_id = self._timeout_interaction_id(time.time())
+        if timed_out_id:
+            self._end_interaction(
+                "interaction_timeout",
+                expected_interaction_id=timed_out_id,
+            )
+
     def _poll(self) -> None:
         direct_mock = self._providers.get("mock_event")
         if direct_mock is not None:
-            event = direct_mock.poll_event()  # type: ignore[attr-defined]
-            if event is not None:
-                if event.get("event_type") == EVT_VOICE_CALL_NAME:
-                    self._interaction_id = uuid.uuid4().hex
-                    self._interaction_active = True
-                self._publish(event)
+            self._poll_direct_mock(direct_mock)
             return
 
         now = time.time()
@@ -319,7 +404,7 @@ class VoiceInteractionNode(Node):
                 enrollment_active = (
                     session is not None and not session.done
                 )
-                if not self._interaction_active and not enrollment_active:
+                if not self._is_interaction_active() and not enrollment_active:
                     # A timeout or stop request must not leave a stale capture
                     # starving the wakeup provider at the end of this method.
                     self._cancel_audio_capture(audio)
@@ -341,20 +426,20 @@ class VoiceInteractionNode(Node):
                             if valid_speech:
                                 # Only recognized speech (or a KWS event in
                                 # _poll_kws_events) extends the conversation.
-                                self._last_interaction_time = time.time()
+                                self._refresh_interaction_activity()
                         else:
                             logger.debug(
                                 "VAD silence result; idle timer remains at %.3f",
                                 self._last_interaction_time,
                             )
                         self._command_tracker.finish()
-                        if (
-                            self._interaction_active
-                            and now - self._last_interaction_time
-                            > self._idle_timeout
-                        ):
-                            self._end_interaction("interaction_timeout")
-                        elif self._interaction_active:
+                        timed_out_id = self._timeout_interaction_id(now)
+                        if timed_out_id:
+                            self._end_interaction(
+                                "interaction_timeout",
+                                expected_interaction_id=timed_out_id,
+                            )
+                        elif self._is_interaction_active():
                             self._start_interaction_capture(audio)
                         return
                     if enrollment_active:
@@ -365,12 +450,12 @@ class VoiceInteractionNode(Node):
                 audio.start_capture()  # type: ignore[attr-defined]
                 return
 
-        if (
-            self._interaction_active
-            and now - self._last_interaction_time > self._idle_timeout
-            and not self._audio_speech_active(audio)
-        ):
-            self._end_interaction("interaction_timeout")
+        timed_out_id = self._timeout_interaction_id(now)
+        if timed_out_id and not self._audio_speech_active(audio):
+            self._end_interaction(
+                "interaction_timeout",
+                expected_interaction_id=timed_out_id,
+            )
             return
 
         wakeup = self._providers.get("wakeup")
@@ -380,11 +465,8 @@ class VoiceInteractionNode(Node):
         if event is None:
             return
         event["event_type"] = EVT_VOICE_CALL_NAME
-        self._state_machine.trigger(Trigger.WAKEUP)
-        self._interaction_id = uuid.uuid4().hex
-        self._interaction_active = True
+        self._begin_interaction()
         self._publish(event)
-        self._last_interaction_time = now
         if audio is not None and hasattr(audio, "start_capture"):
             self._start_interaction_capture(audio)
 
@@ -503,25 +585,45 @@ class VoiceInteractionNode(Node):
                 "wakeup remains blocked until capture exits"
             )
 
-    def _end_interaction(self, reason: str) -> None:
+    def _end_interaction(
+        self,
+        reason: str,
+        *,
+        expected_interaction_id: str = "",
+    ) -> bool:
         """Atomically end listening and restore the wakeup polling path."""
-        interaction_id = self._interaction_id
-        self._interaction_active = False
-        self._cancel_audio_capture()
-        self._finish_kws_utterance()
-        self._command_tracker.finish()
-        self._state_machine.trigger(Trigger.TIMEOUT)
-        self._publish({
-            "event_type": EVT_STATE_CHANGED,
-            "interaction_id": interaction_id,
-            "state": "idle",
-            "state_reason": reason,
-        })
-        self._interaction_id = ""
+        with self._interaction_lock:
+            if (
+                expected_interaction_id
+                and expected_interaction_id != self._interaction_id
+            ):
+                return False
+            if not self._interaction_active:
+                self._interaction_holds.clear()
+                return False
+            interaction_id = self._interaction_id
+            self._interaction_active = False
+            self._interaction_holds.clear()
+            self._cancel_audio_capture()
+            self._finish_kws_utterance()
+            self._command_tracker.finish()
+            self._state_machine.trigger(Trigger.TIMEOUT)
+            self._publish({
+                "event_type": EVT_STATE_CHANGED,
+                "interaction_id": interaction_id,
+                "state": "idle",
+                "state_reason": reason,
+            })
+            self._interaction_id = ""
+        direct_mock = self._providers.get("mock_event")
+        complete = getattr(direct_mock, "complete_interaction", None)
+        if callable(complete):
+            complete()
         logger.info(
             "Interaction ended: reason=%s; wakeup polling resumed",
             reason,
         )
+        return True
 
     def _finish_kws_utterance(self) -> None:
         kws = self._providers.get("kws")
@@ -548,7 +650,7 @@ class VoiceInteractionNode(Node):
             if event.get("should_trigger_behavior_tree"):
                 self._state_machine.trigger(Trigger.INTENT_PARSED)
             event["utterance_id"] = self._command_tracker.utterance_id
-            self._last_interaction_time = time.time()
+            self._refresh_interaction_activity()
             self._publish(event)
 
     def _parse_intent(self, text: str) -> dict[str, Any] | None:
@@ -574,7 +676,8 @@ class VoiceInteractionNode(Node):
 
     def _publish(self, partial: dict[str, Any]) -> None:
         value = dict(partial)
-        value.setdefault("interaction_id", self._interaction_id)
+        with self._interaction_lock:
+            value.setdefault("interaction_id", self._interaction_id)
         value.setdefault("state", self._state_machine.state.value)
         value.setdefault(
             "previous_state", self._state_machine.previous_state.value
@@ -621,6 +724,112 @@ class VoiceInteractionNode(Node):
         response.latency_ms = (time.perf_counter() - started) * 1000
         return response
 
+    def _hold_interaction(self, params: dict[str, Any]) -> dict[str, Any]:
+        interaction_id = str(params.get("interaction_id", "")).strip()
+        hold_token = str(params.get("hold_token", "")).strip()
+        reason = str(params.get("reason", "")).strip()
+        try:
+            lease_sec = float(params.get("lease_sec", 0.0))
+        except (TypeError, ValueError):
+            lease_sec = float("nan")
+        if not interaction_id:
+            return {"ok": False, "error": "interaction_id is required"}
+        if not hold_token:
+            return {"ok": False, "error": "hold_token is required"}
+        if not math.isfinite(lease_sec) or lease_sec <= 0.0:
+            return {"ok": False, "error": "lease_sec must be finite and > 0"}
+        if lease_sec > self._hold_max_lease_sec:
+            return {
+                "ok": False,
+                "error": (
+                    "lease_sec exceeds hold_max_lease_sec="
+                    f"{self._hold_max_lease_sec:g}"
+                ),
+            }
+        now = time.monotonic()
+        with self._interaction_lock:
+            self._prune_interaction_holds_locked(now)
+            if not self._interaction_active:
+                return {"ok": False, "error": "interaction is not active"}
+            if interaction_id != self._interaction_id:
+                return {"ok": False, "error": "interaction_id mismatch"}
+            renewed = hold_token in self._interaction_holds
+            self._interaction_holds[hold_token] = {
+                "reason": reason,
+                "deadline_monotonic": now + lease_sec,
+            }
+            return {
+                "ok": True,
+                "interaction_id": interaction_id,
+                "hold_token": hold_token,
+                "held": True,
+                "renewed": renewed,
+                "lease_sec": lease_sec,
+                "expires_in_sec": lease_sec,
+            }
+
+    def _release_interaction_hold(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        interaction_id = str(params.get("interaction_id", "")).strip()
+        hold_token = str(params.get("hold_token", "")).strip()
+        reset_idle_timer = bool(params.get("reset_idle_timer", False))
+        if not interaction_id:
+            return {"ok": False, "error": "interaction_id is required"}
+        if not hold_token:
+            return {"ok": False, "error": "hold_token is required"}
+        now = time.monotonic()
+        with self._interaction_lock:
+            self._prune_interaction_holds_locked(now)
+            if not self._interaction_active:
+                return {"ok": False, "error": "interaction is not active"}
+            if interaction_id != self._interaction_id:
+                return {"ok": False, "error": "interaction_id mismatch"}
+            released = self._interaction_holds.pop(hold_token, None) is not None
+            if released and reset_idle_timer:
+                self._last_interaction_time = time.time()
+            return {
+                "ok": True,
+                "interaction_id": interaction_id,
+                "hold_token": hold_token,
+                "held": False,
+                "released": released,
+                "idle_timer_reset": bool(released and reset_idle_timer),
+            }
+
+    def _interaction_state(self) -> dict[str, Any]:
+        now_monotonic = time.monotonic()
+        now_wall = time.time()
+        with self._interaction_lock:
+            self._prune_interaction_holds_locked(now_monotonic)
+            holds = [
+                {
+                    "hold_token": token,
+                    "reason": str(hold.get("reason", "")),
+                    "expires_in_sec": max(
+                        0.0,
+                        float(hold["deadline_monotonic"]) - now_monotonic,
+                    ),
+                }
+                for token, hold in sorted(self._interaction_holds.items())
+            ]
+            idle_elapsed = (
+                max(0.0, now_wall - self._last_interaction_time)
+                if self._interaction_active else 0.0
+            )
+            return {
+                "ok": True,
+                "listening": self._interaction_active,
+                "interaction_active": self._interaction_active,
+                "interaction_id": self._interaction_id,
+                "state": self._state_machine.state.value,
+                "idle_timeout_sec": self._idle_timeout,
+                "idle_elapsed_sec": idle_elapsed,
+                "hold_active": bool(holds),
+                "holds": holds,
+            }
+
     def _run_task(self, task_type: str, params: dict[str, Any]) -> dict[str, Any]:
         if task_type == "start_speaker_enrollment":
             result = self._enrollment.start_speaker(
@@ -660,18 +869,45 @@ class VoiceInteractionNode(Node):
                 return {"ok": False, "error": "speaker or audio unavailable"}
             result = speaker.verify(audio_data)  # type: ignore[attr-defined]
             return {"ok": True, **result}
+        if task_type == "hold_interaction":
+            return self._hold_interaction(params)
+        if task_type == "release_interaction_hold":
+            return self._release_interaction_hold(params)
+        if task_type == "get_interaction_state":
+            return self._interaction_state()
         if task_type == "start_listening":
-            if not self._interaction_id:
-                self._interaction_id = uuid.uuid4().hex
-            self._interaction_active = True
-            self._last_interaction_time = time.time()
+            expected_id = str(
+                params.get("expected_interaction_id", "")
+            ).strip()
+            with self._interaction_lock:
+                if self._interaction_active:
+                    if expected_id and expected_id != self._interaction_id:
+                        return {
+                            "ok": False,
+                            "error": "expected_interaction_id mismatch",
+                        }
+                    interaction_id = self._interaction_id
+                    self._last_interaction_time = time.time()
+                else:
+                    if expected_id:
+                        return {
+                            "ok": False,
+                            "error": "expected interaction is no longer active",
+                        }
+                    interaction_id = self._begin_interaction()
             audio = self._providers.get("audio")
             if audio is not None and hasattr(audio, "start_capture"):
-                self._start_interaction_capture(audio)
-            return {"ok": True, "listening": True}
+                is_capturing = getattr(audio, "is_capturing", None)
+                if not callable(is_capturing) or not is_capturing():
+                    self._start_interaction_capture(audio)
+            return {
+                "ok": True,
+                "listening": True,
+                "interaction_id": interaction_id,
+            }
         if task_type == "stop_listening":
-            self._end_interaction("stop_listening")
-            return {"ok": True, "listening": False}
+            ended = self._end_interaction("stop_listening")
+            return {"ok": True, "listening": False, "ended": ended}
         return {"ok": False, "error": f"unsupported task_type: {task_type}"}
 
     @staticmethod

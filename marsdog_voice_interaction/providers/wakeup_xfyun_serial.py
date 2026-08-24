@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from typing import Any
 
 from marsdog_voice_interaction.adapters.wakeup.xfyun_serial_reader import XFYunSerialReader
+from marsdog_voice_interaction.messages.audio_event import WAKE_ANGLE_FRAME_ID
 from marsdog_voice_interaction.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,9 @@ class WakeupXFYunSerialProvider(BaseProvider):
         self.port = config.get("port", "/dev/ttyACM0")
         self.baudrate = int(config.get("baudrate", 115200))
         self.timeout = float(config.get("timeout", 0.2))
+        self.wake_score_scale = float(config.get("wake_score_scale", 1000.0))
+        if not math.isfinite(self.wake_score_scale) or self.wake_score_scale <= 0:
+            self.wake_score_scale = 1000.0
         self.voice_wake_event_types = set(
             config.get("voice_wake_event_types", [4])
         )
@@ -207,6 +212,7 @@ class WakeupXFYunSerialProvider(BaseProvider):
         wake_word = ""
         wake_angle = 0.0
         wake_confidence = 1.0
+        wake_score_raw = 1.0
 
         info_str = content.get("info", "")
         if info_str and isinstance(info_str, str):
@@ -215,7 +221,10 @@ class WakeupXFYunSerialProvider(BaseProvider):
                 ivw = info.get("ivw", {})
                 if isinstance(ivw, dict):
                     wake_word = str(ivw.get("keyword", ""))
-                    wake_confidence = float(ivw.get("score", 1.0))
+                    wake_score_raw = float(ivw.get("score", 1.0))
+                    wake_confidence = self._normalize_wake_score(
+                        wake_score_raw
+                    )
                     wake_angle = float(ivw.get("angle", 0.0))
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 logger.debug("Failed to parse info JSON: %s", exc)
@@ -223,6 +232,8 @@ class WakeupXFYunSerialProvider(BaseProvider):
         # Fallback: use result field as wake_word
         if not wake_word:
             wake_word = str(content.get("result", ""))
+        if not math.isfinite(wake_angle):
+            wake_angle = 0.0
 
         # Normalize: strip tone numbers for readability
         # "ni2 hao3 wang4 cai2" stays as-is for downstream matching
@@ -230,14 +241,27 @@ class WakeupXFYunSerialProvider(BaseProvider):
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
         logger.info(
-            "XFYun wakeup: word=%r angle=%.0f conf=%.1f (%.1fms)",
-            wake_word, wake_angle, wake_confidence, latency_ms,
+            "XFYun wakeup: word=%r angle=%.0f conf=%.3f raw=%.1f (%.1fms)",
+            wake_word,
+            wake_angle,
+            wake_confidence,
+            wake_score_raw,
+            latency_ms,
         )
 
         return {
+            "header": {"frame_id": WAKE_ANGLE_FRAME_ID},
             "event_type": "wakeup",
             "wake_word": wake_word,
             "wake_angle": wake_angle,
             "wake_confidence": wake_confidence,
+            "wake_score_raw": wake_score_raw,
             "latency_ms": latency_ms,
         }
+
+    def _normalize_wake_score(self, score: float) -> float:
+        """Convert the AIUI raw score to the public [0, 1] confidence."""
+        if not math.isfinite(score):
+            return 0.0
+        normalized = score if score <= 1.0 else score / self.wake_score_scale
+        return min(1.0, max(0.0, normalized))

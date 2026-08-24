@@ -45,6 +45,13 @@ EVT_STATE_CHANGED
 - `interaction_timeout`：最后一次有效语音后默认 10 秒无新语音。
 - `stop_listening`：Service 主动结束。
 
+行为树进行唤醒转向、视觉锁定或靠近期间，可调用 VoiceTask 的
+`hold_interaction` 暂停空闲终止。请求必须精确携带当前 `interaction_id`、稳定
+`hold_token` 和有限 `lease_sec`；同 token 重复调用会续租。到达并准备继续对话
+时调用 `release_interaction_hold(reset_idle_timer=true)`，从释放时重新等待 10 秒。
+租约不会屏蔽录音、流式 KWS、STOP 或 `stop_listening`，会话终止时全部租约自动
+清除。可用 `get_interaction_state` 查询当前 ID 和有效租约。
+
 ### KWS 去重
 
 KWS 可在 VAD 结束前发布命令。最终 ASR 意图如果与同一 `utterance_id` 已发布的 KWS 事件相同，不再重复发布；不同命令仍发布。下游仍应按 `interaction_id + utterance_id + event_type` 做幂等保护。
@@ -83,6 +90,7 @@ uv run pytest
 | 配置项 | 当前值/含义 |
 |---|---|
 | `interaction.idle_timeout_sec` | 10 秒，从最后一次有效语音开始计算 |
+| `interaction.hold_max_lease_sec` | 单次会话保持租约上限 30 秒，调用方需定期续租 |
 | `topics.*` | 对外 Topic/Service 名称 |
 | `providers.wakeup` | 讯飞串口唤醒板 `/dev/ttyACM0` |
 | `providers.audio` | 16 kHz VAD 和录音 |
@@ -95,7 +103,10 @@ uv run pytest
 
 ## 6. 修改接口时必须回归
 
-- 唤醒事件包含有限数值 `wake_angle`，单位为度，`header.frame_id=base_link`。
+- 唤醒事件包含有限数值的原始 `wake_angle`，单位为度，
+  `header.frame_id=microphone_array`。Voice 不应用安装 offset/sign；动作项目是
+  唯一标定所有者，消费时只允许应用一次安装零偏和方向正负标定。
+- `wake_confidence` 始终在 `[0,1]`；硬件原始分数保存在 `wake_score_raw`。
 - 同一会话 ID 不在中途变化。
 - FOLLOW 事件只发布一次有效指令，且会话结束必有 idle 状态事件。
 - `control in {DO,CANCEL}` 时 `should_trigger_behavior_tree=true`。

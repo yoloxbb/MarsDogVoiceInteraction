@@ -3,12 +3,14 @@ from pathlib import Path
 import pytest
 
 from marsdog_voice_interaction.messages.audio_event import (
+    WAKE_ANGLE_FRAME_ID,
     normalize_audio_event,
 )
 from marsdog_voice_interaction.messages.intent_protocol import (
     parse_intent_tag,
 )
 from marsdog_voice_interaction.messages.voice_event_types import (
+    EVT_VOICE_CALL_NAME,
     EVT_VOICE_COMMAND_SIT,
     classification_to_voice_event,
 )
@@ -16,6 +18,7 @@ from marsdog_voice_interaction.core.utterance_command_tracker import (
     UtteranceCommandTracker,
 )
 from marsdog_voice_interaction.providers.mock_event import MockEventProvider
+from marsdog_voice_interaction.providers.mock_wakeup import MockWakeupProvider
 from marsdog_voice_interaction.providers.asr_sherpa import (
     _normalize_sense_voice_language,
 )
@@ -40,6 +43,38 @@ def test_audio_contract_preserves_interaction_id() -> None:
         "interaction_id": "session-1",
     })
     assert value["interaction_id"] == "session-1"
+
+
+def test_audio_contract_bounds_wake_confidence_and_preserves_raw_score() -> None:
+    value = normalize_audio_event({
+        "event_type": "EVT_VOICE_CALL_NAME",
+        "wake_confidence": 1.8,
+        "wake_score_raw": 907.0,
+    })
+
+    assert value["wake_confidence"] == 1.0
+    assert value["wake_score_raw"] == 907.0
+
+
+def test_wake_angle_contract_uses_raw_microphone_array_frame() -> None:
+    value = normalize_audio_event({
+        "event_type": EVT_VOICE_CALL_NAME,
+        "wake_angle": 42.0,
+    })
+    direct_mock = MockEventProvider({}).build_event(EVT_VOICE_CALL_NAME)
+    pipeline_mock = MockWakeupProvider({
+        "mock_min_interval_sec": 1.0,
+        "mock_max_interval_sec": 1.0,
+    })
+    pipeline_mock.start()
+    pipeline_mock._next_event_time = 0.0
+    pipeline_event = pipeline_mock.poll_event()
+
+    assert WAKE_ANGLE_FRAME_ID == "microphone_array"
+    assert value["header"]["frame_id"] == WAKE_ANGLE_FRAME_ID
+    assert direct_mock["header"]["frame_id"] == WAKE_ANGLE_FRAME_ID
+    assert pipeline_event is not None
+    assert pipeline_event["header"]["frame_id"] == WAKE_ANGLE_FRAME_ID
 
 
 def test_intent_protocol_and_event_mapping() -> None:

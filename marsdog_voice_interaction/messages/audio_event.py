@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 import copy
+import math
 from typing import Any
 
 from marsdog_voice_interaction.utils.time_utils import now_stamp
 
 
 SCHEMA_VERSION = 1
+WAKE_ANGLE_FRAME_ID = "microphone_array"
 
 _TEMPLATE: dict[str, Any] = {
     "schema_version": SCHEMA_VERSION,
-    "header": {"stamp": 0.0, "frame_id": "base_link"},
+    "header": {"stamp": 0.0, "frame_id": WAKE_ANGLE_FRAME_ID},
     "event_type": "",
     "interaction_id": "",
     "utterance_id": "",
     "wake_word": "",
     "wake_angle": 0.0,
     "wake_confidence": 0.0,
+    "wake_score_raw": 0.0,
     "asr_text": "",
     "speaker_id": "",
     "speaker_confidence": 0.0,
@@ -85,4 +88,14 @@ def normalize_audio_event(data: Any) -> dict[str, Any]:
             event[key] = type(default)(value)
         except (TypeError, ValueError):
             pass
+    if not math.isfinite(event["wake_angle"]):
+        event["wake_angle"] = 0.0
+    if not math.isfinite(event["wake_score_raw"]):
+        event["wake_score_raw"] = 0.0
+    if not math.isfinite(event["wake_confidence"]):
+        event["wake_confidence"] = 0.0
+    event["wake_confidence"] = min(
+        1.0,
+        max(0.0, event["wake_confidence"]),
+    )
     return event

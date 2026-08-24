@@ -9,6 +9,7 @@ from typing import Any
 from marsdog_voice_interaction.messages.intent_protocol import (
     classification_to_event,
 )
+from marsdog_voice_interaction.messages.audio_event import WAKE_ANGLE_FRAME_ID
 from marsdog_voice_interaction.messages.voice_event_types import (
     ACTION_TO_VOICE_EVENT,
     EVT_VOICE_CALL_NAME,
@@ -54,6 +55,11 @@ MOCK_AUDIO_EVENT_TYPES = (
     EVT_VOICE_NEUTRAL,
 )
 
+_MOCK_INTERACTION_EVENT_TYPES = tuple(
+    event_type for event_type in MOCK_AUDIO_EVENT_TYPES
+    if event_type != EVT_VOICE_CALL_NAME
+)
+
 
 class MockEventProvider(BaseProvider):
     def __init__(self, config: dict[str, Any]) -> None:
@@ -62,9 +68,11 @@ class MockEventProvider(BaseProvider):
         self._random = random.Random(config.get("seed"))
         self._last = ""
         self._next = 0.0
+        self._phase = "call"
 
     def start(self) -> None:
         self.available = bool(self.config.get("enabled", True))
+        self._phase = "call"
         self._next = time.monotonic() + self._interval
 
     def stop(self) -> None:
@@ -74,17 +82,31 @@ class MockEventProvider(BaseProvider):
         now = time.monotonic()
         if not self.available or now < self._next:
             return None
-        choices = tuple(
-            event for event in MOCK_AUDIO_EVENT_TYPES if event != self._last
-        ) or MOCK_AUDIO_EVENT_TYPES
-        event_type = self._random.choice(choices)
-        self._last = event_type
+        if self._phase == "waiting":
+            return None
+        if self._phase == "call":
+            event_type = EVT_VOICE_CALL_NAME
+            self._phase = "event"
+        else:
+            choices = tuple(
+                event for event in _MOCK_INTERACTION_EVENT_TYPES
+                if event != self._last
+            ) or _MOCK_INTERACTION_EVENT_TYPES
+            event_type = self._random.choice(choices)
+            self._last = event_type
+            self._phase = "waiting"
         self._next = now + self._interval
         return self.build_event(event_type)
+
+    def complete_interaction(self) -> None:
+        """Allow the next direct-mock session after the node publishes idle."""
+        self._phase = "call"
+        self._next = time.monotonic() + self._interval
 
     def build_event(self, event_type: str) -> dict[str, Any]:
         if event_type == EVT_VOICE_CALL_NAME:
             return {
+                "header": {"frame_id": WAKE_ANGLE_FRAME_ID},
                 "event_type": event_type,
                 "wake_word": "你好小狗",
                 "wake_angle": self._random.uniform(-90, 90),

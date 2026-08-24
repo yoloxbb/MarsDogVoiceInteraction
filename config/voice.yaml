@@ -17,7 +17,8 @@ topics:
   voice_task: /perception/voice/task
 
 interaction:
-  idle_timeout_sec: 30.0
+  idle_timeout_sec: 10.0
+  hold_max_lease_sec: 30.0
 
 providers:
   wakeup:
@@ -29,6 +30,7 @@ providers:
       timeout: 0.2
       reconnect_interval_sec: 2.0
       voice_wake_event_types: [4]
+      wake_score_scale: 1000.0
   audio:
     type: sherpa
     enabled: true

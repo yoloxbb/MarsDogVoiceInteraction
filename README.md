@@ -17,7 +17,9 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 
 ## 主要能力
 
-- 通过讯飞串口模块唤醒并获取声源角度。
+- 通过讯飞串口模块唤醒并获取声源原始方向角。`wake_angle` 单位为度，
+  `header.frame_id=microphone_array`；本项目不应用安装零偏或方向正负标定，
+  这些标定只由动作项目在执行转向时应用一次。
 - 使用 sherpa-onnx Silero VAD 实时切分语音。
 - VAD 与流式 KWS 复用同一份 16 kHz 麦克风数据，不重复打开设备。
 - KWS 命中中英文动作词后立即发布事件，降低动作响应延迟。
@@ -134,6 +136,7 @@ uv run marsdog-voice-interaction \
 | `storage.root` | 声纹注册表、样本及临时数据目录 |
 | `topics` | ROS2 Topic 和 Service 名称 |
 | `interaction.idle_timeout_sec` | 最后一次有效语音后等待多久结束会话 |
+| `interaction.hold_max_lease_sec` | 外部会话保持租约的单次最长秒数 |
 | `providers.wakeup` | 讯飞串口和唤醒事件类型 |
 | `providers.audio` | 麦克风、VAD 阈值、语音时长和预录缓存 |
 | `providers.kws` | KWS 模型、关键词及检测阈值 |
@@ -166,6 +169,7 @@ uv run marsdog-voice-interaction \
 支持的 `task_type`：
 
 - `start_listening`、`stop_listening`
+- `hold_interaction`、`release_interaction_hold`、`get_interaction_state`
 - `start_speaker_enrollment`、`cancel_speaker_enrollment`
 - `upload_speaker`、`verify_speaker`
 - `list_speakers`、`delete_speaker`
@@ -192,6 +196,27 @@ ros2 service call /perception/voice/task \
   "{task_id: manual-stop, task_type: stop_listening, params_json: '{}'}"
 ```
 
+`start_listening` 成功时返回本次不可变的 `interaction_id`。调用方若要确认
+仍是同一会话，可传 `expected_interaction_id`；会话已结束时不会用旧 ID 重新
+创建会话。
+
+行为树在声源转向或靠近唤醒者期间，可以使用有限租约暂停空闲超时：
+
+```bash
+ros2 service call /perception/voice/task \
+  marsdog_voice_interaction/srv/VoiceTask \
+  "{task_id: wake-hold, task_type: hold_interaction, params_json: \
+  '{\"interaction_id\":\"SESSION_ID\",\"hold_token\":\"wake-engagement:SESSION_ID\",\"lease_sec\":6.0,\"reason\":\"wake_target_approach\"}'}"
+
+ros2 service call /perception/voice/task \
+  marsdog_voice_interaction/srv/VoiceTask \
+  "{task_id: wake-release, task_type: release_interaction_hold, params_json: \
+  '{\"interaction_id\":\"SESSION_ID\",\"hold_token\":\"wake-engagement:SESSION_ID\",\"reset_idle_timer\":true}'}"
+```
+
+同一 `hold_token` 重复申请是幂等续租。租约只暂停空闲终止，不暂停录音、KWS
+或 STOP；到达目标后用 `reset_idle_timer=true` 释放，会从释放时重新等待 10 秒。
+
 ## Mock 联调
 
 仓库提供 [`config/voice.mock.yaml`](config/voice.mock.yaml)，无需串口、麦克风和
@@ -206,8 +231,8 @@ ros2 launch marsdog_voice_interaction voice.launch.py \
 
 Mock 有两种模式：
 
-- `mock.mode: event`：绕过全部上游 Provider，直接生成语义完整的音频事件，适合
-  测试行为树等下游消费者。
+- `mock.mode: event`：绕过全部上游 Provider，按 `CALL_NAME → 会话事件 → idle`
+  生成语义完整的同 `interaction_id` 会话，适合测试行为树等下游消费者。
 - `mock.mode: pipeline`：使用 Mock Wakeup、VAD、ASR 和 Speaker 走完整节点流程，
   适合验证状态机和 Provider 编排。
 

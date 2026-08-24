@@ -19,15 +19,16 @@
 ```text
 schema_version                              int            固定为 1
 header.stamp                                float          事件时间戳（Unix epoch）
-header.frame_id                             str            坐标系，固定 "base_link"
+header.frame_id                             str            原始阵列角坐标系，固定 "microphone_array"
 
 event_type                                  str            事件类型（见下方枚举）
 interaction_id                              str            一次唤醒到会话结束共享的会话 ID
 utterance_id                                str            单次语音的唯一 ID（同一句话的所有事件共享）
 
 wake_word                                   str            唤醒词原文（如 "xiao3 wei1 xiao3 wei1"）
-wake_angle                                  float          唤醒源方向角（度），来自 XFYun 硬件
-wake_confidence                             float          唤醒置信度
+wake_angle                                  float          XFYun 原始唤醒源方向角（度），未做安装标定
+wake_confidence                             float          归一化唤醒置信度，范围 [0,1]
+wake_score_raw                              float          唤醒硬件原始分数，仅诊断使用
 
 asr_text                                    str            ASR 转写文本
 language                                    str            语言标签：zh / en / ja / ko / yue
@@ -57,6 +58,11 @@ state_reason                                str            状态变更原因（
 
 latency_ms                                  float          处理延迟（ms）
 ```
+
+`wake_angle` 属于 `microphone_array` 坐标系。Voice 只透传硬件原始角度，不应用
+安装零偏或方向正负标定；动作项目是唯一标定所有者，并且只能在执行转向时应用
+一次 offset/sign 标定。其他事件继续携带同一完整 header，未使用声源角时忽略
+`wake_angle` 即可。
 
 ### event_type 枚举
 
@@ -288,7 +294,10 @@ float64 latency_ms     # 处理耗时
 
 跳过唤醒环节，直接开始录音。用于外部触发（如视觉模块联动）。
 
-返回：`{"ok": true, "listening": true}`
+可选请求字段 `expected_interaction_id` 用于确认当前活跃会话。若 ID 不匹配，或该
+ID 对应会话已经结束，返回失败且不得复活旧会话。
+
+返回：`{"ok": true, "listening": true, "interaction_id": "..."}`
 
 #### `stop_listening` — 手动停止交互
 
@@ -296,13 +305,47 @@ float64 latency_ms     # 处理耗时
 
 返回：`{"ok": true, "listening": false}`
 
+#### `hold_interaction` — 有限期保持当前会话
+
+请求：
+
+```json
+{
+  "interaction_id": "当前会话 ID",
+  "hold_token": "wake-engagement:<interaction_id>",
+  "lease_sec": 6.0,
+  "reason": "wake_target_approach"
+}
+```
+
+- `interaction_id` 必须精确匹配当前活跃会话。
+- `hold_token` 必须非空；同 token 重复请求为幂等续租。
+- `lease_sec` 必须为有限正数，且不超过
+  `interaction.hold_max_lease_sec`（正式配置 30 秒）。
+- deadline 使用本地 monotonic clock；租约到期自动删除。
+- 有有效租约时只暂停 `interaction_timeout`，不屏蔽录音、KWS、STOP 或
+  `stop_listening`。
+
+#### `release_interaction_hold` — 释放保持租约
+
+请求包含 `interaction_id`、`hold_token` 和布尔值 `reset_idle_timer`。只有实际
+删除了当前有效 token 时，`reset_idle_timer=true` 才会把最后活动时间重置为
+释放时刻。重复释放返回成功但 `released=false`，不会重置计时器。
+
+#### `get_interaction_state` — 查询会话及租约
+
+无参数。返回 `interaction_active/listening`、`interaction_id`、`state`、
+`idle_timeout_sec`、`idle_elapsed_sec`、`hold_active` 和 `holds[]`。租约条目包含
+`hold_token`、`reason` 和当前 `expires_in_sec`。
+
 ---
 
 ## Mock 模式
 
 设置 `mock.enabled: true`、`mock.mode: event` 可直接模拟下游语音事件，
-不加载硬件和模型。MockEventProvider 按 `event_interval_sec` 间隔轮询
-`MOCK_AUDIO_EVENT_TYPES` 中除上一轮外的所有事件类型。
+不加载硬件和模型。每轮按 `EVT_VOICE_CALL_NAME → 一个同会话语音事件 →
+EVT_STATE_CHANGED(state=idle)` 运行，整轮保持同一个 `interaction_id`；空闲终止
+仍遵守 10 秒超时和会话保持租约。
 
 ```bash
 uv run marsdog-voice-interaction \

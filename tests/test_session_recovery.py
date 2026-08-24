@@ -35,6 +35,7 @@ from marsdog_voice_interaction.providers import wakeup_xfyun_serial as wakeup_mo
 from marsdog_voice_interaction.providers.wakeup_xfyun_serial import (
     WakeupXFYunSerialProvider,
 )
+from marsdog_voice_interaction.providers.mock_event import MockEventProvider
 
 
 def test_vad_segment_includes_configured_pre_roll() -> None:
@@ -105,6 +106,16 @@ class _FakeWakeup:
 
 class _NodeHarness:
     _poll = VoiceInteractionNode._poll
+    _poll_direct_mock = VoiceInteractionNode._poll_direct_mock
+    _begin_interaction = VoiceInteractionNode._begin_interaction
+    _refresh_interaction_activity = (
+        VoiceInteractionNode._refresh_interaction_activity
+    )
+    _is_interaction_active = VoiceInteractionNode._is_interaction_active
+    _prune_interaction_holds_locked = (
+        VoiceInteractionNode._prune_interaction_holds_locked
+    )
+    _timeout_interaction_id = VoiceInteractionNode._timeout_interaction_id
     _start_interaction_capture = VoiceInteractionNode._start_interaction_capture
     _cancel_audio_capture = VoiceInteractionNode._cancel_audio_capture
     _end_interaction = VoiceInteractionNode._end_interaction
@@ -114,6 +125,9 @@ class _NodeHarness:
         VoiceInteractionNode._audio_speech_active
     )
     _run_task = VoiceInteractionNode._run_task
+    _hold_interaction = VoiceInteractionNode._hold_interaction
+    _release_interaction_hold = VoiceInteractionNode._release_interaction_hold
+    _interaction_state = VoiceInteractionNode._interaction_state
 
     def __init__(self, audio: _FakeAudio, wakeup: _FakeWakeup) -> None:
         self._providers = {
@@ -125,15 +139,20 @@ class _NodeHarness:
         self._state_machine = VoiceInteractionStateMachine()
         self._state_machine.trigger(Trigger.WAKEUP)
         self._command_tracker = UtteranceCommandTracker()
+        self._interaction_lock = threading.RLock()
         self._interaction_active = True
         self._interaction_id = "interaction-test"
         self._last_interaction_time = 100.0
+        self._interaction_holds: dict[str, dict[str, Any]] = {}
         self._idle_timeout = 10.0
+        self._hold_max_lease_sec = 30.0
         self._latest_audio = None
         self.published: list[dict[str, Any]] = []
 
     def _publish(self, event: dict[str, Any]) -> None:
-        self.published.append(event)
+        value = dict(event)
+        value.setdefault("interaction_id", self._interaction_id)
+        self.published.append(value)
 
     def _process_speech(
         self,
@@ -238,11 +257,323 @@ def test_stop_listening_cancels_capture_immediately() -> None:
 
     result = node._run_task("stop_listening", {})
 
-    assert result == {"ok": True, "listening": False}
+    assert result == {"ok": True, "listening": False, "ended": True}
     assert not node._interaction_active
     assert not audio.is_capturing()
     assert audio.cancel_count == 1
     assert node.published[-1]["state_reason"] == "stop_listening"
+
+
+def test_interaction_hold_pauses_idle_timeout(monkeypatch: Any) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    wall_clock = [111.0]
+    monotonic_clock = [50.0]
+    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+    monkeypatch.setattr(
+        node_module.time,
+        "monotonic",
+        lambda: monotonic_clock[0],
+    )
+
+    result = node._run_task("hold_interaction", {
+        "interaction_id": "interaction-test",
+        "hold_token": "wake-engagement:interaction-test",
+        "lease_sec": 6.0,
+        "reason": "wake_target_approach",
+    })
+    node._poll()
+
+    assert result["ok"]
+    assert not result["renewed"]
+    assert node._interaction_active
+    assert not node.published
+
+
+def test_interaction_hold_renewal_is_idempotent(monkeypatch: Any) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    clock = [50.0]
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: clock[0])
+    params = {
+        "interaction_id": "interaction-test",
+        "hold_token": "wake-engagement:interaction-test",
+        "lease_sec": 6.0,
+    }
+
+    first = node._run_task("hold_interaction", params)
+    clock[0] = 54.0
+    second = node._run_task("hold_interaction", params)
+
+    assert first["ok"] and not first["renewed"]
+    assert second["ok"] and second["renewed"]
+    assert node._interaction_holds[params["hold_token"]][
+        "deadline_monotonic"
+    ] == 60.0
+
+
+def test_expired_hold_restores_normal_timeout(monkeypatch: Any) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    wall_clock = [111.0]
+    monotonic_clock = [50.0]
+    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+    monkeypatch.setattr(
+        node_module.time,
+        "monotonic",
+        lambda: monotonic_clock[0],
+    )
+    node._run_task("hold_interaction", {
+        "interaction_id": "interaction-test",
+        "hold_token": "short",
+        "lease_sec": 1.0,
+    })
+
+    monotonic_clock[0] = 52.0
+    node._poll()
+
+    assert not node._interaction_active
+    assert node.published[-1]["state_reason"] == "interaction_timeout"
+    assert not node._interaction_holds
+
+
+def test_hold_rejects_wrong_session_and_oversized_lease() -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+
+    mismatch = node._run_task("hold_interaction", {
+        "interaction_id": "other",
+        "hold_token": "token",
+        "lease_sec": 6.0,
+    })
+    oversized = node._run_task("hold_interaction", {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "lease_sec": 31.0,
+    })
+
+    assert not mismatch["ok"]
+    assert mismatch["error"] == "interaction_id mismatch"
+    assert not oversized["ok"]
+    assert "hold_max_lease_sec=30" in oversized["error"]
+
+
+def test_release_hold_can_restart_idle_timer(monkeypatch: Any) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    wall_clock = [111.0]
+    monotonic_clock = [50.0]
+    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+    monkeypatch.setattr(
+        node_module.time,
+        "monotonic",
+        lambda: monotonic_clock[0],
+    )
+    params = {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "lease_sec": 6.0,
+    }
+    node._run_task("hold_interaction", params)
+
+    wall_clock[0] = 200.0
+    released = node._run_task("release_interaction_hold", {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "reset_idle_timer": True,
+    })
+    wall_clock[0] = 209.0
+    node._poll()
+
+    assert released["released"]
+    assert released["idle_timer_reset"]
+    assert node._interaction_active
+
+    wall_clock[0] = 211.0
+    node._poll()
+    assert not node._interaction_active
+
+
+def test_duplicate_release_does_not_reset_idle_timer(monkeypatch: Any) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    wall_clock = [200.0]
+    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+    node._run_task("hold_interaction", {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "lease_sec": 6.0,
+    })
+
+    first = node._run_task("release_interaction_hold", {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "reset_idle_timer": True,
+    })
+    wall_clock[0] = 205.0
+    duplicate = node._run_task("release_interaction_hold", {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "reset_idle_timer": True,
+    })
+
+    assert first["released"] and first["idle_timer_reset"]
+    assert not duplicate["released"]
+    assert not duplicate["idle_timer_reset"]
+    assert node._last_interaction_time == 200.0
+
+
+def test_release_rejects_wrong_session_without_removing_hold() -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._run_task("hold_interaction", {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "lease_sec": 6.0,
+    })
+
+    result = node._run_task("release_interaction_hold", {
+        "interaction_id": "other-interaction",
+        "hold_token": "token",
+        "reset_idle_timer": True,
+    })
+
+    assert not result["ok"]
+    assert result["error"] == "interaction_id mismatch"
+    assert "token" in node._interaction_holds
+    assert node._last_interaction_time == 100.0
+
+
+def test_stop_and_end_clear_all_interaction_holds() -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._run_task("hold_interaction", {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "lease_sec": 6.0,
+    })
+
+    node._run_task("stop_listening", {})
+
+    assert not node._interaction_holds
+
+
+def test_start_listening_returns_id_and_will_not_resurrect_old_session() -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    current = node._run_task("start_listening", {
+        "expected_interaction_id": "interaction-test",
+    })
+    mismatch = node._run_task("start_listening", {
+        "expected_interaction_id": "other",
+    })
+    node._run_task("stop_listening", {})
+    stale = node._run_task("start_listening", {
+        "expected_interaction_id": "interaction-test",
+    })
+    fresh = node._run_task("start_listening", {})
+
+    assert current["interaction_id"] == "interaction-test"
+    assert not mismatch["ok"]
+    assert not stale["ok"]
+    assert fresh["ok"]
+    assert fresh["interaction_id"] != "interaction-test"
+
+
+def test_get_interaction_state_reports_hold_lease(monkeypatch: Any) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    monotonic_clock = [50.0]
+    monkeypatch.setattr(
+        node_module.time,
+        "monotonic",
+        lambda: monotonic_clock[0],
+    )
+    node._run_task("hold_interaction", {
+        "interaction_id": "interaction-test",
+        "hold_token": "token",
+        "lease_sec": 6.0,
+        "reason": "wake_target_approach",
+    })
+
+    result = node._run_task("get_interaction_state", {})
+
+    assert result["interaction_id"] == "interaction-test"
+    assert result["hold_active"]
+    assert result["holds"][0]["hold_token"] == "token"
+    assert result["holds"][0]["expires_in_sec"] == 6.0
+
+
+def test_direct_mock_uses_one_id_until_idle_timeout(monkeypatch: Any) -> None:
+    provider = MockEventProvider({
+        "enabled": True,
+        "event_interval_sec": 0.1,
+        "seed": 1,
+    })
+    provider.start()
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._providers = {"mock_event": provider, "audio": _FakeAudio()}
+    node._interaction_active = False
+    node._interaction_id = ""
+    node._state_machine = VoiceInteractionStateMachine()
+    wall_clock = [100.0]
+    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+
+    provider._next = 0.0
+    node._poll()
+    interaction_id = node._interaction_id
+    provider._next = 0.0
+    node._poll()
+
+    assert interaction_id
+    assert node.published[0]["event_type"] == "EVT_VOICE_CALL_NAME"
+    assert node.published[0]["interaction_id"] == interaction_id
+    assert node.published[1]["interaction_id"] == interaction_id
+
+    wall_clock[0] = 111.0
+    node._poll()
+
+    assert node.published[-1]["event_type"] == "EVT_STATE_CHANGED"
+    assert node.published[-1]["interaction_id"] == interaction_id
+    assert not node._interaction_active
+
+    wall_clock[0] = 112.0
+    provider._next = 0.0
+    node._poll()
+    second_interaction_id = node._interaction_id
+
+    assert second_interaction_id
+    assert second_interaction_id != interaction_id
+    assert node.published[-1]["event_type"] == "EVT_VOICE_CALL_NAME"
+    assert node.published[-1]["interaction_id"] == second_interaction_id
+
+
+def test_direct_mock_non_executable_event_returns_to_attention(
+    monkeypatch: Any,
+) -> None:
+    provider = MockEventProvider({"enabled": True})
+    event = provider.build_event("EVT_VOICE_NEUTRAL")
+    provider.poll_event = lambda: event  # type: ignore[method-assign]
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._providers = {"mock_event": provider, "audio": _FakeAudio()}
+    monkeypatch.setattr(node_module.time, "time", lambda: 100.0)
+
+    node._poll_direct_mock(provider)
+    state = node._run_task("get_interaction_state", {})
+
+    assert not event["should_trigger_behavior_tree"]
+    assert node.published[-1]["state"] == "attention"
+    assert node.published[-1]["previous_state"] == "interaction"
+    assert state["state"] == node.published[-1]["state"]
+
+
+def test_xfyun_wakeup_score_is_normalized_and_raw_score_is_preserved() -> None:
+    provider = WakeupXFYunSerialProvider({"wake_score_scale": 1000.0})
+    result = provider._parse_event({
+        "content": {
+            "eventType": 4,
+            "info": (
+                '{"ivw":{"keyword":"ni2 hao3 wang4 cai2",'
+                '"score":907.0,"angle":100.0}}'
+            ),
+        },
+    })
+
+    assert result is not None
+    assert result["wake_confidence"] == 0.907
+    assert result["wake_score_raw"] == 907.0
+    assert result["wake_angle"] == 100.0
+    assert result["header"]["frame_id"] == "microphone_array"
 
 
 def test_real_audio_capture_can_be_cancelled_without_stale_result() -> None:
