@@ -128,7 +128,7 @@ Mock Provider，因此真机用例必须确认 `providers` 中没有意外的 `M
 | 字段 | 默认值 | 含义 |
 |---|---:|---|
 | `level` | `INFO` | `INFO` 保留测试证据；`DEBUG` 增加轮询、VAD 和 Provider 细节 |
-| `dir` | `log` | 文件输出目录 |
+| `dir` | `../log` | 相对于当前 YAML 文件目录解析后的文件输出目录 |
 | `console` | `true` | 同时输出到终端 |
 | `file` | `true` | 写入独立进程日志文件 |
 | `event_trace` | `true` | 输出固定格式的测试追踪记录 |
@@ -167,21 +167,123 @@ ros2 launch marsdog_voice_interaction voice.launch.py \
 | `service_complete` | VoiceTask 返回 | `task_id/task_type/result/latency_ms/task_result` | Service 成败与耗时 |
 | `interaction_hold` | 租约申请、续租、释放或到期 | `operation/result/hold_token/reason` | 验证保持租约生命周期 |
 | `enrollment_publish` | 发布注册进度 | `result/speaker_id/latency_ms` | 声纹注册阶段结果 |
-| `speaker_api_upload` | API 上传处理结束 | `result/speaker_name/audio_valid/has_effective_speech/source_duration_ms/speech_duration_ms/segment_count/latency_ms` | 判断文件校验、VAD 截取、声纹提取和落盘结果 |
+| `speaker_api_upload` | 上传文件进入声纹业务处理后结束 | `result/speaker_name/audio_valid/has_effective_speech/source_duration_ms/speech_duration_ms/segment_count/latency_ms` | 判断 WAV 内容解析、VAD 截取、声纹提取和落盘结果；不代表完整 HTTP 请求耗时 |
 | `speaker_management` | 查询、改名或删除 | `operation/result/speaker_name/speaker_count/latency_ms` | 复核声纹管理和运行时索引同步 |
 | `interaction_end` | 会话结束 | `reason/interaction_id/state` | 确认超时或手动停止 |
 
-`stage_complete.stage` 当前包括：
+### 4.1 通用字段
 
-- `vad_capture`：`latency_ms` 是从启动本句收音到结果可取的墙钟耗时；
-  `audio_duration_ms` 是结果音频长度，两者不是同一个指标。
-- `kws`：从本句开始收音到命令检出的耗时。
-- `asr`：一次 `transcribe()` 调用耗时；`result=empty` 表示没有有效文本。
-- `speaker`：一次声纹检索调用耗时；结果为 `matched/unknown/error`。
-- `intent`：规则/RKLLM 意图解析耗时，并记录最终 `event_type` 和来源。
+| 字段 | 类型 | 含义和判定方法 |
+|---|---|---|
+| `record` | string | 追踪记录类型，是筛选日志的第一关键字。 |
+| `result` | string | 本次记录的结果。值由不同 `record/stage` 定义，不能跨阶段混用。 |
+| `interaction_id` | string | 会话关联 ID；同一轮唤醒到待机期间保持不变。 |
+| `utterance_id` | string | 单句关联 ID；同一句的 VAD、KWS、ASR、声纹、意图和事件应一致。 |
+| `latency_ms` | number | 当前记录定义范围内的墙钟耗时，单位毫秒；不同记录的起止点见下表。 |
+| `error` | string | 失败原因。成功时通常为空并被日志层省略。 |
+| `payload` | object | 完整业务对象；用于复核 Topic 或注册结果的原始字段。 |
 
-`event_publish.latency_ms` 是事件自身携带的处理延迟，不等同于整句端到端耗时；
-端到端处理看 `utterance_complete.latency_ms`。所有耗时单位均为毫秒。
+`VOICE_TRACE` 为减少日志长度，会省略值等于空字符串的可选字段。因此顶层没有
+`error/asr_text/speaker_id` 不一定表示日志结构错误，应先结合 `record/result` 判断。
+`event_publish.payload` 始终包含完整的 v1 音频事件模板，即使某些字段使用空字符串、
+`0.0`、`false` 或空数组作为默认值。
+
+日志行前缀中的 `YYYY-MM-DD HH:MM:SS` 是事件写日志的墙钟时间，用于跨记录计算时序；
+JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag 和下游事件对齐。
+
+### 4.2 `runtime_start` 字段
+
+| 字段 | 类型 | 含义和判定方法 |
+|---|---|---|
+| `result` | string | 当前为 `ready`，表示节点初始化流程结束；不代表每个 Provider 都可用。 |
+| `runtime_mode` | string | `production`、`mock_event` 或 `mock_pipeline`。 |
+| `config_path` | string | 本次节点实际读取的配置文件参数。 |
+| `log_level` / `log_file` | string | 实际日志级别和本进程日志文件路径。 |
+| `audio_topic` / `enrollment_topic` / `service` | string | 实际发布 Topic 和 VoiceTask Service 名称。 |
+| `idle_timeout_sec` | number | 最后一次有效语音后回到待机的超时秒数。 |
+| `providers` | object | 每个 Provider 的 `class/available`；正式测试要求真实 Provider 可用且没有意外 Mock。 |
+| `speaker_api` | object | `enabled/ready/address/docs`；启动失败时包含 `error`。 |
+
+### 4.3 `stage_complete` 字段和耗时边界
+
+| `stage` | `result` 可能值 | 阶段专属字段 | `latency_ms` 的准确范围 |
+|---|---|---|---|
+| `vad_capture` | `voice/silence` | `audio_duration_ms` | 从分配本句并启动收音，到 VAD 结果被节点取出；包含等待说话、有效语音、句尾静音和线程轮询，不是纯 VAD 模型推理耗时。 |
+| `kws` | `detected` | `event_type` | 从本句开始收音到 KWS 首次命中并取出事件；不是单个 KWS 模型调用耗时。未命中时没有该记录。 |
+| `asr` | `ok/empty/error` | `language/text_length` | 一次 `transcribe()` 调用的总耗时。`ok` 仅表示得到非空文本，不表示文本一定正确。 |
+| `speaker` | `matched/unknown/error` | `speaker_id/speaker_confidence` | 声纹 embedding 提取、已注册人员检索和阈值判定的总耗时。 |
+| `intent` | `parsed/fallback_unknown` | `event_type/intent_source` | `_parse_intent()` 总耗时；可能只包含 RKLLM，也可能包含 RKLLM 未返回结果后再执行规则的累计时间。 |
+
+补充判定规则：
+
+- `audio_duration_ms` 是交给 ASR/声纹的结果音频长度，不是 VAD 阶段耗时。
+- `intent_source` 常见值为 `rkllm/rule/fallback`；KWS 快速事件的来源在
+  `event_publish.intent_source=kws` 中体现。
+- 当前 `speaker_confidence` **不是真实余弦相似度**：匹配成功通常为配置阈值加
+  `0.3`，未匹配为 `0.0`。它只能辅助判断 `matched/unknown`，不能用于声纹阈值标定、
+  距离对比或准确率曲线。声纹是否通过以 `result`、`speaker_id` 和身份事件为准。
+
+### 4.4 `event_publish` 顶层字段
+
+| 字段 | 类型 | 含义和判定方法 |
+|---|---|---|
+| `topic` | string | 实际发布目标，正常为 `/perception/audio_event`。 |
+| `event_type` | string | 本次发布的事件类型，是下游路由的主要判定字段。 |
+| `interaction_id` / `utterance_id` | string | 会话和单句关联 ID；会话级事件允许 `utterance_id` 为空。 |
+| `state` / `previous_state` / `state_reason` | string | 发布后的状态、前一状态及状态变化原因。 |
+| `wake_word` | string | 命中的唤醒词。 |
+| `wake_angle` | number | 唤醒方位角，单位度；Voice 不应用安装偏移。 |
+| `wake_confidence` / `wake_score_raw` | number | 归一化唤醒置信度和硬件原始分数；原始分数只在完整 `payload` 中保证可见。 |
+| `asr_text` / `language` | string | 清洗后的 ASR 文本和语言标识。 |
+| `speaker_id` / `speaker_confidence` | string / number | 已知人员名称或 `unknown`，以及当前实现的匹配指示值。 |
+| `emotion` / `action` / `control` | string | 正式意图三元组。命令类允许 `emotion=NONE`。 |
+| `command_id` / `intent_category` / `intent_source` | string | 命令标识、分类类别及意图来源。 |
+| `intent_confidence` | number | 意图 Provider 给出的置信度；不能与声纹或唤醒置信度混用。 |
+| `slots` | array | `[{"key":"...","value":"..."}]`；物体名使用 `object_name`。 |
+| `is_executable` | bool | 当前事件是否表示可执行意图；完整值在 `payload` 中。 |
+| `should_trigger_behavior_tree` | bool | 是否应进入行为树；Voice 发布成功不等于动作已经完成。 |
+| `latency_ms` | number | 事件业务对象自身携带的延迟字段，不代表整句处理耗时。 |
+| `payload` | object | 实际发布到 ROS2 Topic 的完整 v1 JSON，是事件字段的权威日志副本。 |
+
+完整 `payload` 还包含 `schema_version`、`header`、`response_text`、`danger_type`、
+`danger_angle` 等通用字段。其字段类型和枚举以
+[ROS2_CONTRACT.md](ROS2_CONTRACT.md) 为准。
+
+### 4.5 其他记录的专属字段
+
+| `record` | 字段 | 含义和判定方法 |
+|---|---|---|
+| `interaction_start` | `source/state` | 会话来源和进入的状态；`source` 常见为 `wakeup/service`。 |
+| `utterance_complete` | `result/event_type/latency_ms` | `result=published/suppressed_duplicate/empty_asr`；耗时从 VAD 已返回后进入语音处理开始，到最终意图处理结束，包含 ASR、声纹、意图和事件处理，但不包含收音/VAD。 |
+| `service_complete` | `service/task_id/task_type/task_result/error/latency_ms` | 一次 VoiceTask 回调总耗时和完整返回对象。`result=success/failure`。 |
+| `interaction_hold` | `operation/hold_token/reason/lease_sec/idle_timer_reset` | `operation=acquire/renew/release/expire`；不同操作只输出适用字段。 |
+| `enrollment_publish` | `topic/speaker_id/payload/latency_ms` | 一次录音注册样本的 embedding、进度处理和发布耗时；最终样本还包含落盘及运行时同步。`result=progress/complete`。 |
+| `speaker_api_upload` | `speaker_name/shots/source_duration_ms/speech_duration_ms/segment_count/audio_valid/has_effective_speech/error/latency_ms` | FastAPI 已读完文件后，业务 Handler 内的 WAV 内容解析、VAD、embedding、落盘和运行时同步总耗时；不包含 multipart 解析、网络上传、文件读取、HTTP 响应序列化。当前没有各子步骤的独立耗时。 |
+| `speaker_management` | `operation/speaker_name/previous_name/speaker_count/error/latency_ms` | `operation=list/rename/delete`；字段随操作变化。`rename/delete` 成功时同步调用已经完成，但运行时识别结果仍需实际验证；`list` 不触发同步。 |
+| `interaction_end` | `reason/state` | 会话结束原因和最终状态；`reason` 常见为 `interaction_timeout/stop_listening`。 |
+
+### 4.6 总耗时的正确计算
+
+`event_publish.latency_ms` 是事件自身携带的延迟；`utterance_complete.latency_ms` 是
+**VAD 返回后的处理总耗时**，两者都不是从开始收音到最终结果的完整端到端耗时。
+当前真正端到端耗时需要在同一 `utterance_id` 下，用日志行墙钟时间计算：
+
+```text
+端到端耗时 = utterance_complete 日志时间 - stage_start(vad_capture) 日志时间
+```
+
+若只统计模型/规则阶段，应分别使用同一句的 `stage_complete`：
+
+```text
+ASR 处理耗时     = stage_complete(stage=asr).latency_ms
+声纹处理耗时    = stage_complete(stage=speaker).latency_ms
+意图处理耗时    = stage_complete(stage=intent).latency_ms
+VAD 收音阶段耗时 = stage_complete(stage=vad_capture).latency_ms
+KWS 首次命中耗时 = stage_complete(stage=kws).latency_ms
+```
+
+所有 `latency_ms` 单位均为毫秒。当前日志没有单独输出模型启动加载耗时、纯 VAD
+推理耗时、RKLLM 与规则各自的分项耗时，也没有上传音频各子步骤的分项耗时。
 
 示例：
 
@@ -210,17 +312,84 @@ ros2 topic info -v /perception/audio_event
 
 ### 5.2 启动节点并保存日志
 
-以 Event Mock 为例：
+测试人员应运行已构建、已安装的 ROS2 包。构建和安装命令由发布说明或 `README.md`
+维护，本文不重复开发构建流程。每次新开终端先执行：
 
 ```bash
-mkdir -p /tmp/marsdog_voice_qa/VOICE-MOCK-001
-ros2 launch marsdog_voice_interaction voice.launch.py \
-  config_path:=/home/cat/xbb/MarsDogVoiceInteraction/config/voice.mock.yaml \
-  log_dir:=/tmp/marsdog_voice_qa/VOICE-MOCK-001
+source /opt/ros/humble/setup.bash
+source /home/cat/ros2_ws/install/setup.bash
+VOICE_SHARE="$(ros2 pkg prefix --share marsdog_voice_interaction)"
 ```
 
-真机改用 `voice.yaml`；Pipeline Mock 改用 `voice.pipeline.mock.yaml`。首先检查
-`runtime_start`，模式或 Provider 不符合预期时立即停止，不继续出具功能结论。
+`VOICE_SHARE` 必须指向本次待测版本的安装目录。以下三个命令分别用于不同测试范围，
+一次只启动其中一个。
+
+#### 正式链路（真机、硬件和模型验收）
+
+```bash
+QA_CASE_DIR=/tmp/marsdog_voice_qa/VOICE-PROD-001
+mkdir -p "$QA_CASE_DIR"
+ros2 launch marsdog_voice_interaction voice.launch.py \
+  config_path:="$VOICE_SHARE/config/voice.yaml" \
+  log_level:=INFO \
+  log_dir:="$QA_CASE_DIR"
+```
+
+#### Event Mock（只验证事件协议和下游消费）
+
+```bash
+QA_CASE_DIR=/tmp/marsdog_voice_qa/VOICE-EVENT-MOCK-001
+mkdir -p "$QA_CASE_DIR"
+ros2 launch marsdog_voice_interaction voice.launch.py \
+  config_path:="$VOICE_SHARE/config/voice.mock.yaml" \
+  log_level:=INFO \
+  log_dir:="$QA_CASE_DIR"
+```
+
+#### Pipeline Mock（验证节点编排和阶段耗时）
+
+```bash
+QA_CASE_DIR=/tmp/marsdog_voice_qa/VOICE-PIPELINE-MOCK-001
+mkdir -p "$QA_CASE_DIR"
+ros2 launch marsdog_voice_interaction voice.launch.py \
+  config_path:="$VOICE_SHARE/config/voice.pipeline.mock.yaml" \
+  log_level:=INFO \
+  log_dir:="$QA_CASE_DIR"
+```
+
+启动命令会占用当前终端并持续运行；测试结束使用 `Ctrl+C` 正常停止，不要直接关闭
+电源或杀死进程。日志仍保存在对应的 `QA_CASE_DIR`。
+
+#### 启动成功判定
+
+另开终端并加载同一 ROS2 环境，然后执行：
+
+```bash
+ros2 node list | rg '^/voice_interaction$'
+ros2 topic info -v /perception/audio_event
+ros2 service type /perception/voice/task
+```
+
+同时在本次日志目录中找到唯一一条 `record=runtime_start`，并按模式检查：
+
+| 启动模式 | `runtime_start.runtime_mode` | 必须检查的内容 |
+|---|---|---|
+| 正式链路 | `production` | 所需 Provider 的 `available=true`，且 `speaker_api.enabled=true/ready=true` |
+| Event Mock | `mock_event` | `mock_event.class=MockEventProvider` 且 `available=true`，`speaker_api.enabled=false` |
+| Pipeline Mock | `mock_pipeline` | Wakeup、Audio、ASR、Speaker 为对应的 `Mock*Provider` 且可用，规则意图 Provider 可用；KWS 被配置为禁用 |
+
+模式、配置路径、Provider 或 API 状态不符合预期时，应停止测试并记为环境/启动失败，
+不能继续出具功能 PASS。出现多个 `/voice_interaction` 节点时也必须先清理重复进程。
+
+正式链路还应检查声纹 API；本机执行：
+
+```bash
+curl -sS http://127.0.0.1:8091/health
+```
+
+预期返回 `{"ok":true,"service":"marsdog-voice-speaker-api"}`。局域网测试机将
+`127.0.0.1` 替换为机器狗 IP；Event Mock 和 Pipeline Mock 默认不启动该 API，不能
+用 `/health` 失败判定这两种模式启动失败。
 
 ### 5.3 另开终端保存接口原文
 
@@ -248,6 +417,30 @@ curl -sS -X POST http://127.0.0.1:8091/api/v1/speakers \
 判定成功时必须同时满足：HTTP `201`、`ok=true`、`speech_duration_ms>0`、返回的
 `audio_path/embedding_path` 存在，且落盘 WAV 仅包含 VAD 保留的有效语音。不能仅以
 接口收到文件作为声纹注册成功。
+
+声纹接口需要把 HTTP 层和业务层分开解析：
+
+| 证据 | 能证明的内容 | 不能证明的内容 |
+|---|---|---|
+| Uvicorn access log | 客户端地址、HTTP 方法、路径和最终状态码 | VAD、embedding 和落盘是否正确 |
+| HTTP 响应 JSON | 成功时的 `request_id/ok/name/shots/path/duration`，失败时的 `detail` | ROS 运行时声纹索引是否能实际命中 |
+| `speaker_api_upload` | Handler 内 WAV 解析、VAD、embedding、落盘及同步调用结果 | multipart/网络上传耗时，以及 FastAPI 在进入 Handler 前拒绝的请求 |
+| `speaker_management` | GET/PATCH/DELETE 业务操作结果 | FastAPI 路径或请求体校验阶段直接拒绝的请求 |
+
+以下情况由 FastAPI 在调用声纹业务 Handler 前直接返回，因此通常只有 access log 和
+HTTP 响应，**没有** `speaker_api_upload/speaker_management`：
+
+- 缺少 `name` 或 `audio`、字段长度不合法、PATCH 请求体结构不合法：HTTP `422`；
+- 空上传文件：HTTP `400`；
+- 文件超过配置大小：HTTP `413`；
+- 文件名扩展名不是 `.wav`：HTTP `415`；
+- 人员路径参数本身不符合接口约束：HTTP `422`。
+
+进入业务 Handler 后发生的 WAV 内容损坏、VAD 无语音、声纹提取失败等，才会同时
+看到 `speaker_api_upload result=failure`。FastAPI 的失败响应采用
+`{"detail":"错误原因"}`，不是成功响应中的 `ok/error` 结构。当前 HTTP 成功响应的
+`request_id` 没有写入 `VOICE_TRACE`，只能使用请求时间、客户端地址、人员名称和
+Uvicorn access log 关联；不得声称已经通过 `request_id` 完成日志关联。
 
 同时执行以下异常和管理用例：
 
@@ -284,7 +477,7 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 | VAD | `stage_complete stage=vad_capture result=voice` | `latency_ms`、`audio_duration_ms` |
 | KWS | 发布对应 `EVT_VOICE_COMMAND_*`，来源为 KWS | `stage_complete stage=kws latency_ms` |
 | ASR | 发布 `speech`，`asr_text` 与实说内容对照 | `stage_complete stage=asr latency_ms` |
-| 声纹识别 | 发布 MASTER 或 STRANGER 身份事件 | `stage_complete stage=speaker latency_ms/confidence` |
+| 声纹识别 | 发布 MASTER 或 STRANGER 身份事件 | `stage_complete stage=speaker latency_ms/speaker_confidence`；当前 confidence 仅为匹配指示值 |
 | 意图 | 事件的 `action/control/event_type` 符合契约 | `stage_complete stage=intent latency_ms/intent_source` |
 | KWS 去重 | 相同最终事件不再发布，`utterance_complete result=suppressed_duplicate` | 同一 `utterance_id` 内检查 |
 | 静默结束 | 发布匹配 ID 的 `EVT_STATE_CHANGED state=idle` | `interaction_end reason=interaction_timeout`，约 10 秒 |
@@ -324,15 +517,15 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 关联 interaction_id：
 关联 utterance_id：
 关键事件时间线：
-阶段耗时：VAD / KWS / ASR / Speaker / Intent / utterance total
+阶段耗时：VAD / KWS / ASR / Speaker / Intent / VAD 后处理总耗时 / 计算得到的端到端耗时
 结果：PASS / FAIL / N/A-MISSING_ACCEPTED / BLOCKED-MANIFEST / KNOWN-GAP
 最早异常时间和错误：
 附件：节点日志、Topic 原文、Service 返回、rosbag、必要时视频
 ```
 
 批量性能报告至少给出样本量、成功率、P50、P95、最大值，并区分
-`vad_capture`、`kws`、`asr`、`speaker`、`intent` 和整句处理，禁止把不同定义的
-`latency_ms` 混在同一列。
+`vad_capture`、`kws`、`asr`、`speaker`、`intent`、VAD 后处理总耗时和计算得到的
+端到端耗时，禁止把不同定义的 `latency_ms` 混在同一列。
 
 ## 8. 交付给测试团队的文件
 

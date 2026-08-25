@@ -27,7 +27,7 @@ topics:
   voice_task: /perception/voice/task
 
 interaction:
-  idle_timeout_sec: 10.0
+  idle_timeout_sec: 30.0
   hold_max_lease_sec: 30.0
 
 providers:
