@@ -15,6 +15,7 @@ import yaml
 _CONFIG_PATH_FIELDS = (
     ("logging", "dir"),
     ("storage", "root"),
+    ("command_lexicon", "catalog"),
     ("providers", "audio", "config", "vad_model"),
     ("providers", "kws", "config", "model_dir"),
     ("providers", "kws", "config", "keywords_file"),

@@ -4,7 +4,11 @@
 
 ## 1. 本项目负责什么
 
-语音节点负责唤醒、录音/VAD、流式 KWS、ASR、声纹识别、意图分类以及一次语音会话的生命周期。它只发布“听见了什么”和“会话状态”，不订阅视觉数据，也不直接发布 `/cmd_vel` 或调用动作系统。
+语音节点负责唤醒、录音/VAD、流式 KWS、ASR、声纹识别、完整产品词库匹配、
+非词库文本的意图分类，以及一次语音会话的生命周期。当前词库覆盖 116 条
+源数据，归并为 81 个路由组和 155 条可运行中文短语；其中 19 组是核心指令子集。
+它只发布“听见了什么”和
+“会话状态”，不订阅视觉数据，也不直接发布 `/cmd_vel` 或调用动作系统。
 
 - 主节点：`voice_interaction`
 - 入口：`marsdog-voice-interaction`
@@ -30,7 +34,7 @@
 
 - 唤醒成功后创建 `interaction_id`。
 - 从 `EVT_VOICE_CALL_NAME` 到最终 `EVT_STATE_CHANGED(state=idle)` 必须保持同一个 `interaction_id`。
-- 每句话使用新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终意图共享该 ID。
+- 每句话使用新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享该 ID。
 
 ### 行为树直接消费的事件
 
@@ -41,6 +45,33 @@ EVT_VOICE_COMMAND_SHAKE_HAND / HIGH_FIVE / ROLL_OVER / SPIN / RETURN
 EVT_VOICE_COMMAND_DROP / PLAY_DEAD / BRING / FETCH / STOP
 EVT_STATE_CHANGED
 ```
+
+词库命中结果仍发布到 `/perception/audio_event`，进入下游事件路由/行为树，
+不由动作系统直接消费。语音项目可以保证事件和 `action_name`正确发布，
+但不能代替行为树的事件白名单、Behavior 映射和动作项目的 `ACT_*` 实现。
+
+当前行为树源码已有 11 个核心指令事件映射：
+
+```text
+COME / FOLLOW / SIT / LIE_DOWN / PLAY_DEAD / STAND_UP
+SHAKE_HAND / HIGH_FIVE / SPIN / ROLL_OVER / DROP
+```
+
+另外，`EVT_VOICE_CALL_NAME` 已有下游路由；`EVT_VOICE_PRAISE` 和
+`EVT_VOICE_SCOLD` 进入现有情绪计算链路，使用 `control=NONE`、
+`should_trigger_behavior_tree=false`，不应强行转成直接动作。因此，81 个路由组中
+当前可确认 14 个已有对应的下游入口（11 个核心动作 + 呼名 + 夸赞 + 责备）；
+其余 67 个路由组在 Voice 中已可发布，但仍需 Tree/Action 按产品动作表逐项对齐。
+其中原 19 组核心指令里尚未补齐的 8 组是：
+
+```text
+WALK / GO_OUT / GO_HOME / APPROACH / BACK_UP
+STAND_STILL / HOLD_POSITION / QUIET
+```
+
+在行为树完成映射前，所有未映射组只能验收到“Voice 正确发布 Topic 事件”，不能据此
+判定动作已经执行。特别地，`HOLD_POSITION` 是保持当前姿态，不能映射成全局急停；
+`QUIET` 是停止发声，也不能映射成底盘急停。
 
 `EVT_VOICE_COMMAND_FOLLOW` 必须携带当前 `interaction_id`。行为树收到后把动作系统切到持续 `follow_owner` 模式；该模式一直保持到语音节点发布匹配会话的 `EVT_STATE_CHANGED(state="idle")`。
 
@@ -56,9 +87,21 @@ EVT_STATE_CHANGED
 租约不会屏蔽录音、流式 KWS、STOP 或 `stop_listening`，会话终止时全部租约自动
 清除。可用 `get_interaction_state` 查询当前 ID 和有效租约。
 
-### KWS 去重
+### 确定性词库、KWS 和去重
 
-KWS 可在 VAD 结束前发布命令。最终 ASR 意图如果与同一 `utterance_id` 已发布的 KWS 事件相同，不再重复发布；不同命令仍发布。下游仍应按 `interaction_id + utterance_id + event_type` 做幂等保护。
+ASR 得到文本后，节点先使用 `config/command_catalog.yaml` 做规范化后的整句精确匹配。
+目录以产品表的 116 条数据行为覆盖基线，将斜杠别名展开为 155 条中文短语，并归并成
+81 个稳定路由组。命中时直接发布该组配置的 `event_type`，并跳过 RKLLM/
+规则意图；未命中才进入意图识别。词库中的“回来”明确归为 `COME`，不再归为旧版
+`RETURN`。
+
+产品表的 138 条英文仅作参考元数据，当前不参与确定性匹配。原因是表内存在
+`Good dog` 这类跨分类重复表达，在产品给出唯一归属前不能盲目直发。
+
+KWS 可在 VAD 结束前提前发布命令。最终词库事件与同一句已发布 KWS 事件相同时不再
+重复发布；二者冲突时保留先发的 KWS 事件、抑制后续冲突事件，并输出
+`command_conflict` 日志。下游仍应按
+`interaction_id + utterance_id + event_type` 做幂等保护。
 
 ## 4. 启动与验证
 
@@ -104,6 +147,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 | `providers.kws` | 流式关键词命令 |
 | `providers.asr` | Paraformer ASR |
 | `providers.speaker` | 声纹模型和阈值 |
+| `command_lexicon` | 完整产品词库（116 条源数据/81 个路由组/19 组核心子集）开关和目录路径 |
 | `providers.intent_*` | RKLLM 优先、规则回退 |
 
 配置文件中的文件和目录均使用相对于 YAML 所在目录的路径：模型默认通过
@@ -125,7 +169,9 @@ Provider，不能只按模式名称判断真机或 Mock。
 - FOLLOW 事件只发布一次有效指令，且会话结束必有 idle 状态事件。
 - `control in {DO,CANCEL}` 时 `should_trigger_behavior_tree=true`。
 - Topic 仍为 RELIABLE depth 10，与行为树订阅匹配。
-- 新增命令时同时更新 `voice_event_types`、意图映射、`ROS2_CONTRACT.md`，并通知行为树负责人增加白名单与 Behavior 映射。
+- 新增或修改确定性指令时，同时更新 `command_catalog.yaml`、`voice_event_types`、
+  契约和测试，并通知行为树负责人增加事件白名单与 Behavior 映射、动作负责人确认
+  Behavior 到 `ACT_*` 的映射；不能只改 Voice 后就宣称端到端可执行。
 
 ## 7. 明确不属于本项目的问题
 

@@ -1,0 +1,121 @@
+# 产品交互词库的确定性事件路由。
+# 附件共 116 条数据行（含表头共 117 行）。中文短语参与运行时精确匹配；
+# 英文列仅保留为参考元数据，避免跨类别歧义直接触发。
+version: "2026-08-25-full"
+source_name: "产品交互词库"
+source_row_count: 116
+
+commands:
+  - {command_key: WALK, command_id: CMD_WALK, event_type: EVT_VOICE_COMMAND_WALK, control: DO, core: true, source_rows: [1], phrases: ["走", "去"], reference_phrases_en: ["Walk", "Go"], behavior: "走开到随机点位", action_name: ACT_WALK}
+  - {command_key: COME, command_id: CMD_COME_HERE, event_type: EVT_VOICE_COMMAND_COME, control: DO, core: true, source_rows: [2], phrases: ["过来", "来", "回来", "来这", "到我这儿来"], reference_phrases_en: ["Come here"], behavior: "从当前位置移动到主人身边", action_name: ACT_COME}
+  - {command_key: FOLLOW, command_id: CMD_FOLLOW, event_type: EVT_VOICE_COMMAND_FOLLOW, control: DO, core: true, source_rows: [3], phrases: ["跟着我", "跟我走"], reference_phrases_en: ["Follow me"], behavior: "原地旋转一圈后开启主人跟随", action_name: ACT_GO_OUT_TO_PLAY}
+  - {command_key: GO_OUT, command_id: CMD_GO_OUT, event_type: EVT_VOICE_COMMAND_GO_OUT, control: DO, core: true, source_rows: [4], phrases: ["出去玩", "出去溜溜"], reference_phrases_en: ["Go out to play"]}
+  - {command_key: GO_HOME, command_id: CMD_GO_HOME, event_type: EVT_VOICE_COMMAND_GO_HOME, control: DO, core: true, source_rows: [5], phrases: ["回家"], reference_phrases_en: ["Go home"]}
+  - {command_key: APPROACH, command_id: CMD_APPROACH, event_type: EVT_VOICE_COMMAND_APPROACH, control: DO, core: true, source_rows: [6], phrases: ["靠近点"], reference_phrases_en: ["Come closer"], behavior: "贴近主人", action_name: ACT_COME_CLOSER}
+  - {command_key: BACK_UP, command_id: CMD_BACK_UP, event_type: EVT_VOICE_COMMAND_BACK_UP, control: DO, core: true, source_rows: [7], phrases: ["退后"], reference_phrases_en: ["Back up"], behavior: "从当前位置往后退两步", action_name: ACT_BACK_UP}
+  - {command_key: SIT, command_id: CMD_SIT, event_type: EVT_VOICE_COMMAND_SIT, control: DO, core: true, source_rows: [8], phrases: ["坐", "坐下", "蹲下"], reference_phrases_en: ["Sit (down)"], behavior: "原地坐下", action_name: ACT_SIT}
+  - {command_key: LIE_DOWN, command_id: CMD_LIE_DOWN, event_type: EVT_VOICE_COMMAND_LIE_DOWN, control: DO, core: true, source_rows: [9], phrases: ["趴下", "躺下"], reference_phrases_en: ["Lie down"], behavior: "原地趴下", action_name: ACT_LIE_DOWN}
+  - {command_key: PLAY_DEAD, command_id: CMD_DEAD, event_type: EVT_VOICE_COMMAND_PLAY_DEAD, control: DO, core: true, source_rows: [10], phrases: ["biu", "装死"], reference_phrases_en: ["Bang", "Lie still"], behavior: "原地躺地下闭眼装死", action_name: ACT_PLAY_DEAD}
+  - {command_key: STAND_UP, command_id: CMD_STAND_UP, event_type: EVT_VOICE_COMMAND_STAND_UP, control: DO, core: true, source_rows: [11], phrases: ["起来", "站起来"], reference_phrases_en: ["Stand up", "Get up"], behavior: "从趴下到站起来", action_name: ACT_STAND_UP}
+  - {command_key: STAND_STILL, command_id: CMD_STAND_STILL, event_type: EVT_VOICE_COMMAND_STAND_STILL, control: DO, core: true, source_rows: [12], phrases: ["站好", "站着"], reference_phrases_en: ["Stand still"], behavior: "站立保持不动", action_name: ACT_STAND_STILL}
+  - {command_key: SHAKE_HAND, command_id: CMD_HAND, event_type: EVT_VOICE_COMMAND_SHAKE_HAND, control: DO, core: true, source_rows: [13], phrases: ["握手", "握个手", "抬手"], reference_phrases_en: ["Shake (hand)", "Paw"], behavior: "抬任意前肢进行握手", action_name: ACT_SHAKE_HAND}
+  - {command_key: HIGH_FIVE, command_id: CMD_FIVE, event_type: EVT_VOICE_COMMAND_HIGH_FIVE, control: DO, core: true, source_rows: [14], phrases: ["击掌", "击个掌", "拍手"], reference_phrases_en: ["Give me five", "Clap hands"], behavior: "抬起任意前肢拍掌", action_name: ACT_HIGH_FIVE}
+  - {command_key: SPIN, command_id: CMD_SPIN, event_type: EVT_VOICE_COMMAND_SPIN, control: DO, core: true, source_rows: [15], phrases: ["转圈"], reference_phrases_en: ["Turn around", "Circle"], behavior: "原地转圈", action_name: ACT_SPIN}
+  - {command_key: ROLL_OVER, command_id: CMD_ROLL, event_type: EVT_VOICE_COMMAND_ROLL_OVER, control: DO, core: true, source_rows: [16], phrases: ["翻滚"], reference_phrases_en: ["Roll over"], behavior: "原地躺地上翻滚", action_name: ACT_ROLL_OVER}
+  - {command_key: HOLD_POSITION, command_id: CMD_HOLD_POSITION, event_type: EVT_VOICE_COMMAND_HOLD_POSITION, control: DO, core: true, source_rows: [17], phrases: ["别动", "等着", "停", "不准动", "不许动", "老实点", "等等"], reference_phrases_en: ["Don't move"], behavior: "当前姿态保持不动", action_name: ACT_STOP}
+  - {command_key: DROP, command_id: CMD_SPIT, event_type: EVT_VOICE_COMMAND_DROP, control: DO, core: true, source_rows: [18], phrases: ["放下", "松开", "松口", "张嘴"], reference_phrases_en: ["Let go", "Drop it"], behavior: "原地嘴巴张开", action_name: ACT_DROP}
+  - {command_key: QUIET, command_id: CMD_QUIET, event_type: EVT_VOICE_COMMAND_QUIET, control: DO, core: true, source_rows: [19], phrases: ["安静", "闭嘴", "别叫", "不许叫"], reference_phrases_en: ["Quiet"], behavior: "当前姿态停止叫声", action_name: ACT_QUIET}
+
+  - command_key: CALL_NAME
+    command_id: CMD_CALL_NAME
+    event_type: EVT_VOICE_CALL_NAME
+    control: DO
+    core: false
+    source_rows: [20, 21, 22, 23, 24]
+    phrases: ["小狗", "小跟屁虫", "小宝贝", "乖狗狗", "小坏蛋"]
+    reference_phrases_en: ["Pup", "Doggy", "Little shadow", "Little darling", "Good dog", "Little rascal"]
+    behavior: "愉悦-互动式行为随机6选1"
+
+  - command_key: PRAISE
+    command_id: CMD_PRAISE
+    event_type: EVT_VOICE_PRAISE
+    emotion: PRAISE
+    control: NONE
+    core: false
+    source_rows: [25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
+    phrases: ["真棒", "好狗", "真乖", "真聪明", "可爱", "厉害", "太棒了", "好样的", "我爱你", "我喜欢你", "你真有趣", "真有意思"]
+    reference_phrases_en: ["Good job!", "Good dog", "So good", "So smart", "Cute", "Awesome", "Excellent!", "Well done", "I love you", "I like you", "I really like you", "You're so funny", "You crack me up"]
+    behavior: "愉悦、兴奋（都是互动式)行为随机选1"
+
+  - command_key: SCOLD
+    command_id: CMD_SCOLD
+    event_type: EVT_VOICE_SCOLD
+    emotion: REPRIMAND
+    control: NONE
+    core: false
+    source_rows: [35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+    phrases: ["不可以咬", "你怎么不听话", "我要惩罚你咯", "罚你站着", "不准吃饭", "321", "我不跟你玩咯", "我不理你咯", "坏狗狗", "笨狗", "傻狗", "我要生气咯", "臭狗", "我讨厌你"]
+    reference_phrases_en: ["No biting", "Why are you being naughty?", "You're in trouble", "Time out", "You stand there", "Corner time", "No dinner for you", "No food for you", "three, two, one...", "I'm not playing with you anymore", "No talking to you.", "Don't talk to me.", "I'm not talking to you anymore", "Bad dog", "Silly dog", "Goofy", "I'm gonna be angry now", "Stinky dog", "I'dont like you"]
+    behavior: "焦虑、好奇、恐惧(都是互动式）行为随机选1"
+
+  - {command_key: COMFORT_DONT_BE_AFRAID, command_id: CMD_COMFORT_DONT_BE_AFRAID, event_type: EVT_VOICE_COMMAND_COMFORT_DONT_BE_AFRAID, control: DO, core: false, source_rows: [48], phrases: ["不怕不怕"], reference_phrases_en: ["It's okay, don't be scared"], behavior: "停止退缩或警戒，抬头看向主人，身体逐渐放松并缓慢靠近主人", action_name: ACT_COMFORT_DONT_BE_AFRAID}
+  - {command_key: ASK_IF_HURTS, command_id: CMD_ASK_IF_HURTS, event_type: EVT_VOICE_COMMAND_ASK_IF_HURTS, control: DO, core: false, source_rows: [49], phrases: ["疼不疼"], reference_phrases_en: ["Does it hurt?"], behavior: "短暂检查自身状态；正常时保持放松，存在异常时降低活动幅度并表现保护性姿态", action_name: ACT_ASK_IF_HURTS}
+  - {command_key: COMFORT_REASSURE, command_id: CMD_COMFORT_REASSURE, event_type: EVT_VOICE_COMMAND_COMFORT_REASSURE, control: DO, core: false, source_rows: [50], phrases: ["没事没事"], reference_phrases_en: ["It's alright"], behavior: "看向主人，耳朵恢复自然状态，身体放松，轻微摇尾", action_name: ACT_COMFORT_REASSURE}
+  - {command_key: OFFER_HEAD_FOR_PET, command_id: CMD_OFFER_HEAD_FOR_PET, event_type: EVT_VOICE_COMMAND_OFFER_HEAD_FOR_PET, control: DO, core: false, source_rows: [51], phrases: ["摸摸头"], reference_phrases_en: ["Pet your head"], behavior: "主动靠近主人，将头部伸向主人并轻微低头，保持等待抚摸姿态", action_name: ACT_OFFER_HEAD_FOR_PET}
+  - {command_key: SEEK_HUG, command_id: CMD_SEEK_HUG, event_type: EVT_VOICE_COMMAND_SEEK_HUG, control: DO, core: false, source_rows: [52], phrases: ["抱抱"], reference_phrases_en: ["Hug"], behavior: "主动靠近主人，身体贴近主人一侧，保持短暂依偎姿态", action_name: ACT_SEEK_HUG}
+  - {command_key: EAT_MEAL, command_id: CMD_EAT_MEAL, event_type: EVT_VOICE_COMMAND_EAT_MEAL, control: DO, core: false, source_rows: [53], phrases: ["吃饭"], reference_phrases_en: ["Eat (food)", "Dinner time"], behavior: "去指定地点进食", action_name: ACT_EAT_MEAL}
+  - {command_key: EAT_SNACK, command_id: CMD_EAT_SNACK, event_type: EVT_VOICE_COMMAND_EAT_SNACK, control: DO, core: false, source_rows: [54], phrases: ["吃零食"], reference_phrases_en: ["Eat a snack"], behavior: "去指定地点进食", action_name: ACT_EAT_SNACK}
+  - {command_key: EAT_CANNED_FOOD, command_id: CMD_EAT_CANNED_FOOD, event_type: EVT_VOICE_COMMAND_EAT_CANNED_FOOD, control: DO, core: false, source_rows: [55], phrases: ["吃罐罐"], reference_phrases_en: ["Eat canned food"], behavior: "去指定地点进食", action_name: ACT_EAT_CANNED_FOOD}
+  - {command_key: RESPOND_HUNGRY_QUERY, command_id: CMD_RESPOND_HUNGRY_QUERY, event_type: EVT_VOICE_COMMAND_RESPOND_HUNGRY_QUERY, control: DO, core: false, source_rows: [56], phrases: ["肚子饿不饿"], reference_phrases_en: ["Are you hungry?"], behavior: "抬头看向主人并判断当前饥饿状态；饥饿时表现期待并靠近主人/食盆，不饿时保持放松", action_name: ACT_RESPOND_HUNGRY_QUERY}
+  - {command_key: RESPOND_WANT_EAT_QUERY, command_id: CMD_RESPOND_WANT_EAT_QUERY, event_type: EVT_VOICE_COMMAND_RESPOND_WANT_EAT_QUERY, control: DO, core: false, source_rows: [57], phrases: ["想不想吃"], reference_phrases_en: ["Do you want to eat?"], behavior: "看向主人；有进食需求时靠近并轻摇尾巴表现期待，无需求时短暂观察后保持原状态", action_name: ACT_RESPOND_WANT_EAT_QUERY}
+  - {command_key: RESPOND_EATING_QUERY, command_id: CMD_RESPOND_EATING_QUERY, event_type: EVT_VOICE_COMMAND_RESPOND_EATING_QUERY, control: DO, core: false, source_rows: [58], phrases: ["你在吃啥"], reference_phrases_en: ["What are you eating?"], behavior: "若正在进食，短暂抬头看向主人后继续进食；未进食时看向主人并保持观察", action_name: ACT_RESPOND_EATING_QUERY}
+  - {command_key: RESPOND_FOOD_PREFERENCE_QUERY, command_id: CMD_RESPOND_FOOD_PREFERENCE_QUERY, event_type: EVT_VOICE_COMMAND_RESPOND_FOOD_PREFERENCE_QUERY, control: DO, core: false, source_rows: [59], phrases: ["你想吃什么"], reference_phrases_en: ["What do you want to eat?"], behavior: "抬头看向主人并表现期待，随后看向或靠近熟悉的进食区域/食物来源", action_name: ACT_RESPOND_FOOD_PREFERENCE_QUERY}
+
+  - {command_key: TOILET, command_id: CMD_TOILET, event_type: EVT_VOICE_COMMAND_TOILET, control: DO, core: false, source_rows: [60, 61], phrases: ["去尿尿", "去便便"], reference_phrases_en: ["Go potty", "Go pee", "Go poop"], behavior: "触发排泄行为"}
+  - {command_key: CLEAN, command_id: CMD_CLEAN, event_type: EVT_VOICE_COMMAND_CLEAN, control: DO, core: false, source_rows: [62], phrases: ["擦一擦手", "擦一擦脚"], reference_phrases_en: ["Wipe it"], behavior: "触发清洁行为"}
+  - {command_key: SLEEP, command_id: CMD_SLEEP, event_type: EVT_VOICE_COMMAND_SLEEP, control: DO, core: false, source_rows: [63, 64, 65, 66], phrases: ["睡觉", "睡吧", "去睡", "休息"], reference_phrases_en: ["Go to sleep", "Sleep", "Go to bed", "Rest"], behavior: "触发困倦行为"}
+  - {command_key: PLAY, command_id: CMD_PLAY, event_type: EVT_VOICE_COMMAND_PLAY, control: DO, core: false, source_rows: [67, 68, 69, 70, 71, 72, 73], phrases: ["来玩", "开始咯", "抓小狗游戏", "拔河比赛", "谁要玩游戏", "玩不玩", "一起玩"], reference_phrases_en: ["Let's play", "Let's go", "The Catch the doggy game", "Tug-of-war", "Who wants to play?", "Want to play?", "Play together"], behavior: "执行兴奋-互动式随机行为"}
+
+  - {command_key: REFUSE, command_id: CMD_REFUSE, event_type: EVT_VOICE_COMMAND_REFUSE, control: DO, core: false, source_rows: [74], phrases: ["我不要"], reference_phrases_en: ["I don't want to"], behavior: "去随机位置自己玩", action_name: ACT_REFUSE}
+  - {command_key: REFUSE_PLAY, command_id: CMD_REFUSE_PLAY, event_type: EVT_VOICE_COMMAND_REFUSE_PLAY, control: DO, core: false, source_rows: [75], phrases: ["我不玩"], reference_phrases_en: ["I'm not playing"], behavior: "去随机位置自己玩", action_name: ACT_REFUSE_PLAY}
+  - {command_key: FIND_DAD, command_id: CMD_FIND_DAD, event_type: EVT_VOICE_COMMAND_FIND_DAD, control: DO, core: false, source_rows: [76], phrases: ["去找爸爸"], reference_phrases_en: ["To find Dad"], behavior: "视觉定位男主人并去到其身旁，否则不执行", action_name: ACT_FIND_DAD}
+  - {command_key: FIND_MOM, command_id: CMD_FIND_MOM, event_type: EVT_VOICE_COMMAND_FIND_MOM, control: DO, core: false, source_rows: [77], phrases: ["去找妈妈"], reference_phrases_en: ["To find mom"], behavior: "视觉定位女主人并去到其身旁，否则不执行", action_name: ACT_FIND_MOM}
+  - {command_key: DANCE, command_id: CMD_DANCE, event_type: EVT_VOICE_COMMAND_DANCE, control: DO, core: false, source_rows: [78], phrases: ["跳个舞"], reference_phrases_en: ["dance"], behavior: "原地小跳并转圈", action_name: ACT_DANCE}
+  - {command_key: BRING_TO_ME, command_id: CMD_BRING_TO_ME, event_type: EVT_VOICE_COMMAND_BRING_TO_ME, control: DO, core: false, source_rows: [79], phrases: ["拿给我"], reference_phrases_en: ["Bring it to me"], behavior: "结合视觉，若主人没说明所拿物品名称，则将所设置特定物品拿到主人身旁，若没见到特定物品，则不执行\n（若出现多个特定物品，拿置信度较高的）", action_name: ACT_BRING_TO_ME}
+  - {command_key: GIVE_TO_ME, command_id: CMD_GIVE_TO_ME, event_type: EVT_VOICE_COMMAND_GIVE_TO_ME, control: DO, core: false, source_rows: [80], phrases: ["给我"], reference_phrases_en: ["Give it to me"], action_name: ACT_GIVE_TO_ME}
+  - {command_key: GO_GET_IT, command_id: CMD_GO_GET_IT, event_type: EVT_VOICE_COMMAND_GO_GET_IT, control: DO, core: false, source_rows: [81], phrases: ["去拿"], reference_phrases_en: ["Go get it"], action_name: ACT_GO_GET_IT}
+  - {command_key: BRING_IT_BACK, command_id: CMD_BRING_IT_BACK, event_type: EVT_VOICE_COMMAND_BRING_IT_BACK, control: DO, core: false, source_rows: [82], phrases: ["叼回来"], reference_phrases_en: ["Bring it back"], action_name: ACT_BRING_IT_BACK}
+  - {command_key: FETCH_BALL, command_id: CMD_FETCH_BALL, event_type: EVT_VOICE_COMMAND_FETCH_BALL, control: DO, core: false, source_rows: [83], phrases: ["捡球"], reference_phrases_en: ["Fetch the ball"], action_name: ACT_FETCH_BALL}
+  - {command_key: FIND_TOY, command_id: CMD_FIND_TOY, event_type: EVT_VOICE_COMMAND_FIND_TOY, control: DO, core: false, source_rows: [84], phrases: ["找玩具"], reference_phrases_en: ["Find the toy"], action_name: ACT_FIND_TOY}
+  - {command_key: OWNER_GOING_OUT, command_id: CMD_OWNER_GOING_OUT, event_type: EVT_VOICE_COMMAND_OWNER_GOING_OUT, control: DO, core: false, source_rows: [85], phrases: ["我要出门了"], reference_phrases_en: ["I'm going out"], behavior: "立即关注主人，抬头注视并靠近主人，短暂跟随主人移动", action_name: ACT_OWNER_GOING_OUT}
+  - {command_key: STAY_HOME_ALONE, command_id: CMD_STAY_HOME_ALONE, event_type: EVT_VOICE_COMMAND_STAY_HOME_ALONE, control: DO, core: false, source_rows: [86], phrases: ["你自己在家"], reference_phrases_en: ["You stay at home"], behavior: "停止持续跟随，目送主人，随后在原地或休息区域保持等待状态", action_name: ACT_STAY_HOME_ALONE}
+  - {command_key: WAIT_FOR_OWNER_RETURN, command_id: CMD_WAIT_FOR_OWNER_RETURN, event_type: EVT_VOICE_COMMAND_WAIT_FOR_OWNER_RETURN, control: DO, core: false, source_rows: [87], phrases: ["等我回来"], reference_phrases_en: ["Wait for me to come back"], behavior: "注视主人并轻摇尾巴，主人离开后逐渐进入安静等待状态", action_name: ACT_WAIT_FOR_OWNER_RETURN}
+  - {command_key: BYE_BYE, command_id: CMD_BYE_BYE, event_type: EVT_VOICE_COMMAND_BYE_BYE, control: DO, core: false, source_rows: [88], phrases: ["拜拜"], reference_phrases_en: ["Bye-bye"], behavior: "看向主人，轻微摇尾，并短暂跟随或向前靠近后停止", action_name: ACT_BYE_BYE}
+  - {command_key: GOODBYE, command_id: CMD_GOODBYE, event_type: EVT_VOICE_COMMAND_GOODBYE, control: DO, core: false, source_rows: [89], phrases: ["再见"], reference_phrases_en: ["Goodbye"], behavior: "注视主人离开的方向，轻摇尾巴，随后停止跟随并保持等待", action_name: ACT_GOODBYE}
+  - {command_key: OWNER_RETURNED, command_id: CMD_OWNER_RETURNED, event_type: EVT_VOICE_COMMAND_OWNER_RETURNED, control: DO, core: false, source_rows: [90], phrases: ["我回来了"], reference_phrases_en: ["I'm back"], behavior: "快速转向声音来源并主动靠近主人，快速摇尾，可伴随小范围兴奋转圈或跳跃", action_name: ACT_OWNER_RETURNED}
+  - {command_key: ASK_WHAT_DOING, command_id: CMD_ASK_WHAT_DOING, event_type: EVT_VOICE_COMMAND_ASK_WHAT_DOING, control: DO, core: false, source_rows: [91], phrases: ["你在干嘛"], reference_phrases_en: ["What are you doing?"], behavior: "停止或短暂暂停当前行为，转头看向主人；随后根据当前任务决定继续原行为或靠近主人", action_name: ACT_ASK_WHAT_DOING}
+  - {command_key: ASK_WHERE_ARE_YOU, command_id: CMD_ASK_WHERE_ARE_YOU, event_type: EVT_VOICE_COMMAND_ASK_WHERE_ARE_YOU, control: DO, core: false, source_rows: [92], phrases: ["你在哪里"], reference_phrases_en: ["Where are you?"], behavior: "转向声音来源并做出回应；距离主人较远时主动向主人方向靠近", action_name: ACT_ASK_WHERE_ARE_YOU}
+  - {command_key: ASK_WHATS_WRONG, command_id: CMD_ASK_WHATS_WRONG, event_type: EVT_VOICE_COMMAND_ASK_WHATS_WRONG, control: DO, core: false, source_rows: [93], phrases: ["你怎么了"], reference_phrases_en: ["What's wrong?"], behavior: "看向主人，根据当前情绪/状态呈现对应姿态；异常状态时保持当前异常表现供主人观察", action_name: ACT_ASK_WHATS_WRONG}
+  - {command_key: ASK_WHAT_THINKING, command_id: CMD_ASK_WHAT_THINKING, event_type: EVT_VOICE_COMMAND_ASK_WHAT_THINKING, control: DO, core: false, source_rows: [94], phrases: ["你想什么"], reference_phrases_en: ["What are you thinking?"], behavior: "抬头看向主人，轻微歪头并短暂保持注视，表现疑惑或思考感", action_name: ACT_ASK_WHAT_THINKING}
+  - {command_key: ASK_IF_COMFORTABLE, command_id: CMD_ASK_IF_COMFORTABLE, event_type: EVT_VOICE_COMMAND_ASK_IF_COMFORTABLE, control: DO, core: false, source_rows: [95], phrases: ["舒服吗"], reference_phrases_en: ["Are you comfortable?"], behavior: "正常状态下身体放松、轻摇尾巴；存在不适时调整姿态或轻微后退", action_name: ACT_ASK_IF_COMFORTABLE}
+  - {command_key: ASK_IF_LIKES, command_id: CMD_ASK_IF_LIKES, event_type: EVT_VOICE_COMMAND_ASK_IF_LIKES, control: DO, core: false, source_rows: [96], phrases: ["喜欢吗"], reference_phrases_en: ["Do you like it?"], behavior: "愉悦时主动靠近、轻摇或快速摇尾；兴趣较低时短暂观察后恢复原状态", action_name: ACT_ASK_IF_LIKES}
+  - {command_key: ASK_IF_FUN, command_id: CMD_ASK_IF_FUN, event_type: EVT_VOICE_COMMAND_ASK_IF_FUN, control: DO, core: false, source_rows: [97], phrases: ["好玩吗"], reference_phrases_en: ["Is it fun?"], behavior: "兴奋较高时进入邀请玩耍姿态，可轻跳、转圈或前低后高；兴奋时仅注视主人", action_name: ACT_ASK_IF_FUN}
+  - {command_key: ASK_IF_UNDERSTANDS, command_id: CMD_ASK_IF_UNDERSTANDS, event_type: EVT_VOICE_COMMAND_ASK_IF_UNDERSTANDS, control: DO, core: false, source_rows: [98], phrases: ["你听得懂吗"], reference_phrases_en: ["Do you understand?"], behavior: "抬头注视主人并轻微歪头，保持短暂注意状态", action_name: ACT_ASK_IF_UNDERSTANDS}
+  - {command_key: ASK_ABILITIES, command_id: CMD_ASK_ABILITIES, event_type: EVT_VOICE_COMMAND_ASK_ABILITIES, control: DO, core: false, source_rows: [99], phrases: ["你会什么"], reference_phrases_en: ["What can you do?"], behavior: "看向主人，进入等待指令状态，可通过轻微歪头表现期待", action_name: ACT_ASK_ABILITIES}
+  - {command_key: ASK_IF_LEARNED, command_id: CMD_ASK_IF_LEARNED, event_type: EVT_VOICE_COMMAND_ASK_IF_LEARNED, control: DO, core: false, source_rows: [100], phrases: ["你学会了吗"], reference_phrases_en: ["Did you learn?"], behavior: "抬头看主人并进入等待执行状态；若存在对应已学习技能，可准备执行对应技能", action_name: ACT_ASK_IF_LEARNED}
+  - {command_key: EXPRESS_MISS_YOU, command_id: CMD_EXPRESS_MISS_YOU, event_type: EVT_VOICE_COMMAND_EXPRESS_MISS_YOU, control: DO, core: false, source_rows: [101], phrases: ["我好想你"], reference_phrases_en: ["I miss you so much"], behavior: "主动靠近主人，快速摇尾并贴近主人，可伴随轻微蹭靠或兴奋转圈", action_name: ACT_EXPRESS_MISS_YOU}
+  - {command_key: OWNER_TIRED, command_id: CMD_OWNER_TIRED, event_type: EVT_VOICE_COMMAND_OWNER_TIRED, control: DO, core: false, source_rows: [102], phrases: ["我累了", "好累"], reference_phrases_en: ["I'm tired", "So exhausted"], behavior: "缓慢靠近主人，在主人附近坐下或趴下，保持安静陪伴并轻微摇尾", action_name: ACT_OWNER_TIRED}
+  - {command_key: OWNER_ANNOYED, command_id: CMD_OWNER_ANNOYED, event_type: EVT_VOICE_COMMAND_OWNER_ANNOYED, control: DO, core: false, source_rows: [103], phrases: ["我有点烦", "烦死了"], reference_phrases_en: ["I'm a bit upset today"], behavior: "减少兴奋动作，缓慢靠近主人并保持一定距离坐下，安静注视主人", action_name: ACT_OWNER_ANNOYED}
+  - {command_key: OWNER_UNHAPPY, command_id: CMD_OWNER_UNHAPPY, event_type: EVT_VOICE_COMMAND_OWNER_UNHAPPY, control: DO, core: false, source_rows: [104], phrases: ["今天不开心", "不得劲"], reference_phrases_en: ["Not happy"], behavior: "缓慢靠近主人，轻微低头并贴近主人，在旁边保持安静陪伴", action_name: ACT_OWNER_UNHAPPY}
+  - {command_key: OWNER_BAD_DAY, command_id: CMD_OWNER_BAD_DAY, event_type: EVT_VOICE_COMMAND_OWNER_BAD_DAY, control: DO, core: false, source_rows: [105], phrases: ["过得不太顺利"], reference_phrases_en: ["Today didn't go well"], behavior: "主动靠近主人，轻微歪头观察，随后在主人身边坐下或趴下陪伴", action_name: ACT_OWNER_BAD_DAY}
+  - {command_key: OWNER_DEPRESSED, command_id: CMD_OWNER_DEPRESSED, event_type: EVT_VOICE_COMMAND_OWNER_DEPRESSED, control: DO, core: false, source_rows: [106], phrases: ["我要抑郁了", "心情不好"], reference_phrases_en: ["I'm feeling down", "In a bad mood"], behavior: "缓慢靠近并贴近主人，降低自身动作幅度，保持较长时间安静陪伴", action_name: ACT_OWNER_DEPRESSED}
+  - {command_key: OWNER_STRESSED, command_id: CMD_OWNER_STRESSED, event_type: EVT_VOICE_COMMAND_OWNER_STRESSED, control: DO, core: false, source_rows: [107], phrases: ["压力好大"], reference_phrases_en: ["So stressed"], behavior: "缓慢接近主人后保持安静，不主动进行高强度玩耍，通过趴卧/坐姿陪伴主人", action_name: ACT_OWNER_STRESSED}
+  - {command_key: OWNER_LONELY, command_id: CMD_OWNER_LONELY, event_type: EVT_VOICE_COMMAND_OWNER_LONELY, control: DO, core: false, source_rows: [108], phrases: ["我好孤独"], reference_phrases_en: ["I feel so lonely"], behavior: "主动靠近并明显缩短与主人距离，贴靠主人，轻摇尾巴并持续陪伴", action_name: ACT_OWNER_LONELY}
+  - {command_key: OWNER_UNWELL, command_id: CMD_OWNER_UNWELL, event_type: EVT_VOICE_COMMAND_OWNER_UNWELL, control: DO, core: false, source_rows: [109], phrases: ["我头疼", "不舒服"], reference_phrases_en: ["I have a headache", "Don't feel well"], behavior: "降低自身活动和声音输出，缓慢靠近主人并安静坐下或趴下，避免主动发起剧烈互动", action_name: ACT_OWNER_UNWELL}
+  - {command_key: OWNER_HAPPY, command_id: CMD_OWNER_HAPPY, event_type: EVT_VOICE_COMMAND_OWNER_HAPPY, control: DO, core: false, source_rows: [110], phrases: ["我现在心情美美的"], reference_phrases_en: ["I'm in a very good mood right now."], behavior: "立即看向主人，主动靠近，快速摇尾，并在主人附近轻快移动表达开心回应", action_name: ACT_OWNER_HAPPY}
+  - {command_key: OWNER_VERY_HAPPY, command_id: CMD_OWNER_VERY_HAPPY, event_type: EVT_VOICE_COMMAND_OWNER_VERY_HAPPY, control: DO, core: false, source_rows: [111], phrases: ["我今天很开心", "很高兴"], reference_phrases_en: ["I'm very happy today"], behavior: "明显提高互动积极性，快速摇尾，主动靠近主人，可进行小范围转圈或邀请玩耍", action_name: ACT_OWNER_VERY_HAPPY}
+  - {command_key: OWNER_FEELING_GREAT, command_id: CMD_OWNER_FEELING_GREAT, event_type: EVT_VOICE_COMMAND_OWNER_FEELING_GREAT, control: DO, core: false, source_rows: [112], phrases: ["我感觉今天状态特别好"], reference_phrases_en: ["I feel particularly in good form today."], behavior: "抬头看向主人，身体姿态舒展，轻快靠近主人并进行短暂邀请互动姿态", action_name: ACT_OWNER_FEELING_GREAT}
+  - {command_key: OWNER_FEELING_EXCELLENT, command_id: CMD_OWNER_FEELING_EXCELLENT, event_type: EVT_VOICE_COMMAND_OWNER_FEELING_EXCELLENT, control: DO, core: false, source_rows: [113], phrases: ["我今天感觉特别棒"], reference_phrases_en: ["I feel really great today."], behavior: "兴奋地靠近主人，快速摇尾，身体轻微上下跃动或绕主人小范围移动", action_name: ACT_OWNER_FEELING_EXCELLENT}
+  - {command_key: OWNER_RELAXED, command_id: CMD_OWNER_RELAXED, event_type: EVT_VOICE_COMMAND_OWNER_RELAXED, control: DO, core: false, source_rows: [114], phrases: ["我现在浑身都很轻松"], reference_phrases_en: ["I feel completely at ease now."], behavior: "缓慢靠近主人，在主人附近坐下或趴下，身体保持放松，轻柔摇尾并安静陪伴", action_name: ACT_OWNER_RELAXED}
+  - {command_key: OWNER_WONDERFUL_DAY, command_id: CMD_OWNER_WONDERFUL_DAY, event_type: EVT_VOICE_COMMAND_OWNER_WONDERFUL_DAY, control: DO, core: false, source_rows: [115], phrases: ["今天真是个好日子"], reference_phrases_en: ["Today is really a wonderful day."], behavior: "抬头注视主人后快速摇尾，主动靠近，并通过轻快走动、短暂转圈表达共享愉悦", action_name: ACT_OWNER_WONDERFUL_DAY}
+  - {command_key: OWNER_FEELING_LUCKY, command_id: CMD_OWNER_FEELING_LUCKY, event_type: EVT_VOICE_COMMAND_OWNER_FEELING_LUCKY, control: DO, core: false, source_rows: [116], phrases: ["我今天太幸运了"], reference_phrases_en: ["I'm extremely lucky today."], behavior: "快速看向主人并主动靠近，快速摇尾，可进行一次短暂兴奋转圈或轻跳，随后保持期待互动状态", action_name: ACT_OWNER_FEELING_LUCKY}

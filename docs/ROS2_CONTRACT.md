@@ -42,12 +42,12 @@ control                                     str            控制标签（见意
 
 command_id                                  str            指令 ID（如 CMD_SIT、CMD_COME_HERE）
 intent_category                             str            意图类别：command / cancel / clarify / praise / blame / emotion / none
-intent_source                               str            意图来源：rule / rkllm / kws / fallback
+intent_source                               str            决策来源：command_lexicon / rule / rkllm / kws / fallback
 intent_confidence                           float          意图分类置信度
 slots                                       array          槽位 [{"key": "...", "value": "..."}]
 response_text                               str            预留：LLM 口语回复
 is_executable                               bool           可执行标记（旧字段，新消费者请用 should_trigger_behavior_tree）
-should_trigger_behavior_tree                bool           是否触发行为树（control ∈ {DO, CANCEL}）
+should_trigger_behavior_tree                bool           是否交给行为树；确定性指令为 true，旧版意图由 control 决定
 
 danger_type                                 str            危险检测类型（预留）
 danger_angle                                float          危险检测角度（预留）
@@ -82,25 +82,39 @@ latency_ms                                  float          处理延迟（ms）
 |---|---|
 | `speech` | ASR 转写结果，携带 `asr_text` / `language`，此时 intent 尚未就绪 |
 
-#### 意图分类 — 指令
+#### 确定性产品词库与旧版意图指令
 | event_type | command_id | 说明 |
 |---|---|---|
-| `EVT_VOICE_COMMAND_COME` | `CMD_COME_HERE` | 过来 |
+| `EVT_VOICE_COMMAND_WALK` | `CMD_WALK` | 走/去 |
+| `EVT_VOICE_COMMAND_COME` | `CMD_COME_HERE` | 过来/回来/到我这儿 |
+| `EVT_VOICE_COMMAND_GO_OUT` | `CMD_GO_OUT` | 出去玩/出去溜溜 |
+| `EVT_VOICE_COMMAND_GO_HOME` | `CMD_GO_HOME` | 回家 |
+| `EVT_VOICE_COMMAND_APPROACH` | `CMD_APPROACH` | 靠近点 |
+| `EVT_VOICE_COMMAND_BACK_UP` | `CMD_BACK_UP` | 退后 |
 | `EVT_VOICE_COMMAND_SHAKE_HAND` | `CMD_HAND` | 握手 |
 | `EVT_VOICE_COMMAND_HIGH_FIVE` | `CMD_FIVE` | 击掌 |
 | `EVT_VOICE_COMMAND_SIT` | `CMD_SIT` | 坐下 |
 | `EVT_VOICE_COMMAND_LIE_DOWN` | `CMD_LIE_DOWN` | 趴下 |
 | `EVT_VOICE_COMMAND_STAND_UP` | `CMD_STAND_UP` | 站起来 |
+| `EVT_VOICE_COMMAND_STAND_STILL` | `CMD_STAND_STILL` | 站好/站着 |
 | `EVT_VOICE_COMMAND_WAIT` | `CMD_WAIT` | 等一下 |
 | `EVT_VOICE_COMMAND_FOLLOW` | `CMD_FOLLOW` | 跟着我 |
 | `EVT_VOICE_COMMAND_ROLL_OVER` | `CMD_ROLL` | 翻滚 |
 | `EVT_VOICE_COMMAND_SPIN` | `CMD_SPIN` | 转圈 |
-| `EVT_VOICE_COMMAND_RETURN` | `CMD_BACK` | 回来 |
+| `EVT_VOICE_COMMAND_RETURN` | `CMD_BACK` | 旧版意图事件；确定性词库中的“回来”不再使用此事件 |
 | `EVT_VOICE_COMMAND_DROP` | `CMD_SPIT` | 吐掉 |
 | `EVT_VOICE_COMMAND_PLAY_DEAD` | `CMD_DEAD` | 装死 |
 | `EVT_VOICE_COMMAND_BRING` | `CMD_BRING_OBJECT` | 把东西拿来 |
 | `EVT_VOICE_COMMAND_FETCH` | `CMD_FETCH_OBJECT` | 去找东西 |
 | `EVT_VOICE_COMMAND_STOP` | `CMD_STOP` | 停止 |
+| `EVT_VOICE_COMMAND_HOLD_POSITION` | `CMD_HOLD_POSITION` | 别动/等着/停/不许动；普通保持位置，不是全局急停 |
+| `EVT_VOICE_COMMAND_QUIET` | `CMD_QUIET` | 安静/闭嘴/别叫 |
+
+上表保留常用核心事件和旧版兼容事件，不重复列出完整产品词库。对产品表中
+已明确 `ACT_*` 的行，确定性事件名按 `EVT_VOICE_COMMAND_<ACT 后缀>` 生成，
+例如 `ACT_EAT_MEAL → EVT_VOICE_COMMAND_EAT_MEAL`。无独立 `ACT_*` 的同类表达可归并到
+`EVT_VOICE_CALL_NAME/PRAISE/SCOLD` 或 `EVT_VOICE_COMMAND_TOILET/CLEAN/SLEEP/PLAY`。
+完整的短语、事件和动作名对应以 `config/command_catalog.yaml` 为权威源。
 
 #### 意图分类 — 情感 / 其他
 | event_type | 触发条件 |
@@ -124,6 +138,29 @@ latency_ms                                  float          处理延迟（ms）
 | `interaction_timeout` | 最后一次有效语音后超过 `idle_timeout_sec` 无新语音 |
 | `stop_listening` | 外部通过 `/perception/voice/task` 主动停止 |
 
+### 完整确定性产品词库
+
+ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短语精确匹配。
+当前目录覆盖产品表 116 条源数据（不含表头），归并为 81 个路由组和 155 条
+可运行中文短语；19 组核心训练指令是这个完整目录的子集。产品表中 138 条英文
+参考短语只作元数据，当前不进入直接匹配，避免跨分类重复表达产生错误事件。
+匹配成功时：
+
+- 发布目录中的具体 `EVT_VOICE_*`，`intent_source=command_lexicon`；
+- 可执行指令为 `control=DO`、`should_trigger_behavior_tree=true`；呼名事件仍进入
+  行为树。`PRAISE/SCOLD` 是非执行社交事件，分别使用
+  `PRAISE|NONE|NONE` 和 `REPRIMAND|NONE|NONE`，`should_trigger_behavior_tree=false`，
+  由下游情绪链路处理；
+- 所有目录事件仍经 `/perception/audio_event` 下发，Voice 不直接调用动作系统；
+- `slots` 包含 `command_key/matched_phrase/catalog_phrase/command_catalog_version`，并在配置有值时
+  带上 `action_name/behavior/catalog_source_rows`；
+- 同一句跳过规则和 RKLLM，不产生 `stage_complete stage=intent`；
+- 若 KWS 已发布相同事件，则最终结果记为 `suppressed_duplicate`；若 KWS 事件不同，
+  为避免同一句执行两个动作，词库结果记为 `suppressed_conflict` 并且不发布。
+
+词库未命中时才进入下面的旧版意图协议。当前完整路由组、核心子集和所有等价短语以
+`command_catalog.yaml` 为唯一清单，文档不重复维护短语副本。
+
 ### 意图协议：EMOTION|ACTION|CONTROL
 
 解析后的意图以 `EMOTION|ACTION|CONTROL` 三字段形式产出，并随事件发布。
@@ -134,7 +171,9 @@ latency_ms                                  float          处理延迟（ms）
 
 **CONTROL**：NONE / DO / CANCEL / CLARIFY
 
-当 `control ∈ {DO, CANCEL}` 时 `should_trigger_behavior_tree = true`。
+旧版意图结果中，当 `control ∈ {DO, CANCEL}` 时
+`should_trigger_behavior_tree = true`。确定性指令由词库事件直接设置该字段，不依赖
+模型 ACTION 标签。
 
 ### 交互流程与事件序列
 
@@ -157,9 +196,9 @@ latency_ms                                  float          处理延迟（ms）
 │   │  ② "speech"                                       ││
 │   │     ← asr_text / language / latency_ms             ││
 │   │                                                    ││
-│   │  ③ EVT_VOICE_COMMAND_* / EVT_VOICE_PRAISE / ...   ││
-│   │     ← emotion / action / control / command_id /    ││
-│   │       intent_source / should_trigger_behavior_tree ││
+│   │  ③ command_lexicon 精确匹配                        ││
+│   │     ├─ 命中 → EVT_VOICE_COMMAND_*，跳过意图模型    ││
+│   │     └─ 未命中 → 规则/RKLLM → 意图或情绪事件       ││
 │   │                                                    ││
 │   │  ①-③ 共享同一个 utterance_id                       ││
 │   └────────────────────────────────────────────────────┘│
@@ -175,11 +214,13 @@ latency_ms                                  float          处理延迟（ms）
 KWS（关键词识别）在用户说话过程中实时检测指令词，VAD 尚未结束时即可发布
 `EVT_VOICE_COMMAND_*`，其 `intent_source` 为 `"kws"`。
 
-一句话结束后照常发布声纹和 `speech`，并执行 ASR → 意图（RKLLM / 规则）。
+一句话结束后照常发布声纹和 `speech`，并执行 ASR → 确定性指令词库。词库未命中时
+才执行意图（RKLLM / 规则）。
 同一 `utterance_id` 内：
 
-- 若最终意图的 `event_type` 已被 KWS 发布，则**不重复发布**最终命令事件
-- 若 `event_type` 不同，最终意图仍会发布
+- 若最终词库/意图的 `event_type` 已被 KWS 发布，则**不重复发布**最终命令事件
+- 若词库命中事件与 KWS 不同，抑制词库事件并打印 `command_conflict`
+- 词库未命中时，旧版最终意图仍按当前兼容逻辑处理
 - KWS 不会抑制声纹事件或 `speech` 事件
 
 ### 非语音字段说明

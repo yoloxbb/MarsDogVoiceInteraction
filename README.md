@@ -5,8 +5,9 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 ```text
 讯飞唤醒板
     ↓
-麦克风采集 → Silero VAD ─┬→ 流式 KWS → 即时动作事件
-                          ├→ Paraformer ASR → 规则 / RKLLM 意图 → 最终事件
+麦克风采集 → Silero VAD ─┬→ 流式 KWS → 即时指令事件
+                          ├→ Paraformer ASR → 完整产品词库 → 指令/交互事件
+                          │                    └→ 未命中 → 规则 / RKLLM 意图
                           └→ 3D-Speaker 声纹识别 → 身份事件
                                                 ↓
                                   /perception/audio_event
@@ -23,13 +24,17 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 - 使用 sherpa-onnx Silero VAD 实时切分语音。
 - VAD 与流式 KWS 复用同一份 16 kHz 麦克风数据，不重复打开设备。
 - KWS 命中中英文动作词后立即发布事件，降低动作响应延迟。
-- 使用 Paraformer 完成整句 ASR，再由规则或 RKLLM 输出结构化意图。
+- 使用 Paraformer 完成整句 ASR，优先精确匹配完整产品词库。当前目录覆盖
+  116 条源数据（其中 19 组为核心指令），归并为 81 个路由组、155 条可运行
+  中文短语。命中后直接发布目录指定的 `EVT_VOICE_*` 事件并跳过意图模型，
+  未命中才调用规则或 RKLLM。
 - 支持说话人识别、录制注册，以及通过 FastAPI 上传 WAV、VAD 截取后注册声纹。
 - 使用 `interaction_id` 和 `utterance_id` 关联一次会话及其中的每句话。
 - 支持 pipeline Mock 和直接事件 Mock，无硬件也可联调下游。
 
-KWS 即时事件不会阻止后续 ASR、声纹和意图处理；如果最终意图与同一句已经
-发布的 KWS 事件相同，节点会自动去重。
+KWS 即时事件不会阻止后续 ASR 和声纹处理。ASR 文本先进入确定性指令词库；如果
+词库事件与同一句已经发布的 KWS 事件相同，节点会自动去重。词库未命中时才进行
+意图处理。
 
 ## 项目边界
 
@@ -135,6 +140,7 @@ uv run marsdog-voice-interaction \
 | `logging` | 日志级别和输出目录 |
 | `mock` | Mock 开关、模式和事件间隔 |
 | `storage.root` | 声纹注册表、样本及临时数据目录 |
+| `command_lexicon` | 完整产品词库（19 组核心指令子集）开关和 `command_catalog.yaml` 路径 |
 | `speaker_api` | 声纹上传 API 的开关、监听地址、端口和大小限制 |
 | `topics` | ROS2 Topic 和 Service 名称 |
 | `interaction.idle_timeout_sec` | 最后一次有效语音后等待多久结束会话 |
@@ -412,7 +418,7 @@ arecord -l
 
 ```text
 MarsDogVoiceInteraction/
-├── config/                         # 正式、Event/Pipeline Mock 配置和 KWS 关键词
+├── config/                         # 运行配置、完整产品词库和 KWS 关键词
 ├── data/                           # 声纹注册表与样本
 ├── docs/                           # 交接说明、迁移记录和 ROS2 契约
 ├── launch/                         # ROS2 launch 文件
@@ -432,11 +438,12 @@ MarsDogVoiceInteraction/
 
 - `EVT_VOICE_CALL_NAME` 到终止 `EVT_STATE_CHANGED` 必须保持同一个
   `interaction_id`。
-- 每句话创建新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终意图共享
+- 每句话创建新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享
   该 ID。
 - 只有非空 ASR 或有效 KWS 才刷新会话的最后有效语音时间。
 - 活跃 VAD 采集不能被会话静默超时截断。
-- 新增命令时应同步修改事件类型、意图映射、测试、ROS2 契约以及下游行为映射。
+- 新增确定性命令时应同步修改 `command_catalog.yaml`、事件类型、测试、ROS2 契约
+  以及下游行为树和 Action 行为映射；Voice 不直接调用动作系统。
 - 下游应按 `interaction_id + utterance_id + event_type` 做幂等保护。
 
 ## 延伸文档

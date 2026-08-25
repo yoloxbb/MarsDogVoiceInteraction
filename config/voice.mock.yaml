@@ -10,6 +10,9 @@ mock:
   event_interval_sec: 0.1
 storage:
   root: ../data/mock
+command_lexicon:
+  enabled: false
+  catalog: command_catalog.yaml
 speaker_api:
   enabled: false
 topics:

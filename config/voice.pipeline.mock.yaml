@@ -13,6 +13,10 @@ mock:
 storage:
   root: ../data/pipeline_mock
 
+command_lexicon:
+  enabled: true
+  catalog: command_catalog.yaml
+
 speaker_api:
   enabled: false
 

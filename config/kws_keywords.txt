@@ -8,7 +8,7 @@ d ěng y ī x ià @WAIT
 g ēn zh e w ǒ @FOLLOW
 f ān g ǔn @ROLL_OVER
 zh uàn q uān @SPIN
-h uí l ái @RETURN
+h uí l ái @COME
 t ǔ d iào @DROP
 zh uāng s ǐ @PLAY_DEAD
 K AH1 M HH IY1 R @COME
@@ -21,6 +21,6 @@ W EY1 T @WAIT
 F AA1 L OW0 M IY1 @FOLLOW
 R OW1 L OW1 V ER0 @ROLL_OVER
 S P IH1 N @SPIN
-K AH1 M B AE1 K @RETURN
+K AH1 M B AE1 K @COME
 D R AA1 P IH1 T @DROP
 P L EY1 D EH1 D @PLAY_DEAD

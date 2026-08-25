@@ -24,6 +24,7 @@ try:
 except ImportError:
     VoiceTask = None  # type: ignore[assignment]
 
+from marsdog_voice_interaction.core.command_lexicon import CommandLexicon
 from marsdog_voice_interaction.core.interaction_state_machine import (
     Trigger,
     VoiceInteractionStateMachine,
@@ -113,6 +114,12 @@ class VoiceInteractionNode(Node):
         self._event_trace_enabled = bool(
             logging_config.get("event_trace", True)
         )
+        self._command_lexicon: CommandLexicon | None = None
+        self._command_lexicon_status: dict[str, Any] = {
+            "enabled": False,
+            "ready": False,
+        }
+        self._init_command_lexicon()
 
         set_storage_root(
             self._config.get("storage", {}).get("root", "data")
@@ -189,6 +196,7 @@ class VoiceInteractionNode(Node):
             service=service_name if self._service is not None else "unavailable",
             idle_timeout_sec=self._idle_timeout,
             speaker_api=self._speaker_api_status,
+            command_lexicon=self._command_lexicon_status,
             providers={
                 name: {
                     "class": type(provider).__name__,
@@ -203,6 +211,46 @@ class VoiceInteractionNode(Node):
         if not mock.get("enabled", False):
             return "production"
         return f"mock_{mock.get('mode', 'pipeline')}"
+
+    def _init_command_lexicon(self) -> None:
+        config = self._config.get("command_lexicon", {})
+        enabled = bool(config.get("enabled", False))
+        self._command_lexicon_status = {
+            "enabled": enabled,
+            "ready": False,
+        }
+        if not enabled:
+            return
+        catalog_path = str(config.get("catalog", "")).strip()
+        try:
+            if not catalog_path:
+                raise ValueError("command_lexicon.catalog is required")
+            lexicon = CommandLexicon(catalog_path)
+            self._command_lexicon = lexicon
+            self._command_lexicon_status.update({
+                "ready": True,
+                "catalog": str(lexicon.catalog_path),
+                "version": lexicon.version,
+                "command_count": lexicon.command_count,
+                "core_command_count": lexicon.core_command_count,
+                "phrase_count": lexicon.phrase_count,
+                "reference_phrase_count": lexicon.reference_phrase_count,
+                "source_name": lexicon.source_name,
+                "source_row_count": lexicon.source_row_count,
+                "covered_source_row_count": lexicon.covered_source_row_count,
+            })
+            logger.info(
+                "Command lexicon ready: version=%s commands=%d core=%d "
+                "phrases=%d",
+                lexicon.version,
+                lexicon.command_count,
+                lexicon.core_command_count,
+                lexicon.phrase_count,
+            )
+        except Exception as exc:
+            self._command_lexicon = None
+            self._command_lexicon_status["error"] = str(exc)
+            logger.error("Command lexicon unavailable: %s", exc)
 
     def _trace(self, record: str, **fields: Any) -> None:
         if getattr(self, "_event_trace_enabled", True):
@@ -794,6 +842,122 @@ class VoiceInteractionNode(Node):
             "language": str(asr_result.get("language", "zh")),
             "latency_ms": float(asr_result.get("latency_ms", 0)),
         })
+
+        lexicon_started = time.perf_counter()
+        direct_match = (
+            self._command_lexicon.match(text)
+            if self._command_lexicon is not None else None
+        )
+        lexicon_latency_ms = (
+            time.perf_counter() - lexicon_started
+        ) * 1000.0
+        self._trace(
+            "stage_complete",
+            stage="command_lexicon",
+            result=(
+                "matched"
+                if direct_match is not None
+                else "no_match"
+                if self._command_lexicon is not None
+                else "unavailable"
+            ),
+            interaction_id=self._interaction_id,
+            utterance_id=utterance_id,
+            latency_ms=round(lexicon_latency_ms, 2),
+            command_key=(
+                direct_match.command_key if direct_match is not None else ""
+            ),
+            event_type=(
+                direct_match.event_type if direct_match is not None else ""
+            ),
+            catalog_version=(
+                direct_match.catalog_version
+                if direct_match is not None else ""
+            ),
+            action_name=(
+                direct_match.action_name
+                if direct_match is not None else ""
+            ),
+            emotion=(
+                direct_match.emotion if direct_match is not None else ""
+            ),
+            control=(
+                direct_match.control if direct_match is not None else ""
+            ),
+            source_rows=(
+                list(direct_match.source_rows)
+                if direct_match is not None else []
+            ),
+            core=(direct_match.core if direct_match is not None else False),
+        )
+        if direct_match is not None:
+            direct_event = direct_match.to_event(
+                asr_text=text,
+                language=str(asr_result.get("language", "zh")),
+            )
+            if direct_event.get("should_trigger_behavior_tree"):
+                self._state_machine.trigger(Trigger.INTENT_PARSED)
+            else:
+                self._state_machine.trigger(Trigger.SPEECH_END)
+            direct_event.update({
+                "utterance_id": utterance_id,
+                "speaker_id": speaker_id,
+                "speaker_confidence": confidence,
+            })
+            final_event_type = direct_match.event_type
+            duplicate_final = self._command_tracker.is_duplicate_final(
+                final_event_type
+            )
+            conflicting_kws = bool(
+                self._command_tracker.immediate_event_types
+            ) and not duplicate_final
+            if duplicate_final:
+                logger.info(
+                    "Suppressed duplicate command-lexicon result for "
+                    "utterance=%s: %s",
+                    utterance_id,
+                    final_event_type,
+                )
+                completion_result = "suppressed_duplicate"
+            elif conflicting_kws:
+                logger.warning(
+                    "Suppressed conflicting command-lexicon result for "
+                    "utterance=%s: kws=%s catalog=%s",
+                    utterance_id,
+                    sorted(self._command_tracker.immediate_event_types),
+                    final_event_type,
+                )
+                self._trace(
+                    "command_conflict",
+                    result="suppressed",
+                    interaction_id=self._interaction_id,
+                    utterance_id=utterance_id,
+                    immediate_event_types=sorted(
+                        self._command_tracker.immediate_event_types
+                    ),
+                    catalog_event_type=final_event_type,
+                )
+                completion_result = "suppressed_conflict"
+            else:
+                self._publish(direct_event)
+                completion_result = (
+                    "published_direct_command"
+                    if direct_event.get("should_trigger_behavior_tree")
+                    else "published_catalog_event"
+                )
+            self._trace(
+                "utterance_complete",
+                result=completion_result,
+                interaction_id=self._interaction_id,
+                utterance_id=utterance_id,
+                event_type=final_event_type,
+                intent_source="command_lexicon",
+                latency_ms=round(
+                    (time.perf_counter() - pipeline_started) * 1000.0,
+                    2,
+                ),
+            )
+            return True
 
         intent_started = time.perf_counter()
         parsed_intent = self._parse_intent(text)

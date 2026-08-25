@@ -68,7 +68,7 @@ def test_keyword_file_contains_chinese_and_english_for_every_command() -> None:
         if line.strip()
     )
     assert labels == Counter({
-        "COME": 2,
+        "COME": 4,
         "SHAKE_HAND": 2,
         "HIGH_FIVE": 2,
         "SIT": 2,
@@ -78,7 +78,6 @@ def test_keyword_file_contains_chinese_and_english_for_every_command() -> None:
         "FOLLOW": 2,
         "ROLL_OVER": 2,
         "SPIN": 2,
-        "RETURN": 2,
         "DROP": 2,
         "PLAY_DEAD": 2,
     })
