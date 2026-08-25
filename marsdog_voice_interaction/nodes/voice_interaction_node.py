@@ -44,7 +44,12 @@ from marsdog_voice_interaction.messages.voice_event_types import (
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
 from marsdog_voice_interaction.utils.config_loader import load_config
-from marsdog_voice_interaction.utils.logging_utils import get_logger, setup_logging
+from marsdog_voice_interaction.utils.logging_utils import (
+    get_log_file_path,
+    get_logger,
+    log_trace,
+    setup_logging,
+)
 
 
 logger = get_logger(__name__, module="voice")
@@ -81,19 +86,33 @@ class VoiceInteractionNode(Node):
     def __init__(self) -> None:
         super().__init__("voice_interaction")
         self.declare_parameter("config_path", "config/voice.yaml")
-        self.declare_parameter("log_level", "INFO")
-        self.declare_parameter("log_dir", "log")
+        self.declare_parameter("log_level", "")
+        self.declare_parameter("log_dir", "")
         config_path = str(self.get_parameter("config_path").value)
-        setup_logging(
-            log_dir=str(self.get_parameter("log_dir").value),
-            level=str(self.get_parameter("log_level").value),
-            node="voice_interaction",
-        )
         try:
             self._config = load_config(config_path)
         except Exception as exc:
+            setup_logging(node="voice_interaction")
             logger.error("Cannot load voice config %s: %s", config_path, exc)
             self._config = {}
+
+        logging_config = self._config.get("logging", {})
+        log_level_override = str(self.get_parameter("log_level").value).strip()
+        log_dir_override = str(self.get_parameter("log_dir").value).strip()
+        log_level = log_level_override or str(
+            logging_config.get("level", "INFO")
+        )
+        log_dir = log_dir_override or str(logging_config.get("dir", "log"))
+        setup_logging(
+            log_dir=log_dir,
+            level=log_level,
+            node="voice_interaction",
+            console=bool(logging_config.get("console", True)),
+            file=bool(logging_config.get("file", True)),
+        )
+        self._event_trace_enabled = bool(
+            logging_config.get("event_trace", True)
+        )
 
         set_storage_root(
             self._config.get("storage", {}).get("root", "data")
@@ -108,6 +127,7 @@ class VoiceInteractionNode(Node):
         self._interaction_holds: dict[str, dict[str, Any]] = {}
         self._latest_audio: dict[str, Any] | None = None
         self._command_tracker = UtteranceCommandTracker()
+        self._utterance_started_monotonic = 0.0
 
         interaction = self._config.get("interaction", {})
         self._idle_timeout = float(interaction.get("idle_timeout_sec", 10))
@@ -149,6 +169,35 @@ class VoiceInteractionNode(Node):
             audio_topic,
             service_name if self._service is not None else "unavailable",
         )
+        self._trace(
+            "runtime_start",
+            result="ready",
+            runtime_mode=self._runtime_mode(),
+            config_path=config_path,
+            log_level=log_level.upper(),
+            log_file=get_log_file_path(),
+            audio_topic=audio_topic,
+            enrollment_topic=enrollment_topic,
+            service=service_name if self._service is not None else "unavailable",
+            idle_timeout_sec=self._idle_timeout,
+            providers={
+                name: {
+                    "class": type(provider).__name__,
+                    "available": bool(provider and provider.is_available()),
+                }
+                for name, provider in sorted(self._providers.items())
+            },
+        )
+
+    def _runtime_mode(self) -> str:
+        mock = self._config.get("mock", {})
+        if not mock.get("enabled", False):
+            return "production"
+        return f"mock_{mock.get('mode', 'pipeline')}"
+
+    def _trace(self, record: str, **fields: Any) -> None:
+        if getattr(self, "_event_trace_enabled", True):
+            log_trace(logger, record, **fields)
 
     def _init_providers(self) -> None:
         providers = self._config.get("providers", {})
@@ -308,7 +357,12 @@ class VoiceInteractionNode(Node):
         provider.start()
         return provider
 
-    def _begin_interaction(self, interaction_id: str | None = None) -> str:
+    def _begin_interaction(
+        self,
+        interaction_id: str | None = None,
+        *,
+        source: str = "unknown",
+    ) -> str:
         """Start one session and return its immutable interaction ID."""
         with self._interaction_lock:
             if self._interaction_active:
@@ -318,7 +372,15 @@ class VoiceInteractionNode(Node):
             self._interaction_holds.clear()
             self._last_interaction_time = time.time()
             self._state_machine.trigger(Trigger.WAKEUP)
-            return self._interaction_id
+            started_id = self._interaction_id
+        self._trace(
+            "interaction_start",
+            result="started",
+            source=source,
+            interaction_id=started_id,
+            state=self._state_machine.state.value,
+        )
+        return started_id
 
     def _refresh_interaction_activity(self, now: float | None = None) -> None:
         with self._interaction_lock:
@@ -335,8 +397,16 @@ class VoiceInteractionNode(Node):
             if float(hold["deadline_monotonic"]) <= now
         ]
         for token in expired:
-            self._interaction_holds.pop(token, None)
+            hold = self._interaction_holds.pop(token, {})
             logger.info("Interaction hold lease expired: token=%s", token)
+            self._trace(
+                "interaction_hold",
+                operation="expire",
+                result="expired",
+                interaction_id=self._interaction_id,
+                hold_token=token,
+                reason=str(hold.get("reason", "")),
+            )
 
     def _timeout_interaction_id(self, now: float) -> str:
         """Return the session ID only when it is safe to idle-timeout."""
@@ -356,7 +426,7 @@ class VoiceInteractionNode(Node):
         if event is not None:
             event_type = str(event.get("event_type", ""))
             if event_type == EVT_VOICE_CALL_NAME:
-                self._begin_interaction()
+                self._begin_interaction(source="mock_event")
                 self._publish(event)
             elif not self._is_interaction_active():
                 logger.debug(
@@ -416,6 +486,27 @@ class VoiceInteractionNode(Node):
                         self._finish_kws_utterance()
                         self._latest_audio = result
                         has_voice = bool(result.get("has_voice", True))
+                        capture_started = getattr(
+                            self,
+                            "_utterance_started_monotonic",
+                            0.0,
+                        )
+                        capture_latency_ms = (
+                            (time.perf_counter() - capture_started) * 1000.0
+                            if capture_started else 0.0
+                        )
+                        self._trace(
+                            "stage_complete",
+                            stage="vad_capture",
+                            result="voice" if has_voice else "silence",
+                            interaction_id=self._interaction_id,
+                            utterance_id=self._command_tracker.utterance_id,
+                            latency_ms=round(capture_latency_ms, 2),
+                            audio_duration_ms=round(
+                                float(result.get("duration_ms", 0.0)),
+                                2,
+                            ),
+                        )
                         if enrollment_active:
                             self._process_enrollment_audio(result)
                         elif has_voice:
@@ -465,7 +556,7 @@ class VoiceInteractionNode(Node):
         if event is None:
             return
         event["event_type"] = EVT_VOICE_CALL_NAME
-        self._begin_interaction()
+        self._begin_interaction(source="wakeup")
         self._publish(event)
         if audio is not None and hasattr(audio, "start_capture"):
             self._start_interaction_capture(audio)
@@ -481,10 +572,13 @@ class VoiceInteractionNode(Node):
         audio_data: dict[str, Any],
         utterance_id: str | None = None,
     ) -> bool:
+        pipeline_started = time.perf_counter()
         self._state_machine.trigger(Trigger.SPEECH_START)
         utterance_id = utterance_id or uuid.uuid4().hex
         asr = self._providers.get("asr")
         speaker = self._providers.get("speaker")
+        asr_started = time.perf_counter()
+        asr_failed = False
         try:
             asr_result = (
                 asr.transcribe(audio_data)  # type: ignore[attr-defined]
@@ -493,6 +587,22 @@ class VoiceInteractionNode(Node):
         except Exception as exc:
             logger.error("ASR failed: %s", exc)
             asr_result = {}
+            asr_failed = True
+        asr_latency_ms = (time.perf_counter() - asr_started) * 1000.0
+        raw_text = str(asr_result.get("asr_text", ""))
+        self._trace(
+            "stage_complete",
+            stage="asr",
+            result=("error" if asr_failed else "ok" if raw_text else "empty"),
+            interaction_id=self._interaction_id,
+            utterance_id=utterance_id,
+            latency_ms=round(asr_latency_ms, 2),
+            language=str(asr_result.get("language", "")),
+            text_length=len(raw_text),
+        )
+
+        speaker_started = time.perf_counter()
+        speaker_failed = False
         try:
             speaker_result = (
                 speaker.verify(audio_data)  # type: ignore[attr-defined]
@@ -501,8 +611,24 @@ class VoiceInteractionNode(Node):
         except Exception as exc:
             logger.error("Speaker verification failed: %s", exc)
             speaker_result = {}
+            speaker_failed = True
+        speaker_latency_ms = (time.perf_counter() - speaker_started) * 1000.0
         speaker_id = str(speaker_result.get("speaker_id", "unknown"))
         confidence = float(speaker_result.get("confidence", 0))
+        self._trace(
+            "stage_complete",
+            stage="speaker",
+            result=(
+                "error"
+                if speaker_failed
+                else "matched" if speaker_id != "unknown" else "unknown"
+            ),
+            interaction_id=self._interaction_id,
+            utterance_id=utterance_id,
+            latency_ms=round(speaker_latency_ms, 2),
+            speaker_id=speaker_id,
+            speaker_confidence=confidence,
+        )
         self._publish({
             "event_type": speaker_to_voice_event(speaker_id),
             "utterance_id": utterance_id,
@@ -510,9 +636,19 @@ class VoiceInteractionNode(Node):
             "speaker_confidence": confidence,
         })
 
-        text = self._clean_text(str(asr_result.get("asr_text", "")))
+        text = self._clean_text(raw_text)
         if not text:
             self._state_machine.trigger(Trigger.SPEECH_END)
+            self._trace(
+                "utterance_complete",
+                result="empty_asr",
+                interaction_id=self._interaction_id,
+                utterance_id=utterance_id,
+                latency_ms=round(
+                    (time.perf_counter() - pipeline_started) * 1000.0,
+                    2,
+                ),
+            )
             return False
         self._publish({
             "event_type": "speech",
@@ -524,7 +660,9 @@ class VoiceInteractionNode(Node):
             "latency_ms": float(asr_result.get("latency_ms", 0)),
         })
 
-        intent = self._parse_intent(text) or dict(_UNKNOWN_INTENT)
+        intent_started = time.perf_counter()
+        parsed_intent = self._parse_intent(text)
+        intent = parsed_intent or dict(_UNKNOWN_INTENT)
         if intent.get("should_trigger_behavior_tree"):
             self._state_machine.trigger(Trigger.INTENT_PARSED)
         else:
@@ -534,6 +672,19 @@ class VoiceInteractionNode(Node):
             str(intent.get("action", "UNKNOWN")),
             str(intent.get("control", "CLARIFY")),
         )
+        self._trace(
+            "stage_complete",
+            stage="intent",
+            result="parsed" if parsed_intent is not None else "fallback_unknown",
+            interaction_id=self._interaction_id,
+            utterance_id=utterance_id,
+            event_type=final_event_type,
+            intent_source=str(intent.get("intent_source", "fallback")),
+            latency_ms=round(
+                (time.perf_counter() - intent_started) * 1000.0,
+                2,
+            ),
+        )
         intent.update({
             "utterance_id": utterance_id,
             "asr_text": text,
@@ -541,7 +692,8 @@ class VoiceInteractionNode(Node):
             "speaker_confidence": confidence,
             "event_type": final_event_type,
         })
-        if self._command_tracker.is_duplicate_final(final_event_type):
+        duplicate_final = self._command_tracker.is_duplicate_final(final_event_type)
+        if duplicate_final:
             logger.info(
                 "Suppressed duplicate final intent for utterance=%s: %s",
                 utterance_id,
@@ -549,16 +701,35 @@ class VoiceInteractionNode(Node):
             )
         else:
             self._publish(intent)
+        self._trace(
+            "utterance_complete",
+            result="suppressed_duplicate" if duplicate_final else "published",
+            interaction_id=self._interaction_id,
+            utterance_id=utterance_id,
+            event_type=final_event_type,
+            latency_ms=round(
+                (time.perf_counter() - pipeline_started) * 1000.0,
+                2,
+            ),
+        )
         return True
 
     def _start_interaction_capture(self, audio: BaseProvider) -> None:
         """Allocate an utterance ID, reset KWS, then start microphone capture."""
         utterance_id = uuid.uuid4().hex
         self._command_tracker.begin(utterance_id)
+        self._utterance_started_monotonic = time.perf_counter()
         kws = self._providers.get("kws")
         if kws is not None and kws.is_available():
             kws.start_utterance()  # type: ignore[attr-defined]
         audio.start_capture()  # type: ignore[attr-defined]
+        self._trace(
+            "stage_start",
+            stage="vad_capture",
+            result="started",
+            interaction_id=self._interaction_id,
+            utterance_id=utterance_id,
+        )
 
     def _cancel_audio_capture(self, audio: BaseProvider | None = None) -> None:
         """Stop an in-flight capture without shutting down the provider."""
@@ -623,6 +794,13 @@ class VoiceInteractionNode(Node):
             "Interaction ended: reason=%s; wakeup polling resumed",
             reason,
         )
+        self._trace(
+            "interaction_end",
+            result="ended",
+            interaction_id=interaction_id,
+            reason=reason,
+            state="idle",
+        )
         return True
 
     def _finish_kws_utterance(self) -> None:
@@ -652,6 +830,23 @@ class VoiceInteractionNode(Node):
             event["utterance_id"] = self._command_tracker.utterance_id
             self._refresh_interaction_activity()
             self._publish(event)
+            utterance_started = getattr(
+                self,
+                "_utterance_started_monotonic",
+                0.0,
+            )
+            self._trace(
+                "stage_complete",
+                stage="kws",
+                result="detected",
+                interaction_id=self._interaction_id,
+                utterance_id=self._command_tracker.utterance_id,
+                event_type=event_type,
+                latency_ms=round(
+                    (time.perf_counter() - utterance_started) * 1000.0,
+                    2,
+                ) if utterance_started else 0.0,
+            )
 
     def _parse_intent(self, text: str) -> dict[str, Any] | None:
         for name in ("intent_llm", "intent_rule"):
@@ -686,8 +881,54 @@ class VoiceInteractionNode(Node):
         message = String()
         message.data = json.dumps(event, ensure_ascii=False)
         self._audio_pub.publish(message)
+        self._trace(
+            "event_publish",
+            result="published",
+            topic=str(
+                self._config.get("topics", {}).get(
+                    "audio_event",
+                    "/perception/audio_event",
+                )
+            ),
+            event_type=str(event.get("event_type", "")),
+            interaction_id=str(event.get("interaction_id", "")),
+            utterance_id=str(event.get("utterance_id", "")),
+            state=str(event.get("state", "")),
+            previous_state=str(event.get("previous_state", "")),
+            state_reason=str(event.get("state_reason", "")),
+            wake_word=str(event.get("wake_word", "")),
+            wake_angle=round(float(event.get("wake_angle", 0.0)), 2),
+            wake_confidence=round(
+                float(event.get("wake_confidence", 0.0)),
+                3,
+            ),
+            speaker_id=str(event.get("speaker_id", "")),
+            speaker_confidence=round(
+                float(event.get("speaker_confidence", 0.0)),
+                3,
+            ),
+            action=str(event.get("action", "")),
+            control=str(event.get("control", "")),
+            intent_source=str(event.get("intent_source", "")),
+            should_trigger_behavior_tree=bool(
+                event.get("should_trigger_behavior_tree", False)
+            ),
+            latency_ms=round(float(event.get("latency_ms", 0.0)), 2),
+            asr_text=str(event.get("asr_text", "")),
+            emotion=str(event.get("emotion", "")),
+            command_id=str(event.get("command_id", "")),
+            intent_category=str(event.get("intent_category", "")),
+            intent_confidence=round(
+                float(event.get("intent_confidence", 0.0)),
+                3,
+            ),
+            language=str(event.get("language", "")),
+            slots=event.get("slots", []),
+            payload=event,
+        )
 
     def _process_enrollment_audio(self, audio_data: dict[str, Any]) -> None:
+        started = time.perf_counter()
         result = self._enrollment.process_speaker_audio(
             np.asarray(audio_data.get("audio_samples", []), dtype=np.float32),
             int(audio_data.get("sample_rate", 16000)),
@@ -697,6 +938,23 @@ class VoiceInteractionNode(Node):
         message = String()
         message.data = json.dumps(result, ensure_ascii=False)
         self._enrollment_pub.publish(message)
+        self._trace(
+            "enrollment_publish",
+            result="complete" if result.get("done") else "progress",
+            topic=str(
+                self._config.get("topics", {}).get(
+                    "enrollment_event",
+                    "/perception/voice/enrollment_event",
+                )
+            ),
+            interaction_id=self._interaction_id,
+            speaker_id=str(result.get("speaker_id", result.get("name", ""))),
+            latency_ms=round(
+                (time.perf_counter() - started) * 1000.0,
+                2,
+            ),
+            payload=result,
+        )
 
     def _handle_task(self, request: Any, response: Any) -> Any:
         started = time.perf_counter()
@@ -722,6 +980,27 @@ class VoiceInteractionNode(Node):
         except Exception as exc:
             response.error_message = str(exc)
         response.latency_ms = (time.perf_counter() - started) * 1000
+        response_payload = (
+            json.loads(response.result_json) if response.result_json else {}
+        )
+        self._trace(
+            "service_complete",
+            result="success" if response.success else "failure",
+            service=str(
+                self._config.get("topics", {}).get(
+                    "voice_task",
+                    "/perception/voice/task",
+                )
+            ),
+            task_id=str(request.task_id),
+            task_type=str(request.task_type),
+            interaction_id=str(
+                response_payload.get("interaction_id", self._interaction_id)
+            ),
+            latency_ms=round(response.latency_ms, 2),
+            error=response.error_message,
+            task_result=response_payload,
+        )
         return response
 
     def _hold_interaction(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -758,6 +1037,15 @@ class VoiceInteractionNode(Node):
                 "reason": reason,
                 "deadline_monotonic": now + lease_sec,
             }
+            self._trace(
+                "interaction_hold",
+                operation="renew" if renewed else "acquire",
+                result="held",
+                interaction_id=interaction_id,
+                hold_token=hold_token,
+                reason=reason,
+                lease_sec=lease_sec,
+            )
             return {
                 "ok": True,
                 "interaction_id": interaction_id,
@@ -789,6 +1077,14 @@ class VoiceInteractionNode(Node):
             released = self._interaction_holds.pop(hold_token, None) is not None
             if released and reset_idle_timer:
                 self._last_interaction_time = time.time()
+            self._trace(
+                "interaction_hold",
+                operation="release",
+                result="released" if released else "not_found",
+                interaction_id=interaction_id,
+                hold_token=hold_token,
+                idle_timer_reset=bool(released and reset_idle_timer),
+            )
             return {
                 "ok": True,
                 "interaction_id": interaction_id,
@@ -894,7 +1190,7 @@ class VoiceInteractionNode(Node):
                             "ok": False,
                             "error": "expected interaction is no longer active",
                         }
-                    interaction_id = self._begin_interaction()
+                    interaction_id = self._begin_interaction(source="service")
             audio = self._providers.get("audio")
             if audio is not None and hasattr(audio, "start_capture"):
                 is_capturing = getattr(audio, "is_capturing", None)

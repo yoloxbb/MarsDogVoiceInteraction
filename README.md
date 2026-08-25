@@ -41,7 +41,8 @@ KWS 即时事件不会阻止后续 ASR、声纹和意图处理；如果最终意
 | 动作项目 | 跟随、姿态动作和底盘执行 |
 
 跨项目交接语义见 [docs/HANDOFF.md](docs/HANDOFF.md)，完整 ROS2 消息字段和
-Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)。
+Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)，测试执行、日志
+字段和报告模板见 [docs/TESTING_LOG_GUIDE.md](docs/TESTING_LOG_GUIDE.md)。
 
 ## 运行环境
 
@@ -234,9 +235,36 @@ Mock 有两种模式：
 - `mock.mode: event`：绕过全部上游 Provider，按 `CALL_NAME → 会话事件 → idle`
   生成语义完整的同 `interaction_id` 会话，适合测试行为树等下游消费者。
 - `mock.mode: pipeline`：使用 Mock Wakeup、VAD、ASR 和 Speaker 走完整节点流程，
-  适合验证状态机和 Provider 编排。
+  适合验证状态机和 Provider 编排。使用
+  [`config/voice.pipeline.mock.yaml`](config/voice.pipeline.mock.yaml)。
 
-`voice.mock.yaml` 默认使用 `event` 模式。
+`voice.mock.yaml` 默认使用 `event` 模式。每次启动必须检查 `runtime_start` 中的
+`providers`；模式名称表示所选配置，实际 Provider 列表才是本次真机/Mock 判定依据。
+
+## 日志和测试取证
+
+节点在终端和独立文件中输出日志。每次运行的文件名为
+`voice_interaction_YYYYMMDD_HHMMSS_<pid>.log`，准确路径记录在启动时的
+`runtime_start.log_file`。`logging.level/dir/console/file/event_trace` 由配置文件
+控制，也可以在 launch 时覆盖级别和目录：
+
+```bash
+ros2 launch marsdog_voice_interaction voice.launch.py \
+  config_path:=/home/cat/xbb/MarsDogVoiceInteraction/config/voice.mock.yaml \
+  log_level:=DEBUG \
+  log_dir:=/tmp/marsdog_voice_qa/VOICE-MOCK-001
+```
+
+测试证据使用单行 JSON `VOICE_TRACE`。它覆盖实际 Provider、会话起止、VAD/KWS/
+ASR/声纹/意图阶段耗时、每次 Topic 发布、VoiceTask 返回和注册进度；通过
+`interaction_id` 与 `utterance_id` 串联一条完整时间线：
+
+```bash
+rg 'VOICE_TRACE' /tmp/marsdog_voice_qa/VOICE-MOCK-001
+```
+
+完整字段、功能判定、证据包内容和测试报告模板见
+[docs/TESTING_LOG_GUIDE.md](docs/TESTING_LOG_GUIDE.md)。
 
 ## 测试
 
@@ -313,7 +341,7 @@ arecord -l
 
 ```text
 MarsDogVoiceInteraction/
-├── config/                         # 正式配置、Mock 配置和 KWS 关键词
+├── config/                         # 正式、Event/Pipeline Mock 配置和 KWS 关键词
 ├── data/                           # 声纹注册表与样本
 ├── docs/                           # 交接说明、迁移记录和 ROS2 契约
 ├── launch/                         # ROS2 launch 文件

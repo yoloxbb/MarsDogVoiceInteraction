@@ -6,7 +6,9 @@ Uses Python's standard logging with a custom logger that supports key=value kwar
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,14 @@ from typing import Any
 
 _log_initialized: bool = False
 _log_dir: str = "log"
+_log_file_path: str = ""
+
+_STANDARD_LOG_KWARGS = {
+    "exc_info",
+    "extra",
+    "stack_info",
+    "stacklevel",
+}
 
 
 # ── Set custom logger class at import time ─────────────────────────
@@ -31,11 +41,22 @@ class StructuredLogger(logging.Logger):
         # → "camera_init  device='/dev/video0'  width=640"
     """
 
-    def _log_with_kwargs(self, level: int, msg: str, *args: Any, **kwargs: Any) -> None:
+    def _log_with_kwargs(
+        self,
+        level: int,
+        msg: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        standard = {
+            key: kwargs.pop(key)
+            for key in tuple(kwargs)
+            if key in _STANDARD_LOG_KWARGS
+        }
         if kwargs:
             parts = [f"{k}={v!r}" for k, v in kwargs.items()]
             msg = f"{msg}  " + "  ".join(parts)
-        self._log(level, msg, args)
+        self._log(level, msg, args, **standard)
 
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         if self.isEnabledFor(logging.DEBUG):
@@ -79,7 +100,7 @@ def setup_logging(
         console: Enable console output.
         file: Enable file output.
     """
-    global _log_initialized, _log_dir
+    global _log_file_path, _log_initialized, _log_dir
     _log_dir = log_dir
 
     root = logging.getLogger()
@@ -102,9 +123,12 @@ def setup_logging(
 
     if file:
         Path(log_dir).mkdir(parents=True, exist_ok=True)
-        date_str = datetime.now().strftime("%Y%m%d")
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _log_file_path = str(
+            Path(log_dir) / f"{node}_{run_id}_{os.getpid()}.log"
+        )
         fh = logging.FileHandler(
-            str(Path(log_dir) / f"{node}_{date_str}.log"),
+            _log_file_path,
             encoding="utf-8",
         )
         fh.setLevel(logging.DEBUG)
@@ -112,6 +136,30 @@ def setup_logging(
         root.addHandler(fh)
 
     _log_initialized = True
+
+
+def get_log_file_path() -> str:
+    """Return the active process log file path, or an empty string."""
+    return _log_file_path
+
+
+def log_trace(
+    logger: logging.Logger,
+    record: str,
+    **fields: Any,
+) -> None:
+    """Write one stable, machine-readable QA trace record.
+
+    The human-readable prefix makes the records easy to grep, while the JSON
+    object keeps field names and values unambiguous for test evidence parsers.
+    Empty optional values are omitted to keep one event on one concise line.
+    """
+    payload = {"record": record}
+    payload.update({key: value for key, value in fields.items() if value != ""})
+    logger.info(
+        "VOICE_TRACE %s",
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+    )
 
 
 def set_log_level(level: str) -> None:

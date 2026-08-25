@@ -10,6 +10,7 @@ from marsdog_voice_interaction.messages.intent_protocol import (
     parse_intent_tag,
 )
 from marsdog_voice_interaction.messages.voice_event_types import (
+    ACTION_TO_VOICE_EVENT,
     EVT_VOICE_CALL_NAME,
     EVT_VOICE_COMMAND_SIT,
     classification_to_voice_event,
@@ -22,7 +23,10 @@ from marsdog_voice_interaction.providers.mock_wakeup import MockWakeupProvider
 from marsdog_voice_interaction.providers.asr_sherpa import (
     _normalize_sense_voice_language,
 )
-from marsdog_voice_interaction.providers.rule_intent import RuleIntentProvider
+from marsdog_voice_interaction.providers.rule_intent import (
+    RuleIntentProvider,
+    _RULES,
+)
 
 
 def test_audio_contract_has_no_visual_binding() -> None:
@@ -145,3 +149,22 @@ def test_sense_voice_language_tag_is_normalized() -> None:
     assert _normalize_sense_voice_language("<|zh|>", "auto") == "zh"
     assert _normalize_sense_voice_language("<|en|>", "auto") == "en"
     assert _normalize_sense_voice_language("", "auto") == "auto"
+
+
+def test_documented_qa_command_inventory_matches_current_code() -> None:
+    keyword_file = Path(__file__).parents[1] / "config" / "kws_keywords_raw.txt"
+    keyword_lines = [
+        line.strip()
+        for line in keyword_file.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    keyword_actions = {
+        line.rsplit("@", 1)[-1].strip()
+        for line in keyword_lines
+    }
+
+    assert len(ACTION_TO_VOICE_EVENT) == 16
+    assert len(_RULES) == 30
+    assert len(keyword_lines) == 26
+    assert len(keyword_actions) == 13
+    assert {"BRING", "FETCH", "STOP"}.isdisjoint(keyword_actions)

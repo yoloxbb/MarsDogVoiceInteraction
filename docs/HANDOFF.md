@@ -18,7 +18,9 @@
 | 发布 | `/perception/voice/enrollment_event` | `std_msgs/msg/String` JSON | RELIABLE, KEEP_LAST 10 |
 | 提供 | `/perception/voice/task` | `marsdog_voice_interaction/srv/VoiceTask` | 管理声纹和监听状态 |
 
-完整 JSON 字段和任务参数见 [ROS2_CONTRACT.md](ROS2_CONTRACT.md)。跨项目总契约归档位于 `/home/cat/xbb/MarsDogVisionInteraction/docs/integration/`。
+完整 JSON 字段和任务参数见 [ROS2_CONTRACT.md](ROS2_CONTRACT.md)，测试日志、取证
+步骤和报告模板见 [TESTING_LOG_GUIDE.md](TESTING_LOG_GUIDE.md)。跨项目总契约归档
+位于 `/home/cat/xbb/MarsDogVisionInteraction/docs/integration/`。
 
 ## 3. 下游依赖的关键语义
 
@@ -83,7 +85,9 @@ ros2 service type /perception/voice/task
 uv run pytest
 ```
 
-无硬件联调可使用 `config/voice.mock.yaml`。
+无硬件下游联调使用 `config/voice.mock.yaml`；无硬件完整节点编排使用
+`config/voice.pipeline.mock.yaml`。每次启动用 `runtime_start.providers` 确认实际
+Provider，不能只按模式名称判断真机或 Mock。
 
 ## 5. 配置责任
 

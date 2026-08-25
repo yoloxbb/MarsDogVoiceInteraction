@@ -1,6 +1,9 @@
 logging:
   level: INFO
   dir: log
+  console: true
+  file: true
+  event_trace: true
 mock:
   enabled: true
   mode: event

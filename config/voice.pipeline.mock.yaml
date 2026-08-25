@@ -1,0 +1,57 @@
+logging:
+  level: INFO
+  dir: log
+  console: true
+  file: true
+  event_trace: true
+
+mock:
+  enabled: true
+  mode: pipeline
+  event_interval_sec: 2.0
+
+storage:
+  root: /tmp/marsdog_voice_pipeline_mock_data
+
+topics:
+  audio_event: /perception/audio_event
+  enrollment_event: /perception/voice/enrollment_event
+  voice_task: /perception/voice/task
+
+interaction:
+  idle_timeout_sec: 10.0
+  hold_max_lease_sec: 30.0
+
+providers:
+  wakeup:
+    type: mock
+    enabled: true
+    config: {}
+  audio:
+    type: mock
+    enabled: true
+    config:
+      sample_rate: 16000
+      capture_duration_sec: 0.2
+  kws:
+    type: sherpa
+    enabled: false
+    config: {}
+  asr:
+    type: mock
+    enabled: true
+    config:
+      language: zh
+  speaker:
+    type: mock
+    enabled: true
+    config:
+      match_threshold: 0.5
+  intent_rule:
+    type: rule
+    enabled: true
+    config: {}
+  intent_llm:
+    type: mock
+    enabled: false
+    config: {}
