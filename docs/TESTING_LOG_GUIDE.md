@@ -118,6 +118,9 @@ VOICE_TRACE {"record":"interaction_end"...}
 Mock Provider，因此真机用例必须确认 `providers` 中没有意外的 `Mock*Provider`。
 发现意外回退时，该用例记为环境/启动失败，不能作为真机 PASS 证据。
 
+当前 FastAPI 不包含身份验证，局域网请求不带认证请求头。测试环境必须是可信开发
+网络；生产认证不在本轮验收范围内。
+
 ## 3. 日志输出和级别
 
 配置项位于 `logging`：
@@ -155,7 +158,7 @@ ros2 launch marsdog_voice_interaction voice.launch.py \
 
 | `record` | 产生时机 | 核心字段 | 测试用途 |
 |---|---|---|---|
-| `runtime_start` | 节点就绪 | `runtime_mode/providers/config_path/log_file` | 确认模式、配置和真实 Provider |
+| `runtime_start` | 节点就绪 | `runtime_mode/providers/speaker_api/config_path/log_file` | 确认模式、配置、真实 Provider 和 API 状态 |
 | `interaction_start` | 会话开始 | `source/interaction_id/state` | 确认唤醒或 Service 建立会话 |
 | `stage_start` | 开始收音 | `stage/interaction_id/utterance_id` | 确认一句话的计时起点 |
 | `stage_complete` | 阶段结束 | `stage/result/latency_ms` | VAD、KWS、ASR、声纹、意图耗时与结果 |
@@ -164,6 +167,8 @@ ros2 launch marsdog_voice_interaction voice.launch.py \
 | `service_complete` | VoiceTask 返回 | `task_id/task_type/result/latency_ms/task_result` | Service 成败与耗时 |
 | `interaction_hold` | 租约申请、续租、释放或到期 | `operation/result/hold_token/reason` | 验证保持租约生命周期 |
 | `enrollment_publish` | 发布注册进度 | `result/speaker_id/latency_ms` | 声纹注册阶段结果 |
+| `speaker_api_upload` | API 上传处理结束 | `result/speaker_name/audio_valid/has_effective_speech/source_duration_ms/speech_duration_ms/segment_count/latency_ms` | 判断文件校验、VAD 截取、声纹提取和落盘结果 |
+| `speaker_management` | 查询、改名或删除 | `operation/result/speaker_name/speaker_count/latency_ms` | 复核声纹管理和运行时索引同步 |
 | `interaction_end` | 会话结束 | `reason/interaction_id/state` | 确认超时或手动停止 |
 
 `stage_complete.stage` 当前包括：
@@ -231,6 +236,30 @@ ros2 topic echo /perception/audio_event
 ros2 topic echo /perception/voice/enrollment_event
 ```
 
+声纹文件上传用例直接调用 FastAPI，并保存 HTTP 请求参数、响应 JSON 和同一时段的
+`speaker_api_upload` 日志：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8091/api/v1/speakers \
+  -F 'name=QA测试员' \
+  -F 'audio=@/path/to/qa-speaker.wav;type=audio/wav'
+```
+
+判定成功时必须同时满足：HTTP `201`、`ok=true`、`speech_duration_ms>0`、返回的
+`audio_path/embedding_path` 存在，且落盘 WAV 仅包含 VAD 保留的有效语音。不能仅以
+接口收到文件作为声纹注册成功。
+
+同时执行以下异常和管理用例：
+
+- 上传非 WAV、截断 WAV、无有效语音和有效段不足 0.5 秒的文件，均应返回 `4xx`，
+  且不产生人员目录。
+- 请求中附带 `storage_root/path/output_dir` 等字段，必须不能改变配置中的落盘目录。
+- 连续建立 5 个不同人员后，第 6 人返回 HTTP `409`；给已有人员追加样本仍成功。
+- 对同一人员连续上传 5 个有效样本后，第 6 个返回 HTTP `409`，目录内不得出现
+  `006.wav/006.npy`；`GET` 返回 `max_samples_per_speaker=5`。
+- `GET` 返回 `count=5/max_speakers=5`；`PATCH` 改名后目录和检索名称同步变化；
+  `DELETE` 后人员目录及运行时索引均移除，随后可以再新增一人。
+
 需要跨项目复现或时序分析时，额外录制 rosbag：
 
 ```bash
@@ -262,6 +291,9 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 | 手动监听 | VoiceTask 返回成功并带当前 ID | `service_complete latency_ms/task_result` |
 | 会话保持 | hold 后不超时；release/租约到期后恢复超时 | Service 结果、`interaction_hold`、结束时间 |
 | 声纹注册 | 注册 Topic 连续进度，最终 `done=true` | `enrollment_publish result=complete/latency_ms` |
+| 声纹 API 上传 | `runtime_start.speaker_api.ready=true`，HTTP 201，`audio_valid/has_effective_speech=true`，VAD 后 WAV/embedding/centroid 均落盘 | `speaker_api_upload result=success` 及源音频/有效语音/总耗时 |
+| 声纹人数限制与管理 | 最多 5 人；列表、改名、删除结果与目录及运行时索引一致 | HTTP 状态码和 `speaker_management operation/result/latency_ms` |
+| 单人样本限制 | 每人最多 5 个；第 6 次同名上传返回 409 且无 `006` 文件 | HTTP 状态码、列表 `shots/max_samples_per_speaker` 和目录文件数 |
 
 判定时遵守以下规则：
 

@@ -248,7 +248,7 @@ float64 latency_ms     # 处理耗时
 | 方向 | 字段 | 说明 |
 |------|------|------|
 | 请求 `params_json` | `name` | 注册人名称 |
-| | `required_shots` | 需要采集的次数（默认 3） |
+| | `required_shots` | 需要采集的次数（默认 3，范围 1～5） |
 | 响应 `result_json` | `ok` | 是否成功 |
 | | `step` | 起始步骤 = 1 |
 | | `total_steps` | 总共需要采集的次数 |
@@ -260,7 +260,10 @@ float64 latency_ms     # 处理耗时
 
 无特殊参数，返回 `{"ok": true}`。
 
-#### `upload_speaker` — 上传 WAV 注册声纹
+#### `upload_speaker` — 上传 WAV 注册声纹（兼容接口）
+
+新客户端应使用下文 FastAPI multipart 接口。此任务保留给已有 ROS2 调用方，内部
+与 FastAPI 共用同一套 VAD、姓名规范化和落盘逻辑。
 
 | 方向 | 字段 | 说明 |
 |------|------|------|
@@ -337,6 +340,107 @@ ID 对应会话已经结束，返回失败且不得复活旧会话。
 无参数。返回 `interaction_active/listening`、`interaction_id`、`state`、
 `idle_timeout_sec`、`idle_elapsed_sec`、`hold_active` 和 `holds[]`。租约条目包含
 `hold_token`、`reason` 和当前 `expires_in_sec`。
+
+---
+
+## 声纹上传 FastAPI
+
+节点按 `speaker_api` 配置启动独立 HTTP 服务。正式配置默认地址为
+`http://127.0.0.1:8091`，OpenAPI 页面为 `/docs`。
+Swagger 页面只支持选择文件上传，不包含麦克风录音控件。
+
+### `POST /api/v1/speakers`
+
+请求类型：`multipart/form-data`。
+
+| 位置 | 字段 | 必填 | 说明 |
+|---|---|---:|---|
+| Form | `name` | 是 | 1～128 字符；服务端规范化后最长 64 字符 |
+| File | `audio` | 是 | `.wav`；未压缩 16-bit PCM，1～8 声道，8～96 kHz |
+
+成功响应为 HTTP `201`：
+
+```json
+{
+  "request_id": "c52f7d5f45b84316a5ec6e1898dcf09a",
+  "ok": true,
+  "name": "张三",
+  "shots": 1,
+  "audio_path": "/path/to/data/speakers/张三/001.wav",
+  "embedding_path": "/path/to/data/speakers/张三/001.npy",
+  "source_duration_ms": 3200.0,
+  "speech_duration_ms": 1810.0,
+  "segment_count": 1,
+  "max_speakers": 5,
+  "max_samples_per_speaker": 5
+}
+```
+
+处理顺序固定为：解析 WAV → 转 16 kHz 单声道 → Silero VAD 截取有效语音 →
+规范化姓名 → 保存 WAV 和 embedding → 更新 `centroid.npy` 与注册表。相同姓名不会
+覆盖旧样本，而是使用 `001/002/...` 递增。
+
+落盘根目录只读取节点启动配置中的 `storage.root`。任何 HTTP 接口都不定义或接受
+可生效的路径参数，客户端不能覆盖该目录。上传成功还会明确返回
+`audio_valid=true` 和 `has_effective_speech=true`；格式错误、文件截断、VAD 没有
+检测到语音或有效语音不足 0.5 秒时不会创建目录或记录。
+
+系统硬限制最多 5 个不同人员，人数按注册表和 `data/speakers` 实际人员目录的并集
+计算。同名追加样本不增加人数；达到上限时新增人员返回 HTTP `409`。如果历史数据
+已经超过 5 人，系统不会自动删除生物特征数据，但会拒绝继续新增，直到主动删除到
+限制以内。
+
+单个人员最多保存 5 个编号样本。上传同名人员时，当前样本数达到 5 后直接返回
+HTTP `409`，不会继续执行 VAD/声纹推理，也不会生成 `006.wav` 或 `006.npy`。
+ROS2 录制注册的 `required_shots` 同样只能取 1～5。
+
+| 状态码 | 含义 |
+|---:|---|
+| `201` | 注册并落盘成功 |
+| `400` | 空文件 |
+| `404` | 修改或删除的人员不存在 |
+| `409` | 已有 5 人、单人已有 5 个样本，或修改后的目标姓名已存在 |
+| `413` | 超过 `speaker_api.max_upload_mb` |
+| `415` | 文件扩展名不是 `.wav` |
+| `422` | WAV 格式错误、VAD 无有效语音、有效语音过短或无法提取声纹 |
+| `503` | VAD/声纹模型未配置或不可用 |
+
+当前配置使用 `host: 0.0.0.0`，`GET /health` 和全部声纹管理接口都不包含身份验证。
+认证模块已移除，后续生产认证方案不属于当前接口契约。声纹文件始终只保存在设备
+本地的 `storage.root`。
+
+### `GET /api/v1/speakers`
+
+返回当前人员、样本数、是否存在可用 `centroid.npy`，以及固定上限：
+
+```json
+{
+  "ok": true,
+  "count": 1,
+  "max_speakers": 5,
+  "max_samples_per_speaker": 5,
+  "speakers": [
+    {"name": "张三", "shots": 2, "enrolled_at": 1787558400.0, "ready": true}
+  ]
+}
+```
+
+### `PATCH /api/v1/speakers/{name}`
+
+仅修改姓名和对应目录名称，请求为 JSON：
+
+```json
+{"name": "主人"}
+```
+
+请求模型禁止额外字段，因此不能借此传入或修改存储路径。目标姓名已经存在时返回
+HTTP `409`。需要更新声纹音频时，使用 `POST /api/v1/speakers` 上传相同姓名的新
+WAV，系统会追加样本并重算 centroid。
+
+### `DELETE /api/v1/speakers/{name}`
+
+删除该人员目录中的 WAV、embedding、centroid 以及注册表记录，同时从当前进程的
+声纹检索索引移除。人员不存在时返回 HTTP `404`。此操作不可通过接口指定其他目录。
 
 ---
 

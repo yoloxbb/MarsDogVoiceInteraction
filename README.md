@@ -24,7 +24,7 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 - VAD 与流式 KWS 复用同一份 16 kHz 麦克风数据，不重复打开设备。
 - KWS 命中中英文动作词后立即发布事件，降低动作响应延迟。
 - 使用 Paraformer 完成整句 ASR，再由规则或 RKLLM 输出结构化意图。
-- 支持说话人识别、录制注册、WAV 上传注册及声纹管理。
+- 支持说话人识别、录制注册，以及通过 FastAPI 上传 WAV、VAD 截取后注册声纹。
 - 使用 `interaction_id` 和 `utterance_id` 关联一次会话及其中的每句话。
 - 支持 pipeline Mock 和直接事件 Mock，无硬件也可联调下游。
 
@@ -60,7 +60,7 @@ cd /home/cat/xbb/MarsDogVoiceInteraction
 uv sync --extra dev
 ```
 
-推理模型不提交到仓库，默认统一存放在 `/home/cat/xbb/models`：
+推理模型不提交到仓库，默认统一存放在项目目录同级的 `../models/`：
 
 | 模块 | 默认路径 |
 |---|---|
@@ -70,12 +70,12 @@ uv sync --extra dev
 | Speaker | `speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` |
 | RKLLM | `llm/qwen2_5_5b_rk3588_260722_w8a8.rkllm` |
 
-部署到其他目录时，需要同步修改 `config/voice.yaml` 中的模型、关键词、存储目录
-和 RKLLM 运行库路径。
+部署到其他目录时，建议保持“项目目录与 `models/` 同级”的相对布局；如果目录结构
+不同，只需修改 `config/voice.yaml` 中对应的相对路径。
 
-`storage.root` 下保存的是运行期声纹注册表和用户声纹向量，属于设备本地的生物
-特征数据，已通过 `.gitignore` 排除，不应提交到版本库。程序会在首次运行或注册
-时自动创建所需目录和注册表。
+`storage.root` 下保存的是运行期声纹注册表、VAD 截取后的 WAV 和用户声纹向量，
+属于设备本地的生物特征数据，已通过 `.gitignore` 排除，不应提交到版本库。程序会
+在首次运行或注册时自动创建所需目录和注册表。
 
 ## 构建
 
@@ -135,6 +135,7 @@ uv run marsdog-voice-interaction \
 | `logging` | 日志级别和输出目录 |
 | `mock` | Mock 开关、模式和事件间隔 |
 | `storage.root` | 声纹注册表、样本及临时数据目录 |
+| `speaker_api` | 声纹上传 API 的开关、监听地址、端口和大小限制 |
 | `topics` | ROS2 Topic 和 Service 名称 |
 | `interaction.idle_timeout_sec` | 最后一次有效语音后等待多久结束会话 |
 | `interaction.hold_max_lease_sec` | 外部会话保持租约的单次最长秒数 |
@@ -145,6 +146,12 @@ uv run marsdog-voice-interaction \
 | `providers.speaker` | 声纹模型及匹配阈值 |
 | `providers.intent_rule` | 规则意图回退 |
 | `providers.intent_llm` | RKLLM 模型和生成参数 |
+
+配置中的文件和目录统一使用相对路径，并以当前 YAML 文件所在目录为基准解析，
+不依赖启动命令的工作目录。例如 `storage.root: ../data` 指向项目的 `data/`，
+`vad_model: ../../models/vad/silero_vad.onnx` 指向项目同级的模型目录。串口设备
+`/dev/ttyACM0` 和 ROS2 Topic/Service 名称不是项目文件路径，仍使用系统设备名和
+ROS2 绝对名称。
 
 与收音质量直接相关的参数：
 
@@ -159,6 +166,70 @@ uv run marsdog-voice-interaction \
 调节 VAD 阈值前，应先检查系统麦克风输入设备和硬件增益。阈值过低会把风扇、
 碰撞声等环境噪声误判为语音。
 
+## 声纹上传 API
+
+正式配置默认启动 FastAPI：`http://127.0.0.1:8091`，交互文档位于
+`http://127.0.0.1:8091/docs`。接口接收 `multipart/form-data`，无需把音频转换成
+Base64：
+
+Swagger `/docs` 当前只提供文件选择和接口调试，不提供浏览器麦克风录音。
+
+```bash
+curl -X POST http://127.0.0.1:8091/api/v1/speakers \
+  -F 'name=张三' \
+  -F 'audio=@/path/to/speaker.wav;type=audio/wav'
+```
+
+上传文件必须是未压缩的 16-bit PCM WAV，可为 1～8 声道、8～96 kHz。节点会转为
+16 kHz 单声道，用独立的 Silero VAD 去除首尾静音并拼接有效语音段，再提取声纹。
+姓名会经过 Unicode 规范化，不安全字符统一整理为下划线。结果按以下结构保存在
+`storage.root`，同名上传会新增序号并重新计算 `centroid.npy`：
+
+```text
+data/speakers/张三/
+├── 001.wav
+├── 001.npy
+└── centroid.npy
+```
+
+存储根目录只能由 `config/voice.yaml` 的 `storage.root` 决定。HTTP 请求中没有目录
+参数，客户端传入的路径字段不会改变落盘位置。整个 `data/speakers` 最多保存 5 个
+不同人员；达到上限后仍可给已有人员追加样本、改名或删除，但创建第 6 人返回
+HTTP `409`。每个人最多保存 5 个声纹样本，同名第 6 次上传同样返回 HTTP `409`，
+不会生成 `006.wav/006.npy`。
+
+管理接口：
+
+```bash
+# 查询人员和样本数
+curl http://127.0.0.1:8091/api/v1/speakers
+
+# 修改姓名；只允许修改姓名，不允许修改存储路径
+curl -X PATCH http://127.0.0.1:8091/api/v1/speakers/张三 \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"主人"}'
+
+# 删除该人员的 WAV、embedding、centroid 和注册表记录
+curl -X DELETE http://127.0.0.1:8091/api/v1/speakers/主人
+```
+
+更新已有人员的声音时，继续使用上传接口并填写相同姓名；新有效音频会作为下一条
+样本追加，随后重新计算该人员的 `centroid.npy`。
+
+当前配置监听 `0.0.0.0:8091`，局域网内直接访问，不包含 Token 或其他身份验证：
+
+```bash
+curl -F 'name=张三' \
+  -F 'audio=@/path/to/speaker.wav;type=audio/wav' \
+  http://DOG_IP:8091/api/v1/speakers
+```
+
+接口会直接暴露声纹的上传、查询、改名和删除能力，目前只应运行在可信开发局域网。
+认证模块已移除，后续生产认证方案需要另行设计和接入。
+
+健康检查为 `GET /health`。完整状态码、字段和兼容接口见
+[docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)。
+
 ## ROS2 接口
 
 | 方向 | 名称 | 类型 | 说明 |
@@ -172,7 +243,7 @@ uv run marsdog-voice-interaction \
 - `start_listening`、`stop_listening`
 - `hold_interaction`、`release_interaction_hold`、`get_interaction_state`
 - `start_speaker_enrollment`、`cancel_speaker_enrollment`
-- `upload_speaker`、`verify_speaker`
+- `upload_speaker`（旧客户端兼容）、`verify_speaker`
 - `list_speakers`、`delete_speaker`
 
 接口发现与监听：

@@ -17,6 +17,8 @@
 | 发布 | `/perception/audio_event` | `std_msgs/msg/String` JSON | RELIABLE, KEEP_LAST 10 |
 | 发布 | `/perception/voice/enrollment_event` | `std_msgs/msg/String` JSON | RELIABLE, KEEP_LAST 10 |
 | 提供 | `/perception/voice/task` | `marsdog_voice_interaction/srv/VoiceTask` | 管理声纹和监听状态 |
+| 提供 | `POST /api/v1/speakers` | FastAPI multipart | 上传 WAV，经 VAD 后注册并本地落盘 |
+| 提供 | `GET/PATCH/DELETE /api/v1/speakers...` | FastAPI JSON | 列表、修改姓名和删除声纹 |
 
 完整 JSON 字段和任务参数见 [ROS2_CONTRACT.md](ROS2_CONTRACT.md)，测试日志、取证
 步骤和报告模板见 [TESTING_LOG_GUIDE.md](TESTING_LOG_GUIDE.md)。跨项目总契约归档
@@ -96,6 +98,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 | `interaction.idle_timeout_sec` | 10 秒，从最后一次有效语音开始计算 |
 | `interaction.hold_max_lease_sec` | 单次会话保持租约上限 30 秒，调用方需定期续租 |
 | `topics.*` | 对外 Topic/Service 名称 |
+| `speaker_api.*` | 当前为 `0.0.0.0:8091`，无身份验证，仅限可信开发局域网 |
 | `providers.wakeup` | 讯飞串口唤醒板 `/dev/ttyACM0` |
 | `providers.audio` | 16 kHz VAD 和录音 |
 | `providers.kws` | 流式关键词命令 |
@@ -103,7 +106,14 @@ Provider，不能只按模式名称判断真机或 Mock。
 | `providers.speaker` | 声纹模型和阈值 |
 | `providers.intent_*` | RKLLM 优先、规则回退 |
 
-模型默认放在 `/home/cat/xbb/models`，注册数据放在本项目 `data/`。不得把模型二进制或用户声纹数据复制到其他项目。
+配置文件中的文件和目录均使用相对于 YAML 所在目录的路径：模型默认通过
+`../../models` 指向项目同级的 `models/`，注册数据通过 `../data` 指向本项目
+`data/`。FastAPI 上传的
+有效语音保存到 `data/speakers/<规范化姓名>/<序号>.wav`，对应 embedding 使用同名
+`.npy`。存储路径只能来自 `storage.root`，接口无权覆盖；人员总数硬限制为 5。
+单个人员的声纹样本数也硬限制为 5。不得把模型二进制或用户声纹数据复制到其他
+项目。当前 FastAPI 认证模块已移除，只能部署在可信开发局域网；生产认证方案后续
+另行设计。
 
 ## 6. 修改接口时必须回归
 

@@ -12,6 +12,44 @@ from typing import Any
 import yaml
 
 
+_CONFIG_PATH_FIELDS = (
+    ("logging", "dir"),
+    ("storage", "root"),
+    ("providers", "audio", "config", "vad_model"),
+    ("providers", "kws", "config", "model_dir"),
+    ("providers", "kws", "config", "keywords_file"),
+    ("providers", "asr", "config", "asr_model"),
+    ("providers", "asr", "config", "tokens"),
+    ("providers", "speaker", "config", "speaker_model"),
+    ("providers", "intent_llm", "config", "model"),
+    ("providers", "intent_llm", "config", "lib_path"),
+)
+
+
+def _resolve_config_paths(
+    data: dict[str, Any],
+    config_dir: Path,
+) -> None:
+    """Resolve declared filesystem paths relative to the YAML directory."""
+    for fields in _CONFIG_PATH_FIELDS:
+        parent: Any = data
+        for field in fields[:-1]:
+            if not isinstance(parent, dict):
+                break
+            parent = parent.get(field)
+        else:
+            field = fields[-1]
+            if not isinstance(parent, dict) or field not in parent:
+                continue
+            raw_value = parent[field]
+            if raw_value is None or not str(raw_value).strip():
+                continue
+            path = Path(str(raw_value)).expanduser()
+            if not path.is_absolute():
+                path = config_dir / path
+            parent[field] = str(path.resolve())
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     """Load and validate a perception YAML config file.
 
@@ -38,6 +76,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Config {config_path} must be a YAML mapping, got {type(data).__name__}")
 
+    _resolve_config_paths(data, config_path.parent)
     return data
 
 

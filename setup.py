@@ -15,7 +15,12 @@ setup(
         ("share/" + package_name + "/config", glob("config/*")),
         ("share/" + package_name + "/launch", glob("launch/*.py")),
     ],
-    install_requires=["setuptools"],
+    install_requires=[
+        "setuptools",
+        "fastapi>=0.115,<1",
+        "uvicorn>=0.30,<1",
+        "python-multipart>=0.0.9,<1",
+    ],
     zip_safe=True,
     maintainer="MarsDog Voice Team",
     maintainer_email="noreply@marsdog.dev",

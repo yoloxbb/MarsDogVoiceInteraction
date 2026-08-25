@@ -1,6 +1,6 @@
 logging:
   level: INFO
-  dir: log
+  dir: ../log
   console: true
   file: true
   event_trace: true
@@ -11,7 +11,10 @@ mock:
   event_interval_sec: 2.0
 
 storage:
-  root: /tmp/marsdog_voice_pipeline_mock_data
+  root: ../data/pipeline_mock
+
+speaker_api:
+  enabled: false
 
 topics:
   audio_event: /perception/audio_event
