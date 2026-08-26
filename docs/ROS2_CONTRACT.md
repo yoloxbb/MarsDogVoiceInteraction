@@ -159,7 +159,9 @@ ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短
   为避免同一句执行两个动作，词库结果记为 `suppressed_conflict` 并且不发布。
 
 词库未命中时才进入下面的旧版意图协议。当前完整路由组、核心子集和所有等价短语以
-`command_catalog.yaml` 为唯一清单，文档不重复维护短语副本。
+`command_catalog.yaml` 为唯一权威清单；
+[COMMAND_CATALOG_TEST_MATRIX.md](COMMAND_CATALOG_TEST_MATRIX.md) 是供测试使用的逐条
+可读快照，两者不一致时以 YAML 为准。
 
 ### 意图协议：EMOTION|ACTION|CONTROL
 

@@ -38,7 +38,8 @@ Voice 日志不能证明动作已经执行。
 
 - 完整确定性词库：`config/command_catalog.yaml` 覆盖产品表 **116 条源数据**
   （不含表头），归并为 **81 个路由组、155 条可运行中文短语**。ASR 文本
-  整句精确命中后直接发布目录指定的 `EVT_VOICE_*`，不经过意图模型。
+  整句精确命中后直接发布目录指定的 `EVT_VOICE_*`，不经过意图模型。测试人员按
+  [COMMAND_CATALOG_TEST_MATRIX.md](COMMAND_CATALOG_TEST_MATRIX.md) 逐条对齐短语和事件。
 - 116 条源数据中 72 条已明确 `ACT_*`，目录保留原始动作名和“具体行为”全文；
   其余行按呼名、夸赞、责备或同类生理/娱乐语义归并，不伪造未定义的 `ACT_*`。
 - 19 组核心训练指令是完整词库的子集。当前行为树已有 11 个核心动作映射；
@@ -105,7 +106,8 @@ VOICE_TRACE {"record":"interaction_end"...}
 应同时保存 `/perception/audio_event` 原文，防止只验证了日志而没有验证传输接口。
 
 确定性词库建议使用以下逐条记录格式；核心用例使用 `CORE-*`，全量词库用例另使用
-`CATALOG-*` 并记录对应的 `source_rows`：
+`CATALOG-*` 并记录对应的 `source_rows`。当前 155 条短语的期望值已经整理在
+[COMMAND_CATALOG_TEST_MATRIX.md](COMMAND_CATALOG_TEST_MATRIX.md)：
 
 | 指令 ID | 播放文本 | 期望 COMMAND_KEY | 期望 EVENT_TYPE | 期望路由 | Voice 状态 | 下游状态 | 计划次数 | 成功次数 | 结果 |
 |---|---|---|---|---|---|---|---:|---:|---|
@@ -557,12 +559,13 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 建议每个测试版本提供：
 
 1. 本文档 `docs/TESTING_LOG_GUIDE.md`：测试执行和日志判定。
-2. `docs/ROS2_CONTRACT.md`：事件、字段、枚举和 Service 权威契约。
-3. `docs/HANDOFF.md`：上下游职责和跨项目语义。
-4. 三份运行配置和确定性目录：`voice.yaml`、`voice.mock.yaml`、
+2. `docs/COMMAND_CATALOG_TEST_MATRIX.md`：155 条中文词/句与期望事件逐条对齐表。
+3. `docs/ROS2_CONTRACT.md`：事件、字段、枚举和 Service 权威契约。
+4. `docs/HANDOFF.md`：上下游职责和跨项目语义。
+5. 三份运行配置和确定性目录：`voice.yaml`、`voice.mock.yaml`、
    `voice.pipeline.mock.yaml`、`command_catalog.yaml`。
-5. 发布说明：Git commit、构建时间、模型版本/校验值、已知限制和本轮变更。
-6. 一份已跑通的示例证据包，证明测试命令和日志提取方式可复现。
+6. 发布说明：Git commit、构建时间、模型版本/校验值、已知限制和本轮变更。
+7. 一份已跑通的示例证据包，证明测试命令和日志提取方式可复现。
 
 语音文本、说话人 ID、声纹样本和注册表属于本地测试/生物特征数据。日志和证据包
 按内部敏感数据管理，不提交公开仓库；`data/speakers`、注册表和原始音频不得随代码

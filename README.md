@@ -47,7 +47,9 @@ KWS 即时事件不会阻止后续 ASR 和声纹处理。ASR 文本先进入确�
 
 跨项目交接语义见 [docs/HANDOFF.md](docs/HANDOFF.md)，完整 ROS2 消息字段和
 Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)，测试执行、日志
-字段和报告模板见 [docs/TESTING_LOG_GUIDE.md](docs/TESTING_LOG_GUIDE.md)。
+字段和报告模板见 [docs/TESTING_LOG_GUIDE.md](docs/TESTING_LOG_GUIDE.md)，词库中
+155 条中文词/句与期望事件见
+[docs/COMMAND_CATALOG_TEST_MATRIX.md](docs/COMMAND_CATALOG_TEST_MATRIX.md)。
 
 ## 运行环境
 
