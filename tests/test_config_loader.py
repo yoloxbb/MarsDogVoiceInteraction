@@ -54,11 +54,18 @@ topics:
 
 def test_project_configs_only_use_relative_filesystem_paths() -> None:
     root = Path(__file__).parents[1]
-    production = (root / "config" / "voice.yaml").read_text(encoding="utf-8")
+    production_text = (root / "config" / "voice.yaml").read_text(
+        encoding="utf-8"
+    )
+    production = load_config(root / "config" / "voice.yaml")
     event_mock = load_config(root / "config" / "voice.mock.yaml")
     pipeline_mock = load_config(root / "config" / "voice.pipeline.mock.yaml")
 
-    assert "/home/cat/" not in production
+    assert "/home/cat/" not in production_text
+    assert production["command_lexicon"] == {
+        "enabled": True,
+        "catalog": str(root / "config" / "command_catalog.yaml"),
+    }
     assert event_mock["storage"]["root"] == str(root / "data" / "mock")
     assert pipeline_mock["storage"]["root"] == str(
         root / "data" / "pipeline_mock"

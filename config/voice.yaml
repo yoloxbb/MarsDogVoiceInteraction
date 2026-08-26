@@ -15,6 +15,10 @@ storage:
   # 声纹 API 只能使用此目录，HTTP 请求不能覆盖该路径。
   root: ../data
 
+command_lexicon:
+  enabled: true
+  catalog: command_catalog.yaml
+
 speaker_api:
   enabled: true
   host: 0.0.0.0
