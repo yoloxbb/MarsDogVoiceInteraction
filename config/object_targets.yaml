@@ -1,0 +1,41 @@
+version: "2026-08-31-v1"
+
+# Canonical names must exactly match the visual detector class names consumed
+# downstream.  Aliases are matched against normalized ASR text, longest first.
+targets:
+  - name: dog toy ball
+    aliases: [dog toy ball, toy ball, ball, 狗玩具球, 玩具球, 小球, 球]
+  - name: dog frisbee toy
+    aliases: [dog frisbee toy, frisbee toy, frisbee, 狗飞盘, 玩具飞盘, 飞盘]
+  - name: dog tug ring toy
+    aliases: [dog tug ring toy, tug ring toy, tug ring, 拔河环玩具, 拉环玩具, 拔河环, 拉环]
+  - name: dog collar
+    aliases: [dog collar, collar, 狗项圈, 项圈]
+  - name: dog bowl
+    aliases: [dog bowl, pet bowl, 狗碗, 饭碗, 食盆]
+  - name: dog leash
+    aliases: [dog leash, leash, 牵引绳, 狗绳]
+  - name: dog treat bag
+    aliases: [dog treat bag, treat bag, 狗零食袋, 零食袋]
+  - name: dog food can
+    aliases: [dog food can, food can, 狗粮罐头, 狗罐头, 罐头]
+  - name: dog bed
+    aliases: [dog bed, pet bed, 狗窝, 狗床]
+  - name: trash can
+    aliases: [trash can, garbage can, rubbish bin, 垃圾桶, 垃圾箱]
+  - name: cardboard shipping box
+    aliases: [cardboard shipping box, shipping box, cardboard box, 快递纸箱, 快递箱, 纸箱]
+  - name: sock
+    aliases: [sock, socks, 袜子]
+  - name: slipper
+    aliases: [slipper, slippers, 拖鞋]
+  - name: tissue paper
+    aliases: [tissue paper, tissue, tissues, 抽纸, 纸巾]
+  - name: door
+    aliases: [door, 房门, 门]
+  - name: stairs
+    aliases: [stairs, staircase, steps, 楼梯, 台阶]
+  - name: cat
+    aliases: [cat, kitty, kitten, 猫咪, 小猫, 猫]
+  - name: dog
+    aliases: [dog, doggy, puppy, 狗狗, 小狗, 狗]

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 from typing import Any
 
 import yaml
 
-from marsdog_voice_interaction.messages.intent_protocol import EMOTION_LABELS
+from marsdog_voice_interaction.messages.intent_protocol import (
+    COMMAND_KEY_TO_NLU,
+    NLU_PROTOCOL,
+    make_intent_tag,
+)
 from marsdog_voice_interaction.messages import voice_event_types
 
 
@@ -21,6 +25,7 @@ _KNOWN_VOICE_EVENTS = {
     for name, value in vars(voice_event_types).items()
     if name.startswith("EVT_VOICE_") and isinstance(value, str)
 }
+_CATALOG_SOCIAL_LABELS = frozenset({"NONE", "PRAISE", "SCOLD"})
 
 
 def normalize_command_phrase(value: str) -> str:
@@ -42,6 +47,13 @@ class DirectCommandMatch:
     catalog_phrase: str
     catalog_version: str
     core: bool
+    match_strategy: str = "catalog_exact"
+    expansion_profile: str = ""
+    expansion_rule: str = ""
+    emit_known_event: bool = False
+    nlu_social: str = ""
+    nlu_intent: str = ""
+    nlu_control: str = ""
     emotion: str = "NONE"
     action_name: str = ""
     behavior: str = ""
@@ -49,7 +61,7 @@ class DirectCommandMatch:
     slots: tuple[tuple[str, str], ...] = ()
 
     def to_event(self, *, asr_text: str, language: str) -> dict[str, Any]:
-        """Build a v1-compatible direct-command event payload.
+        """Build a schema-v2 direct-command event payload.
 
         Executable authority comes from the exact catalog event, not from an
         intent-model classification. Social events may use ``control=NONE``
@@ -64,7 +76,18 @@ class DirectCommandMatch:
             {"key": "matched_phrase", "value": self.matched_phrase},
             {"key": "catalog_phrase", "value": self.catalog_phrase},
             {"key": "command_catalog_version", "value": self.catalog_version},
+            {"key": "match_strategy", "value": self.match_strategy},
         ])
+        if self.expansion_profile:
+            slots.append({
+                "key": "expansion_profile",
+                "value": self.expansion_profile,
+            })
+        if self.expansion_rule:
+            slots.append({
+                "key": "expansion_rule",
+                "value": self.expansion_rule,
+            })
         if self.action_name:
             slots.append({"key": "action_name", "value": self.action_name})
         if self.behavior:
@@ -74,33 +97,131 @@ class DirectCommandMatch:
                 "key": "catalog_source_rows",
                 "value": ",".join(str(row) for row in self.source_rows),
             })
-        triggers_behavior_tree = self.control in {"DO", "CANCEL"}
-        if self.control == "CANCEL":
-            intent_category = "cancel"
-        elif self.emotion == "PRAISE":
+        triggers_behavior_tree = self.control == "DO"
+        if self.emotion == "PRAISE":
             intent_category = "praise"
-        elif self.emotion == "REPRIMAND":
+        elif self.emotion == "SCOLD":
             intent_category = "blame"
         elif triggers_behavior_tree:
             intent_category = "command"
         else:
             intent_category = "none"
+        if self.nlu_social:
+            social = self.nlu_social
+            intent = self.nlu_intent
+            semantic_control = self.nlu_control
+        elif self.emotion in {"PRAISE", "SCOLD"}:
+            social = self.emotion
+            intent = "NONE"
+            semantic_control = "NONE"
+        elif self.command_key == "CALL_NAME":
+            social = "CALL"
+            intent = "NONE"
+            semantic_control = "NONE"
+        else:
+            social = ""
+            intent = ""
+            semantic_control = self.control
+        raw_nlu_tag = ""
+        if social and intent and semantic_control:
+            raw_nlu_tag = make_intent_tag(social, intent, semantic_control)
         return {
             "event_type": self.event_type,
             "asr_text": asr_text,
-            "emotion": self.emotion,
+            "social": social,
+            "intent": intent,
+            "emotion": social or self.emotion,
             "action": (
                 "NONE" if self.emotion != "NONE" else self.command_key
             ),
-            "control": self.control,
+            "control": semantic_control,
             "command_id": self.command_id,
             "intent_category": intent_category,
             "intent_source": "command_lexicon",
             "intent_confidence": 1.0,
+            "nlu_protocol": NLU_PROTOCOL if raw_nlu_tag else "",
+            "raw_nlu_tag": raw_nlu_tag,
+            "specific_event_type": self.event_type,
+            "dispatch_role": "specific_command",
             "slots": slots,
             "response_text": "",
             "is_executable": triggers_behavior_tree,
             "should_trigger_behavior_tree": triggers_behavior_tree,
+            "language": language or "zh",
+        }
+
+    def to_known_event(
+        self,
+        *,
+        asr_text: str,
+        language: str,
+        specific_dispatch: str,
+        source: str = "command_lexicon",
+        confidence: float = 1.0,
+        matched_phrase: str | None = None,
+        extra_slots: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Build the non-executable recognition summary for a core command."""
+
+        if not self.emit_known_event:
+            raise ValueError(
+                f"command {self.command_key} does not emit a KNOWN summary"
+            )
+        raw_tag = make_intent_tag(
+            self.nlu_social,
+            self.nlu_intent,
+            self.nlu_control,
+        )
+        slots = [
+            {"key": "command_key", "value": self.command_key},
+            {
+                "key": "matched_phrase",
+                "value": (
+                    self.matched_phrase
+                    if matched_phrase is None else str(matched_phrase)
+                ),
+            },
+            {
+                "key": "command_catalog_version",
+                "value": self.catalog_version,
+            },
+            {"key": "catalog_phrase", "value": self.catalog_phrase},
+            {"key": "match_strategy", "value": self.match_strategy},
+            {"key": "specific_dispatch", "value": specific_dispatch},
+        ]
+        if self.expansion_profile:
+            slots.append({
+                "key": "expansion_profile",
+                "value": self.expansion_profile,
+            })
+        if self.expansion_rule:
+            slots.append({
+                "key": "expansion_rule",
+                "value": self.expansion_rule,
+            })
+        if extra_slots:
+            slots.extend(dict(slot) for slot in extra_slots)
+        return {
+            "event_type": voice_event_types.EVT_VOICE_COMMAND_KNOWN,
+            "asr_text": asr_text,
+            "social": self.nlu_social,
+            "intent": self.nlu_intent,
+            "control": self.nlu_control,
+            # Deprecated aliases retained for compatibility.
+            "emotion": self.nlu_social,
+            "action": self.command_key,
+            "command_id": self.command_id,
+            "intent_category": "command",
+            "intent_source": source,
+            "intent_confidence": float(confidence),
+            "nlu_protocol": NLU_PROTOCOL,
+            "raw_nlu_tag": raw_tag,
+            "specific_event_type": self.event_type,
+            "dispatch_role": "recognition_summary",
+            "slots": slots,
+            "response_text": "",
+            "is_executable": False,
+            "should_trigger_behavior_tree": False,
             "language": language or "zh",
         }
 
@@ -128,11 +249,17 @@ class CommandLexicon:
             raise ValueError("Command catalog source_row_count cannot be negative")
 
         self._phrases: dict[str, DirectCommandMatch] = {}
+        self._catalog_phrases: list[DirectCommandMatch] = []
+        self._commands: dict[str, DirectCommandMatch] = {}
         self._command_keys: set[str] = set()
         self._source_rows: set[int] = set()
         self.command_count = 0
         self.core_command_count = 0
         self.reference_phrase_count = 0
+        self.expansion_enabled = False
+        self.variants_per_phrase = 0
+        self.expanded_phrase_count = 0
+        self.expansion_profile_count = 0
         for index, item in enumerate(commands, start=1):
             if not isinstance(item, dict):
                 raise ValueError(f"Command entry {index} must be a mapping")
@@ -151,9 +278,18 @@ class CommandLexicon:
                     "Command catalog source row coverage mismatch: "
                     f"missing={missing} unexpected={unexpected}"
                 )
+        self._load_expansions(raw.get("expansion"))
 
     @property
     def phrase_count(self) -> int:
+        """Number of authoritative phrases declared under ``commands``."""
+
+        return len(self._catalog_phrases)
+
+    @property
+    def total_match_phrase_count(self) -> int:
+        """Total exact lookup entries, including controlled expansions."""
+
         return len(self._phrases)
 
     @property
@@ -165,21 +301,12 @@ class CommandLexicon:
         template = self._phrases.get(normalized)
         if template is None:
             return None
-        return DirectCommandMatch(
-            command_key=template.command_key,
-            command_id=template.command_id,
-            event_type=template.event_type,
-            control=template.control,
-            matched_phrase=text,
-            catalog_phrase=template.catalog_phrase,
-            catalog_version=template.catalog_version,
-            core=template.core,
-            emotion=template.emotion,
-            action_name=template.action_name,
-            behavior=template.behavior,
-            source_rows=template.source_rows,
-            slots=template.slots,
-        )
+        return replace(template, matched_phrase=text)
+
+    def get_command(self, command_key: str) -> DirectCommandMatch | None:
+        """Return immutable catalog metadata for one canonical command key."""
+
+        return self._commands.get(str(command_key).strip().upper())
 
     def _load_command(self, index: int, item: dict[str, Any]) -> None:
         command_key = str(item.get("command_key", "")).strip().upper()
@@ -187,6 +314,7 @@ class CommandLexicon:
         event_type = str(item.get("event_type", "")).strip().upper()
         control = str(item.get("control", "DO")).strip().upper()
         core = bool(item.get("core", False))
+        emit_known_event = bool(item.get("emit_known_event", core))
         emotion = str(item.get("emotion", "NONE")).strip().upper()
         action_name = str(item.get("action_name", "")).strip().upper()
         behavior = str(item.get("behavior", "")).strip()
@@ -210,13 +338,36 @@ class CommandLexicon:
         if command_key in self._command_keys:
             raise ValueError(f"Duplicate command_key {command_key!r}")
         self._command_keys.add(command_key)
-        if control not in {"NONE", "DO", "CANCEL"}:
+        if control not in {"NONE", "DO"}:
             raise ValueError(
                 f"Command entry {index} has invalid control {control!r}"
             )
-        if emotion not in EMOTION_LABELS:
+        if emotion not in _CATALOG_SOCIAL_LABELS:
             raise ValueError(
                 f"Command entry {index} has invalid emotion {emotion!r}"
+            )
+
+        configured_nlu = item.get("nlu")
+        if configured_nlu is None:
+            configured_nlu = COMMAND_KEY_TO_NLU.get(command_key)
+        if configured_nlu is None:
+            nlu_social = nlu_intent = nlu_control = ""
+        elif isinstance(configured_nlu, str):
+            nlu_social, nlu_intent, nlu_control = make_intent_tag(
+                *configured_nlu.split("|")
+            ).split("|")
+        elif isinstance(configured_nlu, (list, tuple)) and len(configured_nlu) == 3:
+            nlu_social, nlu_intent, nlu_control = make_intent_tag(
+                *(str(value) for value in configured_nlu)
+            ).split("|")
+        else:
+            raise ValueError(
+                f"Command entry {index} has invalid nlu triple {configured_nlu!r}"
+            )
+        if emit_known_event and not nlu_social:
+            raise ValueError(
+                f"Command entry {index} requires a valid nlu triple when "
+                "emit_known_event is true"
             )
 
         raw_source_rows = item.get("source_rows", [])
@@ -264,7 +415,7 @@ class CommandLexicon:
                     f"Phrase {phrase!r} maps to both "
                     f"{existing.command_key} and {command_key}"
                 )
-            self._phrases[normalized] = DirectCommandMatch(
+            template = DirectCommandMatch(
                 command_key=command_key,
                 command_id=command_id,
                 event_type=event_type,
@@ -273,15 +424,167 @@ class CommandLexicon:
                 catalog_phrase=phrase,
                 catalog_version=self.version,
                 core=core,
+                emit_known_event=emit_known_event,
+                nlu_social=nlu_social,
+                nlu_intent=nlu_intent,
+                nlu_control=nlu_control,
                 emotion=emotion,
                 action_name=action_name,
                 behavior=behavior,
                 source_rows=source_rows,
                 slots=slots,
             )
+            self._phrases[normalized] = template
+            self._catalog_phrases.append(template)
+            self._commands.setdefault(command_key, self._phrases[normalized])
             loaded += 1
 
         if loaded:
             self.command_count += 1
             if core:
                 self.core_command_count += 1
+
+    def _load_expansions(self, raw_expansion: Any) -> None:
+        """Generate a finite, auditable set of exact-match surface variants."""
+
+        if raw_expansion is None:
+            return
+        if not isinstance(raw_expansion, dict):
+            raise ValueError("Command catalog expansion must be a mapping")
+        self.expansion_enabled = bool(raw_expansion.get("enabled", False))
+        if not self.expansion_enabled:
+            return
+
+        self.variants_per_phrase = int(
+            raw_expansion.get("variants_per_phrase", 0) or 0
+        )
+        if self.variants_per_phrase <= 0:
+            raise ValueError("expansion.variants_per_phrase must be positive")
+        default_profile = str(
+            raw_expansion.get("default_profile", "")
+        ).strip()
+        raw_profiles = raw_expansion.get("profiles")
+        if not default_profile or not isinstance(raw_profiles, dict):
+            raise ValueError(
+                "expansion.default_profile and expansion.profiles are required"
+            )
+
+        profiles: dict[str, tuple[tuple[str, str], ...]] = {}
+        for profile_name, raw_rules in raw_profiles.items():
+            name = str(profile_name).strip()
+            if not name or not isinstance(raw_rules, list):
+                raise ValueError("Each expansion profile must be a rule list")
+            rules: list[tuple[str, str]] = []
+            rule_ids: set[str] = set()
+            for rule in raw_rules:
+                if not isinstance(rule, dict):
+                    raise ValueError(
+                        f"Expansion profile {name!r} contains a non-mapping rule"
+                    )
+                rule_id = str(rule.get("id", "")).strip()
+                template = str(rule.get("template", "")).strip()
+                if not rule_id or rule_id in rule_ids:
+                    raise ValueError(
+                        f"Expansion profile {name!r} has a missing/duplicate rule id"
+                    )
+                if template.count("{phrase}") != 1:
+                    raise ValueError(
+                        f"Expansion rule {name}.{rule_id} must contain one "
+                        "{phrase} placeholder"
+                    )
+                rule_ids.add(rule_id)
+                rules.append((rule_id, template))
+            if len(rules) != self.variants_per_phrase:
+                raise ValueError(
+                    f"Expansion profile {name!r} must contain exactly "
+                    f"{self.variants_per_phrase} rules"
+                )
+            profiles[name] = tuple(rules)
+        if default_profile not in profiles:
+            raise ValueError(
+                f"Unknown expansion default_profile {default_profile!r}"
+            )
+
+        raw_command_profiles = raw_expansion.get("command_profiles", {})
+        raw_phrase_profiles = raw_expansion.get("phrase_profiles", {})
+        if not isinstance(raw_command_profiles, dict):
+            raise ValueError("expansion.command_profiles must be a mapping")
+        if not isinstance(raw_phrase_profiles, dict):
+            raise ValueError("expansion.phrase_profiles must be a mapping")
+        command_profiles = {
+            str(key).strip().upper(): str(value).strip()
+            for key, value in raw_command_profiles.items()
+        }
+        phrase_profiles = {
+            normalize_command_phrase(str(key)): str(value).strip()
+            for key, value in raw_phrase_profiles.items()
+        }
+        unknown_commands = sorted(set(command_profiles) - self._command_keys)
+        if unknown_commands:
+            raise ValueError(
+                "Expansion profiles reference unknown command keys: "
+                f"{unknown_commands}"
+            )
+        unknown_profiles = sorted(
+            (set(command_profiles.values()) | set(phrase_profiles.values()))
+            - set(profiles)
+        )
+        if unknown_profiles:
+            raise ValueError(
+                f"Expansion mappings reference unknown profiles: {unknown_profiles}"
+            )
+        catalog_phrase_keys = {
+            normalize_command_phrase(item.catalog_phrase)
+            for item in self._catalog_phrases
+        }
+        unknown_phrases = sorted(set(phrase_profiles) - catalog_phrase_keys)
+        if unknown_phrases:
+            raise ValueError(
+                "Expansion profiles reference unknown catalog phrases: "
+                f"{unknown_phrases}"
+            )
+
+        for base in self._catalog_phrases:
+            normalized_base = normalize_command_phrase(base.catalog_phrase)
+            profile = phrase_profiles.get(
+                normalized_base,
+                command_profiles.get(base.command_key, default_profile),
+            )
+            generated_for_phrase: set[str] = set()
+            for rule_id, template in profiles[profile]:
+                expanded_phrase = template.format(phrase=base.catalog_phrase)
+                normalized = normalize_command_phrase(expanded_phrase)
+                if not normalized or normalized == normalized_base:
+                    raise ValueError(
+                        f"Expansion rule {profile}.{rule_id} does not create a "
+                        f"new phrase for {base.catalog_phrase!r}"
+                    )
+                if normalized in generated_for_phrase:
+                    raise ValueError(
+                        f"Expansion rules create duplicate variants for "
+                        f"{base.catalog_phrase!r}: {expanded_phrase!r}"
+                    )
+                generated_for_phrase.add(normalized)
+                existing = self._phrases.get(normalized)
+                if existing is not None:
+                    raise ValueError(
+                        f"Expanded phrase {expanded_phrase!r} from "
+                        f"{base.command_key}/{base.catalog_phrase!r} conflicts "
+                        f"with {existing.command_key}/{existing.catalog_phrase!r}"
+                    )
+                self._phrases[normalized] = replace(
+                    base,
+                    matched_phrase=expanded_phrase,
+                    match_strategy="rule_expansion",
+                    expansion_profile=profile,
+                    expansion_rule=rule_id,
+                )
+                self.expanded_phrase_count += 1
+
+        expected = self.phrase_count * self.variants_per_phrase
+        if self.expanded_phrase_count != expected:
+            raise ValueError(
+                "Expansion count mismatch: "
+                f"expected={expected} actual={self.expanded_phrase_count}"
+            )
+        self.expansion_profile_count = len(profiles)

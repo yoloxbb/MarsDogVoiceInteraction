@@ -1,9 +1,119 @@
 # 产品交互词库的确定性事件路由。
 # 附件共 116 条数据行（含表头共 117 行）。中文短语参与运行时精确匹配；
 # 英文列仅保留为参考元数据，避免跨类别歧义直接触发。
-version: "2026-08-25-full"
+version: "2026-08-29-expanded-v1"
 source_name: "产品交互词库"
 source_row_count: 116
+
+# 每个中文标准词/句在启动时生成 10 个受控表述，生成结果仍进入哈希表做整句
+# 精确匹配；不会使用包含匹配、编辑距离或自动去除否定词。phrase_profiles 的
+# 优先级高于 command_profiles，未配置项使用 default_profile。
+expansion:
+  enabled: true
+  variants_per_phrase: 10
+  default_profile: command
+  profiles:
+    command:
+      - {id: polite_please, template: "请{phrase}"}
+      - {id: polite_please_you, template: "请你{phrase}"}
+      - {id: polite_trouble, template: "麻烦{phrase}"}
+      - {id: polite_trouble_you, template: "麻烦你{phrase}"}
+      - {id: address_puppy, template: "小狗，{phrase}"}
+      - {id: address_doggy, template: "狗狗，{phrase}"}
+      - {id: address_baby, template: "宝贝，{phrase}"}
+      - {id: suffix_once, template: "{phrase}一下"}
+      - {id: suffix_ba, template: "{phrase}吧"}
+      - {id: suffix_ya, template: "{phrase}呀"}
+    query:
+      - {id: address_puppy, template: "小狗，{phrase}"}
+      - {id: address_doggy, template: "狗狗，{phrase}"}
+      - {id: address_baby, template: "宝贝，{phrase}"}
+      - {id: ask_preface, template: "我想问，{phrase}"}
+      - {id: wonder_preface, template: "我想知道，{phrase}"}
+      - {id: tell_me_preface, template: "跟我说说，{phrase}"}
+      - {id: suffix_ne, template: "{phrase}呢"}
+      - {id: suffix_ya, template: "{phrase}呀"}
+      - {id: suffix_a, template: "{phrase}啊"}
+      - {id: suffix_ma, template: "{phrase}嘛"}
+    statement:
+      - {id: address_puppy, template: "小狗，{phrase}"}
+      - {id: address_doggy, template: "狗狗，{phrase}"}
+      - {id: address_baby, template: "宝贝，{phrase}"}
+      - {id: tell_you_preface, template: "跟你说，{phrase}"}
+      - {id: want_say_preface, template: "我想说，{phrase}"}
+      - {id: actually_preface, template: "其实，{phrase}"}
+      - {id: suffix_a, template: "{phrase}啊"}
+      - {id: suffix_ya, template: "{phrase}呀"}
+      - {id: suffix_ne, template: "{phrase}呢"}
+      - {id: suffix_o, template: "{phrase}哦"}
+    social:
+      - {id: address_puppy, template: "小狗，{phrase}"}
+      - {id: address_doggy, template: "狗狗，{phrase}"}
+      - {id: address_baby, template: "宝贝，{phrase}"}
+      - {id: tell_you_preface, template: "跟你说，{phrase}"}
+      - {id: listen_preface, template: "听我说，{phrase}"}
+      - {id: suffix_a, template: "{phrase}啊"}
+      - {id: suffix_ya, template: "{phrase}呀"}
+      - {id: suffix_o, template: "{phrase}哦"}
+      - {id: suffix_ne, template: "{phrase}呢"}
+      - {id: suffix_la, template: "{phrase}啦"}
+    vocative:
+      - {id: prefix_hello, template: "喂，{phrase}"}
+      - {id: prefix_hey, template: "嘿，{phrase}"}
+      - {id: suffix_a, template: "{phrase}啊"}
+      - {id: suffix_ya, template: "{phrase}呀"}
+      - {id: suffix_o, template: "{phrase}哦"}
+      - {id: suffix_ei, template: "{phrase}诶"}
+      - {id: suffix_ai, template: "{phrase}哎"}
+      - {id: suffix_yo, template: "{phrase}哟"}
+      - {id: suffix_na, template: "{phrase}呐"}
+      - {id: suffix_ne, template: "{phrase}呢"}
+  command_profiles:
+    CALL_NAME: vocative
+    PRAISE: social
+    SCOLD: social
+    COMFORT_DONT_BE_AFRAID: social
+    COMFORT_REASSURE: social
+    ASK_IF_HURTS: query
+    RESPOND_HUNGRY_QUERY: query
+    RESPOND_WANT_EAT_QUERY: query
+    RESPOND_EATING_QUERY: query
+    RESPOND_FOOD_PREFERENCE_QUERY: query
+    ASK_WHAT_DOING: query
+    ASK_WHERE_ARE_YOU: query
+    ASK_WHATS_WRONG: query
+    ASK_WHAT_THINKING: query
+    ASK_IF_COMFORTABLE: query
+    ASK_IF_LIKES: query
+    ASK_IF_FUN: query
+    ASK_IF_UNDERSTANDS: query
+    ASK_ABILITIES: query
+    ASK_IF_LEARNED: query
+    REFUSE: statement
+    REFUSE_PLAY: statement
+    OWNER_GOING_OUT: statement
+    OWNER_RETURNED: statement
+    EXPRESS_MISS_YOU: statement
+    OWNER_TIRED: statement
+    OWNER_ANNOYED: statement
+    OWNER_UNHAPPY: statement
+    OWNER_BAD_DAY: statement
+    OWNER_DEPRESSED: statement
+    OWNER_STRESSED: statement
+    OWNER_LONELY: statement
+    OWNER_UNWELL: statement
+    OWNER_HAPPY: statement
+    OWNER_VERY_HAPPY: statement
+    OWNER_FEELING_GREAT: statement
+    OWNER_FEELING_EXCELLENT: statement
+    OWNER_RELAXED: statement
+    OWNER_WONDERFUL_DAY: statement
+    OWNER_FEELING_LUCKY: statement
+    BYE_BYE: social
+    GOODBYE: social
+  phrase_profiles:
+    "谁要玩游戏": query
+    "玩不玩": query
 
 commands:
   - {command_key: WALK, command_id: CMD_WALK, event_type: EVT_VOICE_COMMAND_WALK, control: DO, core: true, source_rows: [1], phrases: ["走", "去"], reference_phrases_en: ["Walk", "Go"], behavior: "走开到随机点位", action_name: ACT_WALK}
@@ -50,7 +160,7 @@ commands:
   - command_key: SCOLD
     command_id: CMD_SCOLD
     event_type: EVT_VOICE_SCOLD
-    emotion: REPRIMAND
+    emotion: SCOLD
     control: NONE
     core: false
     source_rows: [35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]

@@ -13,6 +13,9 @@ storage:
 command_lexicon:
   enabled: false
   catalog: command_catalog.yaml
+object_target_routing:
+  enabled: true
+  catalog: object_targets.yaml
 speaker_api:
   enabled: false
 topics:

@@ -16,6 +16,7 @@ _CONFIG_PATH_FIELDS = (
     ("logging", "dir"),
     ("storage", "root"),
     ("command_lexicon", "catalog"),
+    ("object_target_routing", "catalog"),
     ("providers", "audio", "config", "vad_model"),
     ("providers", "kws", "config", "model_dir"),
     ("providers", "kws", "config", "keywords_file"),

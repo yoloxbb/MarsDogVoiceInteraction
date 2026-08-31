@@ -596,6 +596,137 @@ def test_real_audio_capture_can_be_cancelled_without_stale_result() -> None:
     assert provider.poll_result() is None
 
 
+def test_blocked_sounddevice_read_is_aborted_during_cancel(
+    monkeypatch: Any,
+) -> None:
+    read_started = threading.Event()
+    read_released = threading.Event()
+
+    class BlockingInputStream:
+        instances: list["BlockingInputStream"] = []
+
+        def __init__(self, **_kwargs: Any) -> None:
+            self.abort_count = 0
+            self.close_count = 0
+            self.close_thread_name = ""
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            return None
+
+        def read(self, frames: int) -> tuple[np.ndarray, None]:
+            read_started.set()
+            read_released.wait(5.0)
+            return np.zeros((frames, 1), dtype=np.float32), None
+
+        def abort(self) -> None:
+            self.abort_count += 1
+            read_released.set()
+
+        def stop(self) -> None:
+            read_released.set()
+
+        def close(self) -> None:
+            self.close_count += 1
+            self.close_thread_name = threading.current_thread().name
+            read_released.set()
+
+    class FakeVad:
+        is_speech_detected = False
+
+        def reset(self) -> None:
+            return None
+
+        def empty(self) -> bool:
+            return True
+
+    from marsdog_voice_interaction.providers import audio_sherpa as audio_module
+
+    monkeypatch.setattr(audio_module, "_HAS_AUDIO_CAPTURE", True)
+    monkeypatch.setattr(
+        audio_module.sd,
+        "InputStream",
+        BlockingInputStream,
+    )
+    provider = AudioSherpaProvider({})
+    provider._vad = FakeVad()
+    provider.available = True
+    provider.start_capture()
+
+    assert read_started.wait(0.5)
+    assert provider.cancel_capture(timeout=0.5)
+    assert not provider.is_capturing()
+    assert provider.poll_result() is None
+    stream = BlockingInputStream.instances[0]
+    assert stream.abort_count == 1
+    assert stream.close_count == 1
+    assert stream.close_thread_name == "vad-capture"
+
+
+def test_blocked_arecord_read_is_terminated_during_cancel(
+    monkeypatch: Any,
+) -> None:
+    import subprocess
+    from marsdog_voice_interaction.providers import audio_sherpa as audio_module
+
+    read_started = threading.Event()
+    read_released = threading.Event()
+
+    class BlockingStdout:
+        def read(self, size: int) -> bytes:
+            read_started.set()
+            read_released.wait(5.0)
+            return b"\x00" * size
+
+    class BlockingProcess:
+        instances: list["BlockingProcess"] = []
+
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            self.stdout = BlockingStdout()
+            self.running = True
+            self.terminated = False
+            self.__class__.instances.append(self)
+
+        def poll(self) -> int | None:
+            return None if self.running else 0
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.running = False
+            read_released.set()
+
+        def communicate(
+            self,
+            timeout: float | None = None,
+        ) -> tuple[bytes, bytes]:
+            del timeout
+            return b"", b""
+
+        def kill(self) -> None:
+            self.running = False
+            read_released.set()
+
+    class FakeVad:
+        def reset(self) -> None:
+            return None
+
+        def empty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(audio_module, "_HAS_AUDIO_CAPTURE", False)
+    monkeypatch.setattr(subprocess, "Popen", BlockingProcess)
+    provider = AudioSherpaProvider({})
+    provider._vad = FakeVad()
+    provider.available = True
+    provider.start_capture()
+
+    assert read_started.wait(0.5)
+    assert provider.cancel_capture(timeout=0.5)
+    assert not provider.is_capturing()
+    assert provider.poll_result() is None
+    assert BlockingProcess.instances[0].terminated
+
+
 def test_wakeup_provider_reconnects_after_reader_thread_stops(
     monkeypatch: Any,
 ) -> None:

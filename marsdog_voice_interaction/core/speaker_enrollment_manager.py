@@ -14,13 +14,18 @@ from typing import Any
 
 import numpy as np
 
+from marsdog_voice_interaction.messages.speaker_identity import (
+    ALLOWED_SPEAKER_IDENTITIES,
+    speaker_identity_role,
+    validate_speaker_identity,
+)
 from marsdog_voice_interaction.utils.uploaded_audio import decode_pcm16_wav
 
 
 _STORAGE_ROOT = Path("data")
 _SPEAKERS_DIR = _STORAGE_ROOT / "speakers"
 _REGISTRY_PATH = _STORAGE_ROOT / "speaker_registry.json"
-MAX_SPEAKERS = 5
+MAX_SPEAKERS = len(ALLOWED_SPEAKER_IDENTITIES)
 MAX_SAMPLES_PER_SPEAKER = 5
 
 ENROLL_SENTENCES = (
@@ -177,9 +182,15 @@ class SpeakerEnrollmentManager:
         required_shots: int = 3,
     ) -> dict[str, Any]:
         try:
-            name = normalize_speaker_name(name)
+            name = validate_speaker_identity(name)
         except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+            return {
+                "ok": False,
+                "status": 422,
+                "code": "invalid_speaker_identity",
+                "error": str(exc),
+                "allowed_names": list(ALLOWED_SPEAKER_IDENTITIES),
+            }
         with self._storage_lock:
             capacity_error = _capacity_error(name, _load_registry())
             if capacity_error is not None:
@@ -275,7 +286,7 @@ class SpeakerEnrollmentManager:
         vad: Any | None = None,
     ) -> dict[str, Any]:
         try:
-            normalized_name = normalize_speaker_name(name)
+            normalized_name = validate_speaker_identity(name)
             with self._storage_lock:
                 registry = _load_registry()
                 capacity_error = _capacity_error(
@@ -305,7 +316,14 @@ class SpeakerEnrollmentManager:
                 segment_count = trimmed.segment_count
                 stored_wav = trimmed.wav_bytes
         except (RuntimeError, ValueError) as exc:
-            return {"ok": False, "error": str(exc)}
+            result: dict[str, Any] = {"ok": False, "error": str(exc)}
+            if isinstance(exc, ValueError) and str(exc).startswith("声纹身份只能是"):
+                result.update({
+                    "status": 422,
+                    "code": "invalid_speaker_identity",
+                    "allowed_names": list(ALLOWED_SPEAKER_IDENTITIES),
+                })
+            return result
 
         embedding = self._extract_embedding(samples, sample_rate)
         if embedding is None:
@@ -353,6 +371,7 @@ class SpeakerEnrollmentManager:
             "has_effective_speech": True,
             "max_speakers": MAX_SPEAKERS,
             "max_samples_per_speaker": MAX_SAMPLES_PER_SPEAKER,
+            "speaker_role": speaker_identity_role(normalized_name),
         }
 
     def cancel_speaker(self) -> dict[str, Any]:
@@ -404,12 +423,29 @@ class SpeakerEnrollmentManager:
                     "shots": shots,
                     "enrolled_at": float(metadata.get("enrolled_at", 0.0)),
                     "ready": (directory / "centroid.npy").exists(),
+                    "role": speaker_identity_role(name),
+                    "legacy": name not in ALLOWED_SPEAKER_IDENTITIES,
                 })
+            occupied_names = {
+                record["name"]
+                for record in records
+                if record["name"] in ALLOWED_SPEAKER_IDENTITIES
+            }
+            has_capacity = len(records) < MAX_SPEAKERS
             return {
                 "ok": True,
                 "count": len(records),
+                "legacy_count": sum(
+                    1 for record in records if record["legacy"]
+                ),
                 "max_speakers": MAX_SPEAKERS,
                 "max_samples_per_speaker": MAX_SAMPLES_PER_SPEAKER,
+                "allowed_names": list(ALLOWED_SPEAKER_IDENTITIES),
+                "available_names": [
+                    name
+                    for name in ALLOWED_SPEAKER_IDENTITIES
+                    if has_capacity and name not in occupied_names
+                ],
                 "speakers": records,
             }
 
@@ -425,9 +461,19 @@ class SpeakerEnrollmentManager:
     def rename_speaker(self, name: str, new_name: str) -> dict[str, Any]:
         try:
             source_name = normalize_speaker_name(name)
-            target_name = normalize_speaker_name(new_name)
+            target_name = validate_speaker_identity(new_name)
         except ValueError as exc:
-            return {"ok": False, "status": 422, "error": str(exc)}
+            result: dict[str, Any] = {
+                "ok": False,
+                "status": 422,
+                "error": str(exc),
+            }
+            if str(exc).startswith("声纹身份只能是"):
+                result.update({
+                    "code": "invalid_speaker_identity",
+                    "allowed_names": list(ALLOWED_SPEAKER_IDENTITIES),
+                })
+            return result
         with self._storage_lock:
             registry = _load_registry()
             names = _known_speaker_names(registry)

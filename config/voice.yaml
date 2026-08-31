@@ -19,6 +19,10 @@ command_lexicon:
   enabled: true
   catalog: command_catalog.yaml
 
+object_target_routing:
+  enabled: true
+  catalog: object_targets.yaml
+
 speaker_api:
   enabled: true
   host: 0.0.0.0
@@ -73,6 +77,13 @@ providers:
       keywords_threshold: 0.25
       num_trailing_blanks: 1
       event_confidence: 0.9
+      # KWS 仅生成候选；VAD 结束后与完整 ASR 文本仲裁，只发布一个结果来源。
+      publish_mode: deferred
+      arbitration_mode: exclusive
+      asr_long_text_wins: true
+      kws_fallback_on_asr_empty: true
+      short_max_chars_zh: 2
+      short_max_words_en: 2
   asr:
     type: sherpa
     enabled: true
@@ -99,13 +110,13 @@ providers:
     type: rkllm
     enabled: true
     config:
-      model: ../../models/llm/qwen2_5_5b_rk3588_260722_w8a8.rkllm
+      model: ../../models/llm/qwen2_5_5b_rk3588_260829_w8a8.rkllm
       lib_path: ../lib/librkllmrt.so
       platform: rk3588
       max_context_len: 512
-      max_new_tokens: 16
+      max_new_tokens: 256
       top_k: 1
       top_p: 1.0
       temperature: 0.0
       repeat_penalty: 1.0
-      system_prompt: "Classify the utterance. Output EMOTION|ACTION|CONTROL only."
+      system_prompt: "Classify the owner's MasDog utterance. Return exactly one label in SOCIAL|INTENT|CONTROL format and nothing else."

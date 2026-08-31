@@ -2,7 +2,7 @@
 
 The fine-tuned model receives a single ChatML user turn and must return exactly:
 
-    EMOTION|ACTION|CONTROL
+    SOCIAL|INTENT|CONTROL
 """
 
 from __future__ import annotations
@@ -28,14 +28,14 @@ _RKLLM_LOCK = threading.Lock()
 
 
 def _parse_tag(raw: str) -> dict[str, str] | None:
-    """Parse an exact EMOTION|ACTION|CONTROL tag."""
-    try:
-        emotion, action, control = parse_intent_tag(raw)
-    except ValueError:
+    """Parse an exact SOCIAL|INTENT|CONTROL tag."""
+    parsed = parse_intent_tag(raw)
+    if parsed is None:
         return None
+    social, intent, control = parsed
     return {
-        "EMOTION": emotion,
-        "ACTION": action,
+        "SOCIAL": social,
+        "INTENT": intent,
         "CONTROL": control,
     }
 
@@ -46,12 +46,13 @@ def _tag_to_intent_event(
 ) -> dict[str, Any]:
     """Convert protocol fields to a ROS interaction-event partial payload."""
     return classification_to_event(
-        emotion=tag_parts["EMOTION"],
-        action=tag_parts["ACTION"],
+        social=tag_parts["SOCIAL"],
+        intent=tag_parts["INTENT"],
         control=tag_parts["CONTROL"],
         asr_text=asr_text,
-        source="rkllm",
-        confidence=0.90,
+        source="rkllm_model_k",
+        # Model K currently returns labels, not a calibrated confidence.
+        confidence=0.0,
     )
 
 
@@ -156,11 +157,11 @@ class IntentRKLLMProvider(BaseProvider):
 
             event = _tag_to_intent_event(tag_parts, utterance)
             logger.info(
-                "IntentRKLLM: %r -> %s (EMOTION=%s ACTION=%s CONTROL=%s)",
+                "IntentRKLLM: %r -> %s (SOCIAL=%s INTENT=%s CONTROL=%s)",
                 utterance,
                 event["command_id"],
-                tag_parts["EMOTION"],
-                tag_parts["ACTION"],
+                tag_parts["SOCIAL"],
+                tag_parts["INTENT"],
                 tag_parts["CONTROL"],
             )
             return event

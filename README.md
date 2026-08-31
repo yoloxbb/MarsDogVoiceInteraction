@@ -5,9 +5,11 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 ```text
 讯飞唤醒板
     ↓
-麦克风采集 → Silero VAD ─┬→ 流式 KWS → 即时指令事件
-                          ├→ Paraformer ASR → 完整产品词库 → 指令/交互事件
-                          │                    └→ 未命中 → 规则 / RKLLM 意图
+麦克风采集 → Silero VAD ─┬→ 流式 KWS → 缓存候选 ─┐
+                          ├→ Paraformer ASR ───────┼→ 唯一来源仲裁
+                          │                        ├→ KWS 结果组
+                          │                        └→ ASR → 完整产品词库
+                          │                                  └→ 未命中 → Model K / 兼容规则
                           └→ 3D-Speaker 声纹识别 → 身份事件
                                                 ↓
                                   /perception/audio_event
@@ -23,18 +25,34 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
   这些标定只由动作项目在执行转向时应用一次。
 - 使用 sherpa-onnx Silero VAD 实时切分语音。
 - VAD 与流式 KWS 复用同一份 16 kHz 麦克风数据，不重复打开设备。
-- KWS 命中中英文动作词后立即发布事件，降低动作响应延迟。
+- KWS 命中中英文核心动作词后只缓存候选。VAD 结束、ASR 得到完整文本后再做
+  KWS/ASR 仲裁，避免长句中包含短关键词时提前误触发动作。
 - 使用 Paraformer 完成整句 ASR，优先精确匹配完整产品词库。当前目录覆盖
-  116 条源数据（其中 19 组为核心指令），归并为 81 个路由组、155 条可运行
-  中文短语。命中后直接发布目录指定的 `EVT_VOICE_*` 事件并跳过意图模型，
-  未命中才调用规则或 RKLLM。
+  116 条源数据（其中 19 组为核心指令），归并为 81 个路由组、155 条标准
+  中文词/句；每条另有 10 个受控扩展，共 1705 个精确匹配入口。19 组核心指令命中后先发布不可执行的
+  `EVT_VOICE_COMMAND_KNOWN` 识别摘要，再发布目录指定的可执行
+  `EVT_VOICE_COMMAND_*`；其他目录项仍按各自事件发布。所有目录命中均跳过意图模型。
+- 目录外文本使用新 Model K `SOCIAL|INTENT|CONTROL` 三轴协议。模型结果先发布业务
+  大类事件；命中显式、无歧义的动作白名单时，再按“社交事件 → 可执行具体动作 →
+  `EVT_VOICE_COMMAND_KNOWN` 摘要”发布，未进入白名单的命令仍不可执行。
+  `NONE|NONE|NONE` 固定发布不可执行的 `EVT_VOICE_NEUTRAL`。
+- `FETCH/FIND_TOY` 额外经过目标物白名单：只接受 `config/object_targets.yaml` 中
+  18 个视觉检测类别。命中时以规范英文类别写入 `slots.object_name` 并发布可执行
+  `EVT_VOICE_COMMAND_FETCH`；未命中时写入 `object_name=NONE`，只保留业务大类事件。
 - 支持说话人识别、录制注册，以及通过 FastAPI 上传 WAV、VAD 截取后注册声纹。
 - 使用 `interaction_id` 和 `utterance_id` 关联一次会话及其中的每句话。
 - 支持 pipeline Mock 和直接事件 Mock，无硬件也可联调下游。
 
-KWS 即时事件不会阻止后续 ASR 和声纹处理。ASR 文本先进入确定性指令词库；如果
-词库事件与同一句已经发布的 KWS 事件相同，节点会自动去重。词库未命中时才进行
-意图处理。
+KWS 与 ASR 采用延迟发布、唯一来源仲裁。默认中文不超过 2 个规范化字符、英文不
+超过 2 个词时可优先采用唯一 KWS 候选；长句采用完整 ASR 文本，ASR 目录结果与 KWS
+冲突时也以 ASR 目录为准。ASR 为空且只有一个 KWS 候选时允许 KWS 回退；同一句出现
+多个 KWS 候选时交给 ASR 链路。被选中的核心命令仍作为一个结果组依次发布不可执行
+KNOWN 摘要和具体事件，但不会再同时发布另一识别来源的业务结果。声纹和 `speech`
+证据不受业务结果仲裁影响。词库未命中且 ASR 被选中时才进行意图处理。
+
+上述长度阈值只决定“已有 KWS 候选能否胜出”，不会自动把所有一字/两字词加入 KWS。
+当前仍只使用显式关键词文件；暂不默认加入“走、去、来、停”等单字词，以避免环境
+音和长句片段造成高频候选。新增短关键词必须先完成误触发测试，再写入关键词文件。
 
 ## 项目边界
 
@@ -48,7 +66,7 @@ KWS 即时事件不会阻止后续 ASR 和声纹处理。ASR 文本先进入确�
 跨项目交接语义见 [docs/HANDOFF.md](docs/HANDOFF.md)，完整 ROS2 消息字段和
 Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)，测试执行、日志
 字段和报告模板见 [docs/TESTING_LOG_GUIDE.md](docs/TESTING_LOG_GUIDE.md)，词库中
-155 条中文词/句与期望事件见
+155 条标准中文词/句、扩展规则与期望事件见
 [docs/COMMAND_CATALOG_TEST_MATRIX.md](docs/COMMAND_CATALOG_TEST_MATRIX.md)。
 
 ## 运行环境
@@ -75,7 +93,11 @@ uv sync --extra dev
 | KWS | `wakeup/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/` |
 | ASR | `asr/sherpa-onnx-paraformer-zh-2024-03-09/` |
 | Speaker | `speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` |
-| RKLLM | `llm/qwen2_5_5b_rk3588_260722_w8a8.rkllm` |
+| RKLLM Model K | `llm/qwen2_5_5b_rk3588_260829_w8a8.rkllm` |
+
+当前 Model K 文件 SHA-256 为
+`3c316cede8dcc40c6f019f7a2403f56c2d567eeacc29f410b656eb02981ca0b1`；测试和部署
+应同时核对文件名与校验值，避免板子仍加载旧模型。
 
 部署到其他目录时，建议保持“项目目录与 `models/` 同级”的相对布局；如果目录结构
 不同，只需修改 `config/voice.yaml` 中对应的相对路径。
@@ -142,14 +164,14 @@ uv run marsdog-voice-interaction \
 | `logging` | 日志级别和输出目录 |
 | `mock` | Mock 开关、模式和事件间隔 |
 | `storage.root` | 声纹注册表、样本及临时数据目录 |
-| `command_lexicon` | 完整产品词库（19 组核心指令子集）开关和 `command_catalog.yaml` 路径 |
+| `command_lexicon` | 完整产品词库、19 组核心子集及每标准词/句 10 个受控精确匹配扩展 |
 | `speaker_api` | 声纹上传 API 的开关、监听地址、端口和大小限制 |
 | `topics` | ROS2 Topic 和 Service 名称 |
 | `interaction.idle_timeout_sec` | 最后一次有效语音后等待多久结束会话 |
 | `interaction.hold_max_lease_sec` | 外部会话保持租约的单次最长秒数 |
 | `providers.wakeup` | 讯飞串口和唤醒事件类型 |
 | `providers.audio` | 麦克风、VAD 阈值、语音时长和预录缓存 |
-| `providers.kws` | KWS 模型、关键词及检测阈值 |
+| `providers.kws` | KWS 模型、显式关键词、检测阈值及 deferred/exclusive 仲裁策略 |
 | `providers.asr` | ASR 模型、语言和 ITN |
 | `providers.speaker` | 声纹模型及匹配阈值 |
 | `providers.intent_rule` | 规则意图回退 |
@@ -184,17 +206,19 @@ Swagger `/docs` 当前只提供文件选择和接口调试，不提供浏览器�
 
 ```bash
 curl -X POST http://127.0.0.1:8091/api/v1/speakers \
-  -F 'name=张三' \
+  -F 'name=owner' \
   -F 'audio=@/path/to/speaker.wav;type=audio/wav'
 ```
 
 上传文件必须是未压缩的 16-bit PCM WAV，可为 1～8 声道、8～96 kHz。节点会转为
 16 kHz 单声道，用独立的 Silero VAD 去除首尾静音并拼接有效语音段，再提取声纹。
-姓名会经过 Unicode 规范化，不安全字符统一整理为下划线。结果按以下结构保存在
-`storage.root`，同名上传会新增序号并重新计算 `centroid.npy`：
+`name` 不是自由输入姓名，只能从 `owner`、`family_member_1`、
+`family_member_2`、`family_member_3`、`family_member_4` 中选择；Swagger `/docs`
+会显示该枚举。结果按以下结构保存在 `storage.root`，同一身份上传会新增序号并重新
+计算 `centroid.npy`：
 
 ```text
-data/speakers/张三/
+data/speakers/owner/
 ├── 001.wav
 ├── 001.npy
 └── centroid.npy
@@ -202,9 +226,8 @@ data/speakers/张三/
 
 存储根目录只能由 `config/voice.yaml` 的 `storage.root` 决定。HTTP 请求中没有目录
 参数，客户端传入的路径字段不会改变落盘位置。整个 `data/speakers` 最多保存 5 个
-不同人员；达到上限后仍可给已有人员追加样本、改名或删除，但创建第 6 人返回
-HTTP `409`。每个人最多保存 5 个声纹样本，同名第 6 次上传同样返回 HTTP `409`，
-不会生成 `006.wav/006.npy`。
+身份槽位，对应 1 个主人和 4 个家人。每个身份最多保存 5 个声纹样本，同一身份第
+6 次上传返回 HTTP `409`，不会生成 `006.wav/006.npy`。
 
 管理接口：
 
@@ -212,27 +235,33 @@ HTTP `409`。每个人最多保存 5 个声纹样本，同名第 6 次上传同�
 # 查询人员和样本数
 curl http://127.0.0.1:8091/api/v1/speakers
 
-# 修改姓名；只允许修改姓名，不允许修改存储路径
-curl -X PATCH http://127.0.0.1:8091/api/v1/speakers/张三 \
+# 将现有声纹改到另一个尚未占用的固定身份槽位
+curl -X PATCH http://127.0.0.1:8091/api/v1/speakers/owner \
   -H 'Content-Type: application/json' \
-  -d '{"name":"主人"}'
+  -d '{"name":"family_member_1"}'
 
 # 删除该人员的 WAV、embedding、centroid 和注册表记录
-curl -X DELETE http://127.0.0.1:8091/api/v1/speakers/主人
+curl -X DELETE http://127.0.0.1:8091/api/v1/speakers/family_member_1
 ```
 
-更新已有人员的声音时，继续使用上传接口并填写相同姓名；新有效音频会作为下一条
+更新已有身份的声音时，继续使用上传接口并选择相同身份；新有效音频会作为下一条
 样本追加，随后重新计算该人员的 `centroid.npy`。
+
+运行时声纹事件按身份固定路由：`owner` 发布 `EVT_VOICE_MASTER_ID`，任一
+`family_member_1`～`family_member_4` 发布 `EVT_VOICE_FOLK_ID`，未匹配、
+`unknown` 或历史自由名称发布 `EVT_VOICE_UNMASTER_ID`。身份事件仍由行为树等下游
+通过 `/perception/audio_event` 消费，不由 Voice 直接调用动作系统。
 
 当前配置监听 `0.0.0.0:8091`，局域网内直接访问，不包含 Token 或其他身份验证：
 
 ```bash
-curl -F 'name=张三' \
+curl -F 'name=owner' \
   -F 'audio=@/path/to/speaker.wav;type=audio/wav' \
   http://DOG_IP:8091/api/v1/speakers
 ```
 
-接口会直接暴露声纹的上传、查询、改名和删除能力，目前只应运行在可信开发局域网。
+接口会直接暴露声纹的上传、查询、身份槽位变更和删除能力，目前只应运行在可信开发
+局域网。
 认证模块已移除，后续生产认证方案需要另行设计和接入。
 
 健康检查为 `GET /health`。完整状态码、字段和兼容接口见
@@ -427,7 +456,7 @@ MarsDogVoiceInteraction/
 ├── lib/                            # RKLLM 运行库
 ├── marsdog_voice_interaction/
 │   ├── adapters/                   # RKLLM、讯飞串口底层适配
-│   ├── core/                       # 会话状态机、去重和声纹注册管理
+│   ├── core/                       # 会话状态机、KWS 候选跟踪和声纹注册管理
 │   ├── messages/                   # 事件结构、事件类型和意图协议
 │   ├── nodes/                      # ROS2 主节点
 │   ├── providers/                  # Wakeup/VAD/KWS/ASR/Speaker/Intent
@@ -442,7 +471,7 @@ MarsDogVoiceInteraction/
   `interaction_id`。
 - 每句话创建新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享
   该 ID。
-- 只有非空 ASR 或有效 KWS 才刷新会话的最后有效语音时间。
+- 只有非空 ASR 或最终选中的有效 KWS 结果才刷新会话的最后有效语音时间；缓存候选不刷新。
 - 活跃 VAD 采集不能被会话静默超时截断。
 - 新增确定性命令时应同步修改 `command_catalog.yaml`、事件类型、测试、ROS2 契约
   以及下游行为树和 Action 行为映射；Voice 不直接调用动作系统。

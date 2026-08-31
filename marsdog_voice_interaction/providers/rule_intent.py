@@ -1,4 +1,4 @@
-"""Rule fallback for the EMOTION|ACTION|CONTROL intent protocol."""
+"""Rule fallback for the Model K SOCIAL|INTENT|CONTROL protocol."""
 
 from __future__ import annotations
 
@@ -26,34 +26,34 @@ _RULES: list[tuple[re.Pattern, str, str, str, str, Any]] = [
      "CMD_SIT", "command", "NONE|SIT|DO", "好的，我坐下了。",
      lambda _m: []),
     (re.compile(r"^(?:趴下|liedown)$", re.IGNORECASE),
-     "CMD_LIE_DOWN", "command", "NONE|LIE_DOWN|DO", "好的，我趴下了。",
+     "CMD_LIE_DOWN", "command", "NONE|LIE|DO", "好的，我趴下了。",
      lambda _m: []),
     (re.compile(r"^(?:过来(?:一下)?|come|comehere)$", re.IGNORECASE),
      "CMD_COME_HERE", "command", "NONE|COME|DO", "好的，我过来了。",
      lambda _m: []),
     (re.compile(r"^(?:握手|shakehands?)$", re.IGNORECASE),
-     "CMD_HAND", "command", "NONE|SHAKE_HAND|DO", "好的，握个手！",
+     "CMD_HAND", "command", "NONE|SHAKE|DO", "好的，握个手！",
      lambda _m: []),
     (re.compile(r"^(?:击掌|highfive)$", re.IGNORECASE),
      "CMD_FIVE", "command", "NONE|HIGH_FIVE|DO", "击掌！",
      lambda _m: []),
     (re.compile(r"^(?:站起来|standup)$", re.IGNORECASE),
-     "CMD_STAND_UP", "command", "NONE|STAND_UP|DO", "好的，我站起来了。",
+     "CMD_STAND_UP", "command", "NONE|STAND|DO", "好的，我站起来了。",
      lambda _m: []),
     (re.compile(r"^(?:等一下|等等|wait)$", re.IGNORECASE),
-     "CMD_WAIT", "command", "NONE|WAIT|DO", "好的，我等一下。",
+     "CMD_WAIT", "command", "NONE|STAY|DO", "好的，我等一下。",
      lambda _m: []),
     (re.compile(r"^(?:随行|跟着我|跟我走|followme)$", re.IGNORECASE),
      "CMD_FOLLOW", "command", "NONE|FOLLOW|DO", "好的，我跟着你。",
      lambda _m: []),
     (re.compile(r"^(?:翻滚|打滚|rollover)$", re.IGNORECASE),
-     "CMD_ROLL", "command", "NONE|ROLL_OVER|DO", "看我的，翻滚！",
+     "CMD_ROLL", "command", "NONE|ROLL|DO", "看我的，翻滚！",
      lambda _m: []),
     (re.compile(r"^(?:转圈|转个圈|转一圈|spin)$", re.IGNORECASE),
      "CMD_SPIN", "command", "NONE|SPIN|DO", "好的，转个圈！",
      lambda _m: []),
     (re.compile(r"^(?:回来|绕回来|绕回|comeback)$", re.IGNORECASE),
-     "CMD_BACK", "command", "NONE|RETURN|DO", "好的，我回来了。",
+     "CMD_BACK", "command", "NONE|COME|DO", "好的，我回来了。",
      lambda _m: []),
     (re.compile(r"^(?:吐掉|吐出来|放下|dropit)$", re.IGNORECASE),
      "CMD_SPIT", "command", "NONE|DROP|DO", "好的，吐掉了。",
@@ -62,15 +62,15 @@ _RULES: list[tuple[re.Pattern, str, str, str, str, Any]] = [
      "CMD_DEAD", "command", "NONE|PLAY_DEAD|DO", "装死中…",
      lambda _m: []),
     (re.compile(r"^(?:停止|停下|停|别动了|不许动)$"),
-     "CMD_STOP", "command", "NONE|STOP|CANCEL", "好的，停下了。",
+     "CMD_STOP", "command", "NONE|STAY|STOP", "好的，停下了。",
      lambda _m: []),
 
     # ── B (blame) ────────────────────────────────────────────
     (re.compile(r"^(?:吐出来|不许吃|快吐出来)$"),
-     "CMD_SPIT", "blame", "REPRIMAND|DROP|CANCEL", "吐掉！好的。",
+     "CMD_SPIT", "blame", "SCOLD|DROP|STOP", "吐掉！好的。",
      lambda _m: []),
     (re.compile(r"^(?:不许|不准|禁止|不可以|不能|别乱|别跑).*"),
-     "CMD_WARN", "blame", "REPRIMAND|UNKNOWN|CANCEL", "警告！收到。",
+     "CMD_WARN", "blame", "SCOLD|NONE|NONE", "警告！收到。",
      lambda _m: []),
 
     # ── P (praise) ───────────────────────────────────────────
@@ -93,18 +93,18 @@ _RULES: list[tuple[re.Pattern, str, str, str, str, Any]] = [
 
     # ── E (emotion) ──────────────────────────────────────────
     (re.compile(r"^(?:别难过|别伤心|没事的|别怕)$"),
-     "CMD_COMFORT", "emotion", "NONE|NONE|NONE", "别难过，我陪着你。",
+     "CMD_COMFORT", "emotion", "COMFORT|NONE|NONE", "别难过，我陪着你。",
      lambda _m: []),
     (re.compile(r"^(?:聊聊天.*|陪陪我|说说话)$"),
-     "CMD_CHAT", "emotion", "LONELINESS|NONE|NONE", "我在呢。",
+     "CMD_CHAT", "emotion", "OWNER_NEGATIVE|NONE|NONE", "我在呢。",
      lambda _m: []),
     (re.compile(r"^(?:你好|嗨|哈[喽啰]|hello|hi|我去?喜欢你|谢谢.*|多谢|感谢)$"),
-     "CMD_CHAT", "emotion", "NONE|NONE|NONE", "我在呢。",
+     "CMD_CHAT", "emotion", "CALL|NONE|NONE", "我在呢。",
      lambda _m: []),
 
     # ── Object tasks (extended from Phase 1, mapped to C) ────
     (re.compile(r"^把(.+?)(?:拿给我|拿过来|给我|过来)$"),
-     "CMD_BRING_OBJECT", "command", "NONE|BRING|DO",
+     "CMD_BRING_OBJECT", "command", "NONE|FETCH|DO",
      "好的，我去拿。",
      lambda m: [{"key": "object_name", "value": m.group(1).strip()}]),
     (re.compile(r"^找(.+)$"),
@@ -114,7 +114,7 @@ _RULES: list[tuple[re.Pattern, str, str, str, str, Any]] = [
 
     # ── Add missing command patterns ────────────────────────
     (re.compile(r"^(?:别跑了?|站好)$"),
-     "CMD_STOP", "command", "NONE|STOP|CANCEL", "好的，停下了。",
+     "CMD_STOP", "command", "NONE|STAY|STOP", "好的，停下了。",
      lambda _m: []),
 
     # ── Fuzzy praise catch-all (runs after specific rules) ──
@@ -124,12 +124,12 @@ _RULES: list[tuple[re.Pattern, str, str, str, str, Any]] = [
 
     # ── Happy emotion catch-all ─────────────────────────────
     (re.compile(r"^.*(?:好开心|好高兴|好快乐|好爱你|好喜欢你|真开心|好幸福|真好|真是我的|见到你真好|天气真好).*$"),
-     "CMD_CHAT", "emotion", "JOY|NONE|NONE", "我也好开心！",
+     "CMD_CHAT", "emotion", "OWNER_POSITIVE|NONE|NONE", "我也好开心！",
      lambda _m: []),
 
     # ── Sad emotion catch-all ───────────────────────────────
     (re.compile(r"^.*(?:好难过|不太开心|不开心|好累|不舒服|好想你|心里不舒服|有点累|好伤心|好失落|别难过).*$"),
-     "CMD_COMFORT", "emotion", "SADNESS|NONE|NONE", "别难过，我陪着你。",
+     "CMD_COMFORT", "emotion", "OWNER_NEGATIVE|NONE|NONE", "别难过，我陪着你。",
      lambda _m: []),
 
     # ── Neutral chat catch-all ──────────────────────────────
@@ -176,7 +176,7 @@ class RuleIntentProvider(BaseProvider):
 
         Returns:
             Intent event partial dict if matched, None otherwise.
-            Includes EMOTION|ACTION|CONTROL fields and raw tag.
+            Includes SOCIAL|INTENT|CONTROL fields and raw tag.
         """
         if not asr_text or not isinstance(asr_text, str):
             return None
@@ -190,13 +190,17 @@ class RuleIntentProvider(BaseProvider):
         for pattern, _command_id, _category, tag, _response, slots_fn in _RULES:
             match = pattern.match(text)
             if match:
-                emotion, action, control = parse_intent_tag(tag)
+                parsed = parse_intent_tag(tag)
+                if parsed is None:
+                    logger.error("Invalid built-in rule tag: %s", tag)
+                    continue
+                social, intent, control = parsed
                 event = classification_to_event(
-                    emotion=emotion,
-                    action=action,
+                    social=social,
+                    intent=intent,
                     control=control,
                     asr_text=text,
-                    source="rule",
+                    source="rule_model_k_compatible",
                     confidence=0.95,
                     extra_slots=slots_fn(match),
                 )

@@ -74,6 +74,8 @@ class AudioSherpaProvider(BaseProvider):
         self._capturing = False
         self._speech_active = False
         self._capture_cancel_event: threading.Event | None = None
+        self._active_input_stream: Any = None
+        self._active_arecord_process: Any = None
         self._chunk_callback: (
             Callable[[np.ndarray, int], None] | None
         ) = None
@@ -202,7 +204,29 @@ class AudioSherpaProvider(BaseProvider):
             and thread.is_alive()
             and thread is not threading.current_thread()
         ):
-            thread.join(timeout=max(0.0, timeout))
+            deadline = time.monotonic() + max(0.0, timeout)
+            interrupted_stream: Any = None
+            interrupted_process: Any = None
+            while thread.is_alive():
+                with self._capture_lock:
+                    active_stream = self._active_input_stream
+                    active_process = self._active_arecord_process
+                if (
+                    active_stream is not None
+                    and active_stream is not interrupted_stream
+                ):
+                    self._interrupt_capture_backend(active_stream, None)
+                    interrupted_stream = active_stream
+                if (
+                    active_process is not None
+                    and active_process is not interrupted_process
+                ):
+                    self._interrupt_capture_backend(None, active_process)
+                    interrupted_process = active_process
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(timeout=min(0.1, remaining))
 
         worker_stopped = thread is None or not thread.is_alive()
         with self._capture_lock:
@@ -214,6 +238,34 @@ class AudioSherpaProvider(BaseProvider):
         if not worker_stopped:
             logger.error("VAD capture worker did not stop within %.1fs", timeout)
         return worker_stopped
+
+    @staticmethod
+    def _interrupt_capture_backend(
+        stream: Any,
+        process: Any,
+    ) -> None:
+        """Unblock a backend read so the worker can observe cancellation."""
+
+        if stream is not None:
+            # The capture worker owns the InputStream lifecycle and closes it
+            # in _stream_vad()'s finally block.  Closing it here races that
+            # cleanup and can make PortAudio free the same native stream twice.
+            abort = getattr(stream, "abort", None)
+            if callable(abort):
+                try:
+                    abort()
+                except Exception:
+                    pass
+        if process is not None:
+            try:
+                running = process.poll() is None
+            except Exception:
+                running = False
+            if running:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
 
     def poll_result(self) -> dict[str, Any] | None:
         """Non-blocking poll for capture result.
@@ -311,6 +363,8 @@ class AudioSherpaProvider(BaseProvider):
         all_audio: list[float] = []
         speech_segment: np.ndarray | None = None
         t_start = time.perf_counter()
+        stream: Any = None
+        fallback_to_arecord = False
 
         try:
             stream = sd.InputStream(
@@ -320,6 +374,19 @@ class AudioSherpaProvider(BaseProvider):
                 device=self._device,
                 blocksize=_CHUNK_SAMPLES,
             )
+            with self._capture_lock:
+                if (
+                    self._capture_cancel_event is cancel_event
+                    and not cancel_event.is_set()
+                ):
+                    self._active_input_stream = stream
+            if cancel_event.is_set():
+                return {
+                    "audio_samples": np.array([], dtype=np.float32),
+                    "sample_rate": self._sample_rate,
+                    "duration_ms": 0.0,
+                    "has_voice": False,
+                }
             stream.start()
 
             while True:
@@ -333,6 +400,8 @@ class AudioSherpaProvider(BaseProvider):
 
                 # Read one chunk
                 chunk, _ = stream.read(_CHUNK_SAMPLES)
+                if cancel_event.is_set() or not self._capturing:
+                    break
                 chunk = chunk.flatten()
                 all_audio.extend(chunk.tolist())
                 self._notify_chunk(chunk)
@@ -389,18 +458,41 @@ class AudioSherpaProvider(BaseProvider):
                     logger.debug("VAD max duration reached, no speech detected")
                     break
 
-            stream.stop()
-            stream.close()
-
         except sd.PortAudioError as exc:
-            print(f"[VAD] sounddevice error: {exc} — fallback to arecord", flush=True)
-            logger.error("sounddevice error: %s", exc)
-            return self._stream_vad_arecord(cancel_event)
+            if cancel_event.is_set():
+                logger.debug("sounddevice capture interrupted for cancellation")
+            else:
+                print(
+                    f"[VAD] sounddevice error: {exc} — fallback to arecord",
+                    flush=True,
+                )
+                logger.error("sounddevice error: %s", exc)
+                fallback_to_arecord = True
         except Exception as exc:
-            import traceback as _tb
-            print(f"[VAD] stream error: {exc}", flush=True)
-            _tb.print_exc()
-            logger.error("VAD stream error: %s", exc, exc_info=True)
+            if cancel_event.is_set():
+                logger.debug("VAD stream interrupted for cancellation: %s", exc)
+            else:
+                import traceback as _tb
+                print(f"[VAD] stream error: {exc}", flush=True)
+                _tb.print_exc()
+                logger.error("VAD stream error: %s", exc, exc_info=True)
+        finally:
+            with self._capture_lock:
+                if self._active_input_stream is stream:
+                    self._active_input_stream = None
+            if stream is not None:
+                if not cancel_event.is_set():
+                    try:
+                        stream.stop()
+                    except Exception:
+                        pass
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        if fallback_to_arecord and not cancel_event.is_set():
+            return self._stream_vad_arecord(cancel_event)
 
         if speech_segment is not None and len(speech_segment) > 0:
             duration_ms = (len(speech_segment) / self._sample_rate) * 1000.0
@@ -450,6 +542,12 @@ class AudioSherpaProvider(BaseProvider):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+            with self._capture_lock:
+                if (
+                    self._capture_cancel_event is cancel_event
+                    and not cancel_event.is_set()
+                ):
+                    self._active_arecord_process = process
             if process.stdout is None:
                 raise RuntimeError("arecord stdout pipe was not created")
 
@@ -458,6 +556,8 @@ class AudioSherpaProvider(BaseProvider):
             while self._capturing and not cancel_event.is_set():
                 raw = process.stdout.read(chunk_bytes)
                 if not raw:
+                    break
+                if cancel_event.is_set() or not self._capturing:
                     break
                 if len(raw) % 2:
                     raw = raw[:-1]
@@ -485,7 +585,7 @@ class AudioSherpaProvider(BaseProvider):
                 if time.perf_counter() - started > self._max_duration_sec:
                     break
 
-            if speech_segment is None:
+            if speech_segment is None and not cancel_event.is_set():
                 self._vad.flush()
                 speech_parts: list[np.ndarray] = []
                 while not self._vad.empty():
@@ -517,6 +617,9 @@ class AudioSherpaProvider(BaseProvider):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.communicate()
+            with self._capture_lock:
+                if self._active_arecord_process is process:
+                    self._active_arecord_process = None
 
         if speech_segment is not None and speech_segment.size:
             duration_ms = (

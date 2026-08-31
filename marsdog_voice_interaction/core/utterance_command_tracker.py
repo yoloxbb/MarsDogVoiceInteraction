@@ -1,14 +1,14 @@
-"""Track command events emitted during one utterance."""
+"""Track deferred KWS candidates during one utterance."""
 
 from __future__ import annotations
 
 
 class UtteranceCommandTracker:
-    """Remember immediate KWS events so the final intent is not duplicated."""
+    """Cache unique KWS candidates until ASR arbitration is complete."""
 
     def __init__(self) -> None:
         self._utterance_id = ""
-        self._immediate_event_types: set[str] = set()
+        self._kws_candidates: dict[str, dict[str, object]] = {}
 
     @property
     def utterance_id(self) -> str:
@@ -19,31 +19,37 @@ class UtteranceCommandTracker:
         return bool(self._utterance_id)
 
     @property
-    def immediate_event_types(self) -> frozenset[str]:
-        return frozenset(self._immediate_event_types)
+    def kws_candidates(self) -> tuple[dict[str, object], ...]:
+        """Return copies of candidates in first-detection order."""
+
+        return tuple(dict(event) for event in self._kws_candidates.values())
+
+    @property
+    def kws_candidate_count(self) -> int:
+        return len(self._kws_candidates)
 
     def begin(self, utterance_id: str) -> None:
         self._utterance_id = str(utterance_id)
-        self._immediate_event_types.clear()
+        self._kws_candidates.clear()
 
-    def record_immediate(self, event_type: str) -> bool:
-        """Record an immediate event and return whether it is new."""
-        value = str(event_type)
-        if not self.is_active or not value:
+    def record_kws_candidate(self, event: dict[str, object]) -> bool:
+        """Record one unique candidate and return whether it is new."""
+
+        event_type = str(event.get("event_type", "")).strip()
+        if not self.is_active or not event_type:
             return False
-        if value in self._immediate_event_types:
+        if event_type in self._kws_candidates:
             return False
-        self._immediate_event_types.add(value)
+        self._kws_candidates[event_type] = dict(event)
         return True
 
-    def is_duplicate_final(self, event_type: str) -> bool:
-        """Return whether the final intent matches an immediate KWS event."""
-        return (
-            self.is_active
-            and bool(event_type)
-            and str(event_type) in self._immediate_event_types
-        )
+    def single_kws_candidate(self) -> dict[str, object] | None:
+        """Return the sole candidate, or ``None`` when zero/multiple exist."""
+
+        if len(self._kws_candidates) != 1:
+            return None
+        return dict(next(iter(self._kws_candidates.values())))
 
     def finish(self) -> None:
         self._utterance_id = ""
-        self._immediate_event_types.clear()
+        self._kws_candidates.clear()

@@ -19,6 +19,8 @@ storage:
   root: ../data
 command_lexicon:
   catalog: command_catalog.yaml
+object_target_routing:
+  catalog: object_targets.yaml
 providers:
   audio:
     config:
@@ -41,6 +43,9 @@ topics:
     assert config["storage"]["root"] == str(tmp_path / "data")
     assert config["command_lexicon"]["catalog"] == str(
         config_dir / "command_catalog.yaml"
+    )
+    assert config["object_target_routing"]["catalog"] == str(
+        config_dir / "object_targets.yaml"
     )
     assert config["providers"]["audio"]["config"]["vad_model"] == str(
         tmp_path.parent / "models" / "vad.onnx"

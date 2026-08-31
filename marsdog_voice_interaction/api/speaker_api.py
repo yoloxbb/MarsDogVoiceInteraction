@@ -19,16 +19,20 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
+from marsdog_voice_interaction.messages.speaker_identity import (
+    SpeakerIdentity,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
 class SpeakerRenameRequest(BaseModel):
-    """Only a normalized display name is mutable through the HTTP API."""
+    """Move an enrolled voice print to another fixed identity slot."""
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, max_length=128)
+    name: SpeakerIdentity = Field(description="目标身份槽位")
 
 
 class SpeakerApiServer:
@@ -120,10 +124,11 @@ class SpeakerApiServer:
     def create_app(self) -> Any:
         app = FastAPI(
             title="MarsDog Voice Speaker API",
-            version="1.0.0",
+            version="1.1.0",
             description=(
-                "Manage up to five device-local speakers and upload PCM16 WAV "
-                "audio for VAD-trimmed enrollment. Storage is config-owned."
+                "Manage the fixed owner/family identity slots and upload "
+                "PCM16 WAV audio for VAD-trimmed enrollment. Storage is "
+                "config-owned."
             ),
         )
 
@@ -182,12 +187,19 @@ class SpeakerApiServer:
 
         @app.post("/api/v1/speakers", status_code=201)
         async def upload_speaker(
-            name: str = Form(..., min_length=1, max_length=128),
+            name: SpeakerIdentity = Form(
+                ...,
+                description="选择 owner 或 family_member_1 到 family_member_4",
+            ),
             audio: UploadFile = File(...),
         ) -> dict[str, Any]:
             payload = await read_wav(audio)
             request_id = uuid.uuid4().hex
-            result = await run_handler(self._upload_handler, name, payload)
+            result = await run_handler(
+                self._upload_handler,
+                name.value,
+                payload,
+            )
             raise_for_result(result)
             return {
                 "request_id": request_id,
@@ -207,7 +219,7 @@ class SpeakerApiServer:
             name: str = Path(..., min_length=1, max_length=128),
         ) -> dict[str, Any]:
             handler = require_handler(self._rename_handler, "rename")
-            result = await run_handler(handler, name, request.name)
+            result = await run_handler(handler, name, request.name.value)
             raise_for_result(result)
             return {"request_id": uuid.uuid4().hex, **result}
 

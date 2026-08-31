@@ -11,11 +11,12 @@ from typing import Any
 import numpy as np
 
 from marsdog_voice_interaction.messages.intent_protocol import (
-    ACTION_LABELS,
+    COMMAND_KEY_TO_COMMAND_ID,
+    COMMAND_KEY_TO_NLU,
     classification_to_event,
 )
 from marsdog_voice_interaction.messages.voice_event_types import (
-    classification_to_voice_event,
+    ACTION_TO_VOICE_EVENT,
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
 
@@ -178,36 +179,39 @@ class KWSSherpaProvider(BaseProvider):
             return self._events.popleft() if self._events else None
 
     def _queue_keyword(self, keyword: str) -> None:
-        action = keyword.upper()
-        if action not in ACTION_LABELS or action in {
-            "NONE",
-            "UNKNOWN",
-            "MULTI",
-        }:
+        command_key = keyword.upper()
+        labels = COMMAND_KEY_TO_NLU.get(command_key)
+        event_type = ACTION_TO_VOICE_EVENT.get(command_key)
+        if labels is None or event_type is None:
             logger.warning("KWS ignored unmapped keyword label: %r", keyword)
             return
-        if action in self._seen_actions:
+        if command_key in self._seen_actions:
             return
-        self._seen_actions.add(action)
+        self._seen_actions.add(command_key)
 
-        control = "CANCEL" if action == "STOP" else "DO"
+        social, intent, control = labels
         event = classification_to_event(
-            emotion="NONE",
-            action=action,
+            social=social,
+            intent=intent,
             control=control,
             asr_text=keyword,
             source="kws",
             confidence=self._event_confidence,
+            command_id=COMMAND_KEY_TO_COMMAND_ID.get(
+                command_key,
+                f"CMD_{command_key}",
+            ),
+            specific_event_type=event_type,
+            dispatch_role="specific_command",
+            executable=True,
             extra_slots=[{"key": "kws_keyword", "value": keyword}],
         )
         event.update({
-            "event_type": classification_to_voice_event(
-                "NONE",
-                action,
-                control,
-            ),
+            "event_type": event_type,
+            # Compatibility action preserves the concrete command key.
+            "action": command_key,
             "language": "zh-en",
         })
         with self._event_lock:
             self._events.append(event)
-        logger.info("KWS detected command: %s", action)
+        logger.info("KWS detected command: %s", command_key)

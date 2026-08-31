@@ -25,6 +25,10 @@ except ImportError:
     VoiceTask = None  # type: ignore[assignment]
 
 from marsdog_voice_interaction.core.command_lexicon import CommandLexicon
+from marsdog_voice_interaction.core.object_target_resolver import (
+    ObjectTargetResolver,
+    object_resolution_slots,
+)
 from marsdog_voice_interaction.core.interaction_state_machine import (
     Trigger,
     VoiceInteractionStateMachine,
@@ -37,10 +41,14 @@ from marsdog_voice_interaction.core.utterance_command_tracker import (
     UtteranceCommandTracker,
 )
 from marsdog_voice_interaction.messages.audio_event import normalize_audio_event
+from marsdog_voice_interaction.messages.intent_event_router import (
+    route_classification_events,
+)
+from marsdog_voice_interaction.messages.intent_protocol import NLU_PROTOCOL
 from marsdog_voice_interaction.messages.voice_event_types import (
     EVT_STATE_CHANGED,
     EVT_VOICE_CALL_NAME,
-    classification_to_voice_event,
+    EVT_VOICE_COMMAND_KNOWN,
     speaker_to_voice_event,
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
@@ -63,18 +71,20 @@ _AUDIO_QOS = QoSProfile(
 
 _UNKNOWN_INTENT = {
     "event_type": "EVT_VOICE_COMMAND_UNKNOWN",
+    "social": "NONE",
+    "intent": "NONE",
     "emotion": "NONE",
-    "action": "UNKNOWN",
-    "control": "CLARIFY",
+    "action": "NONE",
+    "control": "NONE",
     "command_id": "CMD_UNKNOWN",
-    "intent_category": "clarify",
-    "intent_source": "fallback",
+    "intent_category": "diagnostic",
+    "intent_source": "invalid_protocol_fallback",
     "intent_confidence": 0.0,
+    "nlu_protocol": NLU_PROTOCOL,
+    "raw_nlu_tag": "",
+    "dispatch_role": "diagnostic",
     "slots": [
-        {"key": "emotion", "value": "NONE"},
-        {"key": "action", "value": "UNKNOWN"},
-        {"key": "control", "value": "CLARIFY"},
-        {"key": "raw_tag", "value": "NONE|UNKNOWN|CLARIFY"},
+        {"key": "reason", "value": "no_valid_model_k_result"},
     ],
     "is_executable": False,
     "should_trigger_behavior_tree": False,
@@ -120,6 +130,12 @@ class VoiceInteractionNode(Node):
             "ready": False,
         }
         self._init_command_lexicon()
+        self._object_target_resolver: ObjectTargetResolver | None = None
+        self._object_target_status: dict[str, Any] = {
+            "enabled": False,
+            "ready": False,
+        }
+        self._init_object_target_resolver()
 
         set_storage_root(
             self._config.get("storage", {}).get("root", "data")
@@ -142,6 +158,7 @@ class VoiceInteractionNode(Node):
         self._latest_audio: dict[str, Any] | None = None
         self._command_tracker = UtteranceCommandTracker()
         self._utterance_started_monotonic = 0.0
+        self._kws_arbitration = self._load_kws_arbitration_config()
 
         interaction = self._config.get("interaction", {})
         self._idle_timeout = float(interaction.get("idle_timeout_sec", 10))
@@ -197,6 +214,8 @@ class VoiceInteractionNode(Node):
             idle_timeout_sec=self._idle_timeout,
             speaker_api=self._speaker_api_status,
             command_lexicon=self._command_lexicon_status,
+            object_target_routing=self._object_target_status,
+            kws_arbitration=self._kws_arbitration,
             providers={
                 name: {
                     "class": type(provider).__name__,
@@ -211,6 +230,44 @@ class VoiceInteractionNode(Node):
         if not mock.get("enabled", False):
             return "production"
         return f"mock_{mock.get('mode', 'pipeline')}"
+
+    def _load_kws_arbitration_config(self) -> dict[str, Any]:
+        """Load the safety-critical KWS/ASR exclusive arbitration policy."""
+
+        providers = self._config.get("providers", {})
+        kws = providers.get("kws", {}) if isinstance(providers, dict) else {}
+        config = kws.get("config", {}) if isinstance(kws, dict) else {}
+        if not isinstance(config, dict):
+            config = {}
+        policy = {
+            "publish_mode": str(
+                config.get("publish_mode", "deferred")
+            ).strip().lower(),
+            "arbitration_mode": str(
+                config.get("arbitration_mode", "exclusive")
+            ).strip().lower(),
+            "asr_long_text_wins": bool(
+                config.get("asr_long_text_wins", True)
+            ),
+            "kws_fallback_on_asr_empty": bool(
+                config.get("kws_fallback_on_asr_empty", True)
+            ),
+            "short_max_chars_zh": max(
+                1, int(config.get("short_max_chars_zh", 2))
+            ),
+            "short_max_words_en": max(
+                1, int(config.get("short_max_words_en", 2))
+            ),
+        }
+        if policy["publish_mode"] != "deferred":
+            raise ValueError(
+                "providers.kws.config.publish_mode must be 'deferred'"
+            )
+        if policy["arbitration_mode"] != "exclusive":
+            raise ValueError(
+                "providers.kws.config.arbitration_mode must be 'exclusive'"
+            )
+        return policy
 
     def _init_command_lexicon(self) -> None:
         config = self._config.get("command_lexicon", {})
@@ -234,6 +291,11 @@ class VoiceInteractionNode(Node):
                 "command_count": lexicon.command_count,
                 "core_command_count": lexicon.core_command_count,
                 "phrase_count": lexicon.phrase_count,
+                "expansion_enabled": lexicon.expansion_enabled,
+                "variants_per_phrase": lexicon.variants_per_phrase,
+                "expanded_phrase_count": lexicon.expanded_phrase_count,
+                "total_match_phrase_count": lexicon.total_match_phrase_count,
+                "expansion_profile_count": lexicon.expansion_profile_count,
                 "reference_phrase_count": lexicon.reference_phrase_count,
                 "source_name": lexicon.source_name,
                 "source_row_count": lexicon.source_row_count,
@@ -241,16 +303,52 @@ class VoiceInteractionNode(Node):
             })
             logger.info(
                 "Command lexicon ready: version=%s commands=%d core=%d "
-                "phrases=%d",
+                "phrases=%d expanded=%d total=%d",
                 lexicon.version,
                 lexicon.command_count,
                 lexicon.core_command_count,
                 lexicon.phrase_count,
+                lexicon.expanded_phrase_count,
+                lexicon.total_match_phrase_count,
             )
         except Exception as exc:
             self._command_lexicon = None
             self._command_lexicon_status["error"] = str(exc)
             logger.error("Command lexicon unavailable: %s", exc)
+
+    def _init_object_target_resolver(self) -> None:
+        config = self._config.get("object_target_routing", {})
+        enabled = bool(config.get("enabled", True))
+        self._object_target_status = {
+            "enabled": enabled,
+            "ready": False,
+        }
+        if not enabled:
+            return
+        try:
+            catalog_path = str(config.get("catalog", "")).strip()
+            if not catalog_path:
+                raise ValueError("object_target_routing.catalog is required")
+            resolver = ObjectTargetResolver(catalog_path)
+            self._object_target_resolver = resolver
+            self._object_target_status.update({
+                "ready": True,
+                "catalog": str(resolver.catalog_path),
+                "version": resolver.version,
+                "target_count": resolver.target_count,
+                "alias_count": resolver.alias_count,
+            })
+            logger.info(
+                "Object target catalog loaded: version=%s targets=%d "
+                "aliases=%d",
+                resolver.version,
+                resolver.target_count,
+                resolver.alias_count,
+            )
+        except Exception as exc:
+            self._object_target_resolver = None
+            self._object_target_status["error"] = str(exc)
+            logger.error("Object target catalog unavailable: %s", exc)
 
     def _trace(self, record: str, **fields: Any) -> None:
         if getattr(self, "_event_trace_enabled", True):
@@ -697,8 +795,8 @@ class VoiceInteractionNode(Node):
                                 self._command_tracker.utterance_id or None,
                             )
                             if valid_speech:
-                                # Only recognized speech (or a KWS event in
-                                # _poll_kws_events) extends the conversation.
+                                # Only a finalized ASR/KWS result extends the
+                                # conversation; cached KWS candidates do not.
                                 self._refresh_interaction_activity()
                         else:
                             logger.debug(
@@ -748,6 +846,231 @@ class VoiceInteractionNode(Node):
         """Avoid ending a session in the middle of an unfinished utterance."""
         is_speech_active = getattr(audio, "is_speech_active", None)
         return bool(is_speech_active()) if callable(is_speech_active) else False
+
+    def _effective_kws_arbitration(self) -> dict[str, Any]:
+        """Return policy defaults for lightweight test harnesses as well."""
+
+        return dict(
+            getattr(
+                self,
+                "_kws_arbitration",
+                {
+                    "publish_mode": "deferred",
+                    "arbitration_mode": "exclusive",
+                    "asr_long_text_wins": True,
+                    "kws_fallback_on_asr_empty": True,
+                    "short_max_chars_zh": 2,
+                    "short_max_words_en": 2,
+                },
+            )
+        )
+
+    def _is_short_asr_text(self, raw_text: str, language: str) -> bool:
+        """Classify ASR text for KWS preference without changing semantics."""
+
+        policy = self._effective_kws_arbitration()
+        value = str(raw_text).strip()
+        language = str(language).strip().lower()
+        ascii_words = re.findall(r"[A-Za-z0-9]+", value)
+        has_cjk = bool(re.search(r"[\u3400-\u9fff]", value))
+        if language.startswith("en") or (ascii_words and not has_cjk):
+            return (
+                0 < len(ascii_words)
+                <= int(policy["short_max_words_en"])
+            )
+        return (
+            0 < len(self._clean_text(value))
+            <= int(policy["short_max_chars_zh"])
+        )
+
+    def _select_kws_candidate(
+        self,
+        *,
+        text: str,
+        raw_text: str,
+        language: str,
+        direct_match: Any = None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Select one deferred KWS result or explain why ASR owns the turn."""
+
+        candidates = [
+            dict(event) for event in self._command_tracker.kws_candidates
+        ]
+        if not candidates:
+            return None, "no_kws_candidate"
+        if len(candidates) != 1:
+            return None, "multiple_kws_candidates"
+        candidate = candidates[0]
+        policy = self._effective_kws_arbitration()
+        if not text:
+            if policy["kws_fallback_on_asr_empty"]:
+                return candidate, "empty_asr_single_candidate"
+            return None, "empty_asr_fallback_disabled"
+
+        candidate_event_type = str(candidate.get("event_type", ""))
+        if (
+            direct_match is not None
+            and direct_match.event_type != candidate_event_type
+        ):
+            return None, "asr_catalog_conflicts_with_kws"
+        if (
+            policy["asr_long_text_wins"]
+            and not self._is_short_asr_text(raw_text, language)
+        ):
+            return None, "long_asr_text"
+        if direct_match is not None:
+            return candidate, "short_asr_catalog_agrees"
+        return candidate, "short_asr_kws_preferred"
+
+    def _trace_recognition_arbitration(
+        self,
+        *,
+        result: str,
+        reason: str,
+        text: str,
+        language: str,
+        utterance_id: str,
+        direct_match: Any = None,
+        started: float,
+    ) -> None:
+        candidates = self._command_tracker.kws_candidates
+        self._trace(
+            "stage_complete",
+            stage="recognition_arbitration",
+            result=result,
+            interaction_id=self._interaction_id,
+            utterance_id=utterance_id,
+            selected_source=(
+                "kws" if result == "kws_selected"
+                else "asr_pipeline" if result == "asr_selected"
+                else "none"
+            ),
+            reason=reason,
+            asr_text=text,
+            language=language,
+            asr_text_length=len(text),
+            asr_is_short=(
+                self._is_short_asr_text(text, language) if text else False
+            ),
+            kws_candidate_count=len(candidates),
+            kws_candidate_keys=[
+                str(event.get("action", "")) for event in candidates
+            ],
+            kws_candidate_event_types=[
+                str(event.get("event_type", "")) for event in candidates
+            ],
+            catalog_event_type=(
+                direct_match.event_type if direct_match is not None else ""
+            ),
+            latency_ms=round(
+                (time.perf_counter() - started) * 1000.0,
+                3,
+            ),
+        )
+
+    def _publish_selected_kws_candidate(
+        self,
+        candidate: dict[str, Any],
+        *,
+        reason: str,
+        text: str,
+        language: str,
+        utterance_id: str,
+        speaker_id: str,
+        speaker_confidence: float,
+        pipeline_started: float,
+    ) -> bool:
+        """Publish one KWS-selected result group after final arbitration."""
+
+        event = dict(candidate)
+        command_key = str(event.get("action", "")).strip().upper()
+        event_type = str(event.get("event_type", ""))
+        catalog_command = (
+            self._command_lexicon.get_command(command_key)
+            if self._command_lexicon is not None and command_key else None
+        )
+        candidate_latency_ms = float(event.get("latency_ms", 0.0))
+        decision_latency_ms = (
+            time.perf_counter() - pipeline_started
+        ) * 1000.0
+        audit_slots = [
+            {"key": "recognition_strategy", "value": "kws_candidate"},
+            {"key": "arbitration_reason", "value": reason},
+            {
+                "key": "kws_candidate_latency_ms",
+                "value": f"{candidate_latency_ms:.2f}",
+            },
+        ]
+        existing_slots = [
+            dict(slot) for slot in event.get("slots", [])
+            if isinstance(slot, dict)
+        ]
+        event.update({
+            "utterance_id": utterance_id,
+            "asr_text": text,
+            "language": language or "zh",
+            "speaker_id": speaker_id,
+            "speaker_confidence": speaker_confidence,
+            "intent_source": "kws",
+            "latency_ms": round(decision_latency_ms, 2),
+            "slots": existing_slots + audit_slots,
+        })
+        published_event_types: list[str] = []
+        if catalog_command is not None and catalog_command.emit_known_event:
+            known_event = catalog_command.to_known_event(
+                asr_text=text,
+                language=language or "zh",
+                specific_dispatch="published",
+                source="kws",
+                confidence=float(event.get("intent_confidence", 0.0)),
+                matched_phrase=str(
+                    next(
+                        (
+                            slot.get("value", command_key)
+                            for slot in existing_slots
+                            if slot.get("key") == "kws_keyword"
+                        ),
+                        command_key,
+                    )
+                ),
+                extra_slots=audit_slots,
+            )
+            known_slots = [
+                dict(slot) for slot in known_event.get("slots", [])
+                if isinstance(slot, dict)
+            ]
+            for slot in known_slots:
+                if slot.get("key") == "match_strategy":
+                    slot["value"] = "kws_candidate"
+            known_event.update({
+                "utterance_id": utterance_id,
+                "speaker_id": speaker_id,
+                "speaker_confidence": speaker_confidence,
+                "latency_ms": round(decision_latency_ms, 2),
+                "slots": known_slots,
+            })
+            self._publish(known_event)
+            published_event_types.append(EVT_VOICE_COMMAND_KNOWN)
+
+        if event.get("should_trigger_behavior_tree"):
+            self._state_machine.trigger(Trigger.INTENT_PARSED)
+        else:
+            self._state_machine.trigger(Trigger.SPEECH_END)
+        self._refresh_interaction_activity()
+        self._publish(event)
+        published_event_types.append(event_type)
+        self._trace(
+            "utterance_complete",
+            result="published_kws_selected",
+            interaction_id=self._interaction_id,
+            utterance_id=utterance_id,
+            event_type=event_type,
+            published_event_types=published_event_types,
+            selected_source="kws",
+            arbitration_reason=reason,
+            latency_ms=round(decision_latency_ms, 2),
+        )
+        return True
 
     def _process_speech(
         self,
@@ -821,6 +1144,34 @@ class VoiceInteractionNode(Node):
 
         text = self._clean_text(raw_text)
         if not text:
+            arbitration_started = time.perf_counter()
+            selected_kws, arbitration_reason = self._select_kws_candidate(
+                text="",
+                raw_text=raw_text,
+                language=str(asr_result.get("language", "")),
+            )
+            self._trace_recognition_arbitration(
+                result=(
+                    "kws_selected"
+                    if selected_kws is not None else "none_selected"
+                ),
+                reason=arbitration_reason,
+                text="",
+                language=str(asr_result.get("language", "")),
+                utterance_id=utterance_id,
+                started=arbitration_started,
+            )
+            if selected_kws is not None:
+                return self._publish_selected_kws_candidate(
+                    selected_kws,
+                    reason=arbitration_reason,
+                    text="",
+                    language=str(asr_result.get("language", "zh")),
+                    utterance_id=utterance_id,
+                    speaker_id=speaker_id,
+                    speaker_confidence=confidence,
+                    pipeline_started=pipeline_started,
+                )
             self._state_machine.trigger(Trigger.SPEECH_END)
             self._trace(
                 "utterance_complete",
@@ -863,7 +1214,7 @@ class VoiceInteractionNode(Node):
             ),
             interaction_id=self._interaction_id,
             utterance_id=utterance_id,
-            latency_ms=round(lexicon_latency_ms, 2),
+            latency_ms=round(lexicon_latency_ms, 3),
             command_key=(
                 direct_match.command_key if direct_match is not None else ""
             ),
@@ -874,6 +1225,26 @@ class VoiceInteractionNode(Node):
                 direct_match.catalog_version
                 if direct_match is not None else ""
             ),
+            catalog_phrase=(
+                direct_match.catalog_phrase
+                if direct_match is not None else ""
+            ),
+            matched_phrase=(
+                direct_match.matched_phrase
+                if direct_match is not None else ""
+            ),
+            match_strategy=(
+                direct_match.match_strategy
+                if direct_match is not None else ""
+            ),
+            expansion_profile=(
+                direct_match.expansion_profile
+                if direct_match is not None else ""
+            ),
+            expansion_rule=(
+                direct_match.expansion_rule
+                if direct_match is not None else ""
+            ),
             action_name=(
                 direct_match.action_name
                 if direct_match is not None else ""
@@ -881,76 +1252,106 @@ class VoiceInteractionNode(Node):
             emotion=(
                 direct_match.emotion if direct_match is not None else ""
             ),
+            social=(
+                direct_match.nlu_social if direct_match is not None else ""
+            ),
+            intent=(
+                direct_match.nlu_intent if direct_match is not None else ""
+            ),
             control=(
-                direct_match.control if direct_match is not None else ""
+                direct_match.nlu_control
+                if direct_match is not None and direct_match.nlu_control
+                else direct_match.control if direct_match is not None else ""
             ),
             source_rows=(
                 list(direct_match.source_rows)
                 if direct_match is not None else []
             ),
             core=(direct_match.core if direct_match is not None else False),
+            emit_known_event=(
+                direct_match.emit_known_event
+                if direct_match is not None else False
+            ),
         )
+        arbitration_started = time.perf_counter()
+        selected_kws, arbitration_reason = self._select_kws_candidate(
+            text=text,
+            raw_text=raw_text,
+            language=str(asr_result.get("language", "")),
+            direct_match=direct_match,
+        )
+        self._trace_recognition_arbitration(
+            result=(
+                "kws_selected"
+                if selected_kws is not None else "asr_selected"
+            ),
+            reason=arbitration_reason,
+            text=text,
+            language=str(asr_result.get("language", "")),
+            utterance_id=utterance_id,
+            direct_match=direct_match,
+            started=arbitration_started,
+        )
+        if selected_kws is not None:
+            return self._publish_selected_kws_candidate(
+                selected_kws,
+                reason=arbitration_reason,
+                text=text,
+                language=str(asr_result.get("language", "zh")),
+                utterance_id=utterance_id,
+                speaker_id=speaker_id,
+                speaker_confidence=confidence,
+                pipeline_started=pipeline_started,
+            )
         if direct_match is not None:
             direct_event = direct_match.to_event(
                 asr_text=text,
                 language=str(asr_result.get("language", "zh")),
             )
-            if direct_event.get("should_trigger_behavior_tree"):
-                self._state_machine.trigger(Trigger.INTENT_PARSED)
-            else:
-                self._state_machine.trigger(Trigger.SPEECH_END)
             direct_event.update({
                 "utterance_id": utterance_id,
                 "speaker_id": speaker_id,
                 "speaker_confidence": confidence,
+                "latency_ms": round(lexicon_latency_ms, 3),
             })
             final_event_type = direct_match.event_type
-            duplicate_final = self._command_tracker.is_duplicate_final(
-                final_event_type
-            )
-            conflicting_kws = bool(
-                self._command_tracker.immediate_event_types
-            ) and not duplicate_final
-            if duplicate_final:
-                logger.info(
-                    "Suppressed duplicate command-lexicon result for "
-                    "utterance=%s: %s",
-                    utterance_id,
-                    final_event_type,
+            published_event_types: list[str] = []
+            if direct_match.emit_known_event:
+                known_event = direct_match.to_known_event(
+                    asr_text=text,
+                    language=str(asr_result.get("language", "zh")),
+                    specific_dispatch="published",
                 )
-                completion_result = "suppressed_duplicate"
-            elif conflicting_kws:
-                logger.warning(
-                    "Suppressed conflicting command-lexicon result for "
-                    "utterance=%s: kws=%s catalog=%s",
-                    utterance_id,
-                    sorted(self._command_tracker.immediate_event_types),
-                    final_event_type,
+                known_event.update({
+                    "utterance_id": utterance_id,
+                    "speaker_id": speaker_id,
+                    "speaker_confidence": confidence,
+                    "latency_ms": round(lexicon_latency_ms, 3),
+                })
+                self._publish(known_event)
+                published_event_types.append(
+                    str(known_event["event_type"])
                 )
-                self._trace(
-                    "command_conflict",
-                    result="suppressed",
-                    interaction_id=self._interaction_id,
-                    utterance_id=utterance_id,
-                    immediate_event_types=sorted(
-                        self._command_tracker.immediate_event_types
-                    ),
-                    catalog_event_type=final_event_type,
-                )
-                completion_result = "suppressed_conflict"
+            if direct_event.get("should_trigger_behavior_tree"):
+                self._state_machine.trigger(Trigger.INTENT_PARSED)
             else:
-                self._publish(direct_event)
-                completion_result = (
-                    "published_direct_command"
-                    if direct_event.get("should_trigger_behavior_tree")
-                    else "published_catalog_event"
-                )
+                self._state_machine.trigger(Trigger.SPEECH_END)
+            self._publish(direct_event)
+            published_event_types.append(final_event_type)
+            completion_result = (
+                "published_known_and_specific"
+                if direct_match.emit_known_event
+                else "published_direct_command"
+                if direct_event.get("should_trigger_behavior_tree")
+                else "published_catalog_event"
+            )
             self._trace(
                 "utterance_complete",
                 result=completion_result,
                 interaction_id=self._interaction_id,
                 utterance_id=utterance_id,
                 event_type=final_event_type,
+                published_event_types=published_event_types,
                 intent_source="command_lexicon",
                 latency_ms=round(
                     (time.perf_counter() - pipeline_started) * 1000.0,
@@ -961,51 +1362,120 @@ class VoiceInteractionNode(Node):
 
         intent_started = time.perf_counter()
         parsed_intent = self._parse_intent(text)
-        intent = parsed_intent or dict(_UNKNOWN_INTENT)
-        if intent.get("should_trigger_behavior_tree"):
+        if parsed_intent is None:
+            routed_events = [dict(_UNKNOWN_INTENT)]
+            result = "fallback_unknown"
+        else:
+            parsed_intent_name = str(
+                parsed_intent.get("intent", "NONE")
+            )
+            object_slots: list[dict[str, str]] = []
+            if parsed_intent_name in {"FETCH", "FIND_TOY"}:
+                object_started = time.perf_counter()
+                object_slots, object_supported = object_resolution_slots(
+                    getattr(self, "_object_target_resolver", None),
+                    text,
+                )
+                object_fields = {
+                    str(slot.get("key", "")): str(
+                        slot.get("value", "")
+                    )
+                    for slot in object_slots
+                }
+                self._trace(
+                    "stage_complete",
+                    stage="object_target",
+                    result=(
+                        "matched" if object_supported else object_fields.get(
+                            "object_match_source", "unsupported"
+                        )
+                    ),
+                    interaction_id=self._interaction_id,
+                    utterance_id=utterance_id,
+                    object_name=object_fields.get("object_name", "NONE"),
+                    object_mention=object_fields.get("object_mention", ""),
+                    object_matched_alias=object_fields.get(
+                        "object_matched_alias", ""
+                    ),
+                    object_catalog_version=object_fields.get(
+                        "object_catalog_version", ""
+                    ),
+                    latency_ms=round(
+                        (time.perf_counter() - object_started) * 1000.0,
+                        3,
+                    ),
+                )
+            routed_events = route_classification_events(
+                str(parsed_intent.get("social", "NONE")),
+                parsed_intent_name,
+                str(parsed_intent.get("control", "NONE")),
+                asr_text=text,
+                source=str(
+                    parsed_intent.get("intent_source", "rkllm_model_k")
+                ),
+                confidence=float(
+                    parsed_intent.get("intent_confidence", 0.0)
+                ),
+                language=str(asr_result.get("language", "zh")),
+                extra_slots=object_slots,
+            )
+            result = "parsed"
+        if any(
+            event.get("should_trigger_behavior_tree")
+            for event in routed_events
+        ):
             self._state_machine.trigger(Trigger.INTENT_PARSED)
         else:
             self._state_machine.trigger(Trigger.SPEECH_END)
-        final_event_type = classification_to_voice_event(
-            str(intent.get("emotion", "NONE")),
-            str(intent.get("action", "UNKNOWN")),
-            str(intent.get("control", "CLARIFY")),
-        )
+        routed_event_types = [
+            str(event.get("event_type", "")) for event in routed_events
+        ]
+        intent_latency_ms = (
+            time.perf_counter() - intent_started
+        ) * 1000.0
         self._trace(
             "stage_complete",
             stage="intent",
-            result="parsed" if parsed_intent is not None else "fallback_unknown",
+            result=result,
             interaction_id=self._interaction_id,
             utterance_id=utterance_id,
-            event_type=final_event_type,
-            intent_source=str(intent.get("intent_source", "fallback")),
-            latency_ms=round(
-                (time.perf_counter() - intent_started) * 1000.0,
-                2,
+            event_types=routed_event_types,
+            social=str(
+                (parsed_intent or _UNKNOWN_INTENT).get("social", "NONE")
             ),
+            intent=str(
+                (parsed_intent or _UNKNOWN_INTENT).get("intent", "NONE")
+            ),
+            control=str(
+                (parsed_intent or _UNKNOWN_INTENT).get("control", "NONE")
+            ),
+            intent_source=str(
+                (parsed_intent or _UNKNOWN_INTENT).get(
+                    "intent_source",
+                    "invalid_protocol_fallback",
+                )
+            ),
+            latency_ms=round(intent_latency_ms, 2),
         )
-        intent.update({
-            "utterance_id": utterance_id,
-            "asr_text": text,
-            "speaker_id": speaker_id,
-            "speaker_confidence": confidence,
-            "event_type": final_event_type,
-        })
-        duplicate_final = self._command_tracker.is_duplicate_final(final_event_type)
-        if duplicate_final:
-            logger.info(
-                "Suppressed duplicate final intent for utterance=%s: %s",
-                utterance_id,
-                final_event_type,
-            )
-        else:
-            self._publish(intent)
+        for event in routed_events:
+            event.update({
+                "utterance_id": utterance_id,
+                "asr_text": text,
+                "speaker_id": speaker_id,
+                "speaker_confidence": confidence,
+                "latency_ms": round(intent_latency_ms, 2),
+            })
+            self._publish(event)
         self._trace(
             "utterance_complete",
-            result="suppressed_duplicate" if duplicate_final else "published",
+            result=(
+                "published"
+                if routed_events
+                else "classified_no_business_event"
+            ),
             interaction_id=self._interaction_id,
             utterance_id=utterance_id,
-            event_type=final_event_type,
+            event_types=routed_event_types,
             latency_ms=round(
                 (time.perf_counter() - pipeline_started) * 1000.0,
                 2,
@@ -1108,7 +1578,7 @@ class VoiceInteractionNode(Node):
             kws.finish_utterance()  # type: ignore[attr-defined]
 
     def _poll_kws_events(self) -> None:
-        """Publish newly detected commands while the user is still speaking."""
+        """Cache KWS candidates; executable events wait for ASR arbitration."""
         kws = self._providers.get("kws")
         if (
             kws is None
@@ -1121,30 +1591,61 @@ class VoiceInteractionNode(Node):
             if event is None:
                 return
             event_type = str(event.get("event_type", ""))
-            if not self._command_tracker.record_immediate(event_type):
+            command_key = str(event.get("action", "")).strip().upper()
+            command_lexicon = getattr(self, "_command_lexicon", None)
+            catalog_command = (
+                command_lexicon.get_command(command_key)
+                if command_lexicon is not None and command_key
+                else None
+            )
+            if (
+                catalog_command is not None
+                and catalog_command.event_type != event_type
+            ):
+                logger.warning(
+                    "KWS/catalog event mismatch for %s: kws=%s catalog=%s",
+                    command_key,
+                    event_type,
+                    catalog_command.event_type,
+                )
+                self._trace(
+                    "stage_complete",
+                    stage="kws",
+                    result="rejected_catalog_mismatch",
+                    interaction_id=self._interaction_id,
+                    utterance_id=self._command_tracker.utterance_id,
+                    event_type=event_type,
+                    command_key=command_key,
+                    catalog_event_type=catalog_command.event_type,
+                )
                 continue
             self._state_machine.trigger(Trigger.SPEECH_START)
-            if event.get("should_trigger_behavior_tree"):
-                self._state_machine.trigger(Trigger.INTENT_PARSED)
             event["utterance_id"] = self._command_tracker.utterance_id
-            self._refresh_interaction_activity()
-            self._publish(event)
             utterance_started = getattr(
                 self,
                 "_utterance_started_monotonic",
                 0.0,
             )
+            kws_latency_ms = (
+                (time.perf_counter() - utterance_started) * 1000.0
+                if utterance_started else 0.0
+            )
+            event["latency_ms"] = round(kws_latency_ms, 2)
+            if catalog_command is not None:
+                event["command_id"] = catalog_command.command_id
+            if not self._command_tracker.record_kws_candidate(event):
+                continue
             self._trace(
                 "stage_complete",
                 stage="kws",
-                result="detected",
+                result="candidate",
                 interaction_id=self._interaction_id,
                 utterance_id=self._command_tracker.utterance_id,
                 event_type=event_type,
-                latency_ms=round(
-                    (time.perf_counter() - utterance_started) * 1000.0,
-                    2,
-                ) if utterance_started else 0.0,
+                command_key=command_key,
+                candidate_count=self._command_tracker.kws_candidate_count,
+                published_event_types=[],
+                latency_ms=round(kws_latency_ms, 2),
             )
 
     def _parse_intent(self, text: str) -> dict[str, Any] | None:
@@ -1206,6 +1707,8 @@ class VoiceInteractionNode(Node):
                 float(event.get("speaker_confidence", 0.0)),
                 3,
             ),
+            social=str(event.get("social", "")),
+            intent=str(event.get("intent", "")),
             action=str(event.get("action", "")),
             control=str(event.get("control", "")),
             intent_source=str(event.get("intent_source", "")),
@@ -1221,6 +1724,12 @@ class VoiceInteractionNode(Node):
                 float(event.get("intent_confidence", 0.0)),
                 3,
             ),
+            nlu_protocol=str(event.get("nlu_protocol", "")),
+            raw_nlu_tag=str(event.get("raw_nlu_tag", "")),
+            specific_event_type=str(
+                event.get("specific_event_type", "")
+            ),
+            dispatch_role=str(event.get("dispatch_role", "")),
             language=str(event.get("language", "")),
             slots=event.get("slots", []),
             payload=event,

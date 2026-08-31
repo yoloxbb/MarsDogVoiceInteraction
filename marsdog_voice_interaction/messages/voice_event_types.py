@@ -1,10 +1,24 @@
 """Event names emitted on ``/perception/audio_event``."""
 
+from marsdog_voice_interaction.messages.speaker_identity import (
+    speaker_identity_role,
+)
+
 EVT_VOICE_CALL_NAME = "EVT_VOICE_CALL_NAME"
 EVT_VOICE_MASTER_ID = "EVT_VOICE_MASTER_ID"
+# A registered family member. The fixed speaker ID identifies the slot.
+EVT_VOICE_FOLK_ID = "EVT_VOICE_FOLK_ID"
+# Unknown speakers and legacy non-owner/non-family registrations.
+EVT_VOICE_UNMASTER_ID = "EVT_VOICE_UNMASTER_ID"
+# Deprecated compatibility constant. New runtime events use UNMASTER_ID.
 EVT_VOICE_STRANGER_ID = "EVT_VOICE_STRANGER_ID"
 EVT_VOICE_PRAISE = "EVT_VOICE_PRAISE"
 EVT_VOICE_SCOLD = "EVT_VOICE_SCOLD"
+EVT_VOICE_COMFORT = "EVT_VOICE_COMFORT"
+EVT_VOICE_PLAY_INTERACTION = "EVT_VOICE_PLAY_INTERACTION"
+EVT_VOICE_STATUS_CARE = "EVT_VOICE_STATUS_CARE"
+EVT_VOICE_POSITIVE_EMOTION = "EVT_VOICE_POSITIVE_EMOTION"
+EVT_VOICE_NEGATIVE_EMOTION = "EVT_VOICE_NEGATIVE_EMOTION"
 EVT_VOICE_COMMAND_KNOWN = "EVT_VOICE_COMMAND_KNOWN"
 EVT_VOICE_COMMAND_UNKNOWN = "EVT_VOICE_COMMAND_UNKNOWN"
 EVT_VOICE_HAPPY = "EVT_VOICE_HAPPY"
@@ -66,28 +80,25 @@ ACTION_TO_VOICE_EVENT = {
 
 
 def classification_to_voice_event(
-    emotion: str,
-    action: str,
+    social: str,
+    intent: str,
     control: str,
 ) -> str:
-    if control == "CLARIFY" or action in ("UNKNOWN", "MULTI"):
-        return EVT_VOICE_COMMAND_UNKNOWN
-    if control in ("DO", "CANCEL") and action != "NONE":
-        return ACTION_TO_VOICE_EVENT.get(action, EVT_VOICE_COMMAND_UNKNOWN)
-    if emotion == "PRAISE":
-        return EVT_VOICE_PRAISE
-    if emotion == "REPRIMAND":
-        return EVT_VOICE_SCOLD
-    if emotion in ("JOY", "EXCITEMENT"):
-        return EVT_VOICE_HAPPY
-    if emotion in ("ANXIETY", "FEAR", "SADNESS", "LONELINESS"):
-        return EVT_VOICE_SAD
-    return EVT_VOICE_NEUTRAL
+    """Compatibility helper returning the first coarse routed event."""
+
+    # Local import avoids a module cycle with intent_event_router.
+    from marsdog_voice_interaction.messages.intent_event_router import (
+        derive_intent_routes,
+    )
+
+    routes = derive_intent_routes(social, intent, control)
+    return routes[0][0] if routes else EVT_VOICE_NEUTRAL
 
 
 def speaker_to_voice_event(speaker_id: str) -> str:
-    return (
-        EVT_VOICE_MASTER_ID
-        if speaker_id and speaker_id != "unknown"
-        else EVT_VOICE_STRANGER_ID
-    )
+    role = speaker_identity_role(speaker_id)
+    if role == "owner":
+        return EVT_VOICE_MASTER_ID
+    if role == "family":
+        return EVT_VOICE_FOLK_ID
+    return EVT_VOICE_UNMASTER_ID

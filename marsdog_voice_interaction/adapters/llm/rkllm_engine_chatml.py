@@ -377,9 +377,10 @@ _CALLBACK = LLMResultCallbackType(callback_impl)
 # ============================================================
 
 DEFAULT_SYSTEM_PROMPT = (
-    "Classify the utterance. "
-    "Output EMOTION|ACTION|CONTROL only."
+    "Classify the owner's MasDog utterance. "
+    "Return exactly one label in SOCIAL|INTENT|CONTROL format and nothing else."
 )
+
 
 def build_classification_prompt(
     utterance: str,
@@ -403,9 +404,12 @@ def build_classification_prompt(
 
 
 def parse_classification_output(text: str) -> str:
-    """严格校验模型输出，不进行清洗、截取或大小写转换。"""
-    emotion, action, control = parse_intent_tag(text)
-    return f"{emotion}|{action}|{control}"
+    """校验完整三轴输出；不从解释性文本中截取标签。"""
+    parsed = parse_intent_tag(text)
+    if parsed is None:
+        raise ValueError(f"invalid Model K classification: {text!r}")
+    social, intent, control = parsed
+    return f"{social}|{intent}|{control}"
 
 
 # ============================================================
@@ -932,10 +936,10 @@ if __name__ == "__main__":
     main()
 """
 uv run python -m marsdog_voice_interaction.adapters.llm.rkllm_engine_chatml \
-  --model /home/cat/xbb/models/llm/qwen2_5_5b_rk3588_260722_w8a8.rkllm \
+  --model /home/cat/xbb/models/llm/qwen2_5_5b_rk3588_260829_w8a8.rkllm \
   --lib_path /home/cat/xbb/project/20260622_MarsDogPro/lib/librkllmrt.so \
   --platform rk3588 \
-  --utterance "真棒" \
+  --utterance "我去出差几天。" \
   --max_context_len 512 \
   --max_new_tokens 16 \
   --no_fix_freq \

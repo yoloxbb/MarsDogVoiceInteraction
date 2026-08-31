@@ -7,13 +7,25 @@ from marsdog_voice_interaction.messages.audio_event import (
     normalize_audio_event,
 )
 from marsdog_voice_interaction.messages.intent_protocol import (
+    NLU_PROTOCOL,
     parse_intent_tag,
+)
+from marsdog_voice_interaction.messages.intent_event_router import (
+    route_classification_events,
 )
 from marsdog_voice_interaction.messages.voice_event_types import (
     ACTION_TO_VOICE_EVENT,
     EVT_VOICE_CALL_NAME,
+    EVT_VOICE_COMMAND_FETCH,
+    EVT_VOICE_COMMAND_KNOWN,
     EVT_VOICE_COMMAND_SIT,
+    EVT_VOICE_FOLK_ID,
+    EVT_VOICE_MASTER_ID,
+    EVT_VOICE_NEUTRAL,
+    EVT_VOICE_STATUS_CARE,
+    EVT_VOICE_UNMASTER_ID,
     classification_to_voice_event,
+    speaker_to_voice_event,
 )
 from marsdog_voice_interaction.core.utterance_command_tracker import (
     UtteranceCommandTracker,
@@ -35,7 +47,7 @@ def test_audio_contract_has_no_visual_binding() -> None:
         "utterance_id": "u1",
         "asr_text": "坐下",
     })
-    assert value["schema_version"] == 1
+    assert value["schema_version"] == 2
     assert value["utterance_id"] == "u1"
     assert "target_track_id" not in value
     assert "target_identity" not in value
@@ -87,8 +99,208 @@ def test_intent_protocol_and_event_mapping() -> None:
         classification_to_voice_event("NONE", "SIT", "DO")
         == EVT_VOICE_COMMAND_SIT
     )
-    with pytest.raises(ValueError):
-        parse_intent_tag(" none|SIT|DO")
+    assert parse_intent_tag("NONE|SIT|CANCEL") is None
+    assert parse_intent_tag("NONE|DOG_STATUS|DO") is None
+    assert parse_intent_tag("NONE|NONE|DO") is None
+
+
+def test_model_k_multi_axis_routes_specific_command_before_summary() -> None:
+    events = route_classification_events(
+        "PRAISE",
+        "SIT",
+        "DO",
+        asr_text="真乖坐下",
+        source="rkllm_model_k",
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "EVT_VOICE_PRAISE",
+        EVT_VOICE_COMMAND_SIT,
+        EVT_VOICE_COMMAND_KNOWN,
+    ]
+    assert all(event["nlu_protocol"] == NLU_PROTOCOL for event in events)
+    assert all(event["raw_nlu_tag"] == "PRAISE|SIT|DO" for event in events)
+    praise, specific, summary = events
+    assert not praise["should_trigger_behavior_tree"]
+    assert specific["dispatch_role"] == "specific_command"
+    assert specific["specific_event_type"] == EVT_VOICE_COMMAND_SIT
+    assert specific["action"] == "SIT"
+    assert specific["command_id"] == "CMD_SIT"
+    assert specific["is_executable"]
+    assert specific["should_trigger_behavior_tree"]
+    assert summary["dispatch_role"] == "semantic_classification"
+    assert summary["specific_event_type"] == EVT_VOICE_COMMAND_SIT
+    assert not summary["should_trigger_behavior_tree"]
+
+
+@pytest.mark.parametrize(
+    ("intent", "control", "command_key", "event_type"),
+    [
+        ("GO", "DO", "WALK", "EVT_VOICE_COMMAND_WALK"),
+        ("COME", "DO", "COME", "EVT_VOICE_COMMAND_COME"),
+        ("FOLLOW", "DO", "FOLLOW", "EVT_VOICE_COMMAND_FOLLOW"),
+        ("GO_OUT", "DO", "GO_OUT", "EVT_VOICE_COMMAND_GO_OUT"),
+        ("GO_HOME", "DO", "GO_HOME", "EVT_VOICE_COMMAND_GO_HOME"),
+        ("APPROACH", "DO", "APPROACH", "EVT_VOICE_COMMAND_APPROACH"),
+        ("BACK", "DO", "BACK_UP", "EVT_VOICE_COMMAND_BACK_UP"),
+        ("SIT", "DO", "SIT", "EVT_VOICE_COMMAND_SIT"),
+        ("LIE", "DO", "LIE_DOWN", "EVT_VOICE_COMMAND_LIE_DOWN"),
+        (
+            "PLAY_DEAD",
+            "DO",
+            "PLAY_DEAD",
+            "EVT_VOICE_COMMAND_PLAY_DEAD",
+        ),
+        ("SHAKE", "DO", "SHAKE_HAND", "EVT_VOICE_COMMAND_SHAKE_HAND"),
+        ("HIGH_FIVE", "DO", "HIGH_FIVE", "EVT_VOICE_COMMAND_HIGH_FIVE"),
+        ("SPIN", "DO", "SPIN", "EVT_VOICE_COMMAND_SPIN"),
+        ("ROLL", "DO", "ROLL_OVER", "EVT_VOICE_COMMAND_ROLL_OVER"),
+        ("DROP", "DO", "DROP", "EVT_VOICE_COMMAND_DROP"),
+        ("BARK", "STOP", "QUIET", "EVT_VOICE_COMMAND_QUIET"),
+        ("TOILET", "DO", "TOILET", "EVT_VOICE_COMMAND_TOILET"),
+        ("CLEAN", "DO", "CLEAN", "EVT_VOICE_COMMAND_CLEAN"),
+        ("SLEEP", "DO", "SLEEP", "EVT_VOICE_COMMAND_SLEEP"),
+    ],
+)
+def test_model_k_explicit_command_allowlist(
+    intent: str,
+    control: str,
+    command_key: str,
+    event_type: str,
+) -> None:
+    events = route_classification_events(
+        "NONE",
+        intent,
+        control,
+        asr_text="model route",
+        source="rkllm_model_k",
+    )
+
+    assert [event["event_type"] for event in events] == [
+        event_type,
+        EVT_VOICE_COMMAND_KNOWN,
+    ]
+    assert events[0]["action"] == command_key
+    assert events[0]["should_trigger_behavior_tree"]
+    assert not events[1]["should_trigger_behavior_tree"]
+
+
+@pytest.mark.parametrize(
+    ("intent", "control"),
+    [
+        ("STAND", "DO"),
+        ("STAY", "DO"),
+        ("EAT", "DO"),
+        ("FETCH", "DO"),
+        ("FIND_PERSON", "DO"),
+    ],
+)
+def test_model_k_ambiguous_commands_remain_summary_only(
+    intent: str,
+    control: str,
+) -> None:
+    events = route_classification_events(
+        "NONE",
+        intent,
+        control,
+        asr_text="ambiguous model route",
+        source="rkllm_model_k",
+    )
+
+    assert [event["event_type"] for event in events] == [
+        EVT_VOICE_COMMAND_KNOWN
+    ]
+    assert not events[0]["should_trigger_behavior_tree"]
+
+
+def test_model_k_find_query_requires_supported_object_for_specific_event() -> None:
+    matched_slots = [
+        {"key": "object_name", "value": "dog toy ball"},
+        {"key": "object_mention", "value": "球"},
+        {"key": "object_match_source", "value": "asr_rule"},
+    ]
+    matched = route_classification_events(
+        "NONE",
+        "FIND_TOY",
+        "QUERY",
+        asr_text="看看那个球在哪里",
+        source="rkllm_model_k",
+        extra_slots=matched_slots,
+    )
+    unsupported = route_classification_events(
+        "NONE",
+        "FIND_TOY",
+        "QUERY",
+        asr_text="看看那个布偶娃娃在哪里",
+        source="rkllm_model_k",
+        extra_slots=[
+            {"key": "object_name", "value": "NONE"},
+            {"key": "object_mention", "value": "布偶娃娃"},
+            {"key": "object_match_source", "value": "unsupported"},
+        ],
+    )
+
+    assert [event["event_type"] for event in matched] == [
+        EVT_VOICE_COMMAND_FETCH,
+        EVT_VOICE_STATUS_CARE,
+    ]
+    assert matched[0]["should_trigger_behavior_tree"]
+    assert matched[0]["action"] == "FETCH"
+    assert matched[0]["command_id"] == "CMD_FETCH_OBJECT"
+    assert not matched[1]["should_trigger_behavior_tree"]
+    assert [event["event_type"] for event in unsupported] == [
+        EVT_VOICE_STATUS_CARE
+    ]
+    assert not unsupported[0]["should_trigger_behavior_tree"]
+    assert {slot["key"]: slot["value"] for slot in unsupported[0]["slots"]}[
+        "object_name"
+    ] == "NONE"
+
+
+def test_model_k_fetch_do_with_supported_object_routes_specific_then_known() -> None:
+    events = route_classification_events(
+        "NONE",
+        "FETCH",
+        "DO",
+        asr_text="把球捡回来",
+        source="rkllm_model_k",
+        extra_slots=[
+            {"key": "object_name", "value": "dog toy ball"},
+            {"key": "object_mention", "value": "球"},
+            {"key": "object_match_source", "value": "asr_rule"},
+        ],
+    )
+
+    assert [event["event_type"] for event in events] == [
+        EVT_VOICE_COMMAND_FETCH,
+        EVT_VOICE_COMMAND_KNOWN,
+    ]
+    assert events[0]["should_trigger_behavior_tree"]
+    assert not events[1]["should_trigger_behavior_tree"]
+
+
+def test_model_k_play_route_is_deduplicated_and_none_routes_neutral() -> None:
+    playful = route_classification_events(
+        "PLAYFUL",
+        "PLAY",
+        "DO",
+        asr_text="来玩呀",
+        source="rkllm_model_k",
+    )
+    oos = route_classification_events(
+        "NONE",
+        "NONE",
+        "NONE",
+        asr_text="读一下消息",
+        source="rkllm_model_k",
+    )
+
+    assert [event["event_type"] for event in playful] == [
+        "EVT_VOICE_PLAY_INTERACTION"
+    ]
+    assert [event["event_type"] for event in oos] == [EVT_VOICE_NEUTRAL]
+    assert oos[0]["intent_category"] == "neutral"
+    assert not oos[0]["should_trigger_behavior_tree"]
 
 
 def test_direct_mock_only_emits_voice_events() -> None:
@@ -96,6 +308,24 @@ def test_direct_mock_only_emits_voice_events() -> None:
     event = provider.build_event(EVT_VOICE_COMMAND_SIT)
     assert event["event_type"] == EVT_VOICE_COMMAND_SIT
     assert event["action"] == "SIT"
+
+
+@pytest.mark.parametrize(
+    ("speaker_id", "event_type"),
+    [
+        ("owner", EVT_VOICE_MASTER_ID),
+        ("family_member_1", EVT_VOICE_FOLK_ID),
+        ("family_member_4", EVT_VOICE_FOLK_ID),
+        ("unknown", EVT_VOICE_UNMASTER_ID),
+        ("legacy_name", EVT_VOICE_UNMASTER_ID),
+        ("", EVT_VOICE_UNMASTER_ID),
+    ],
+)
+def test_speaker_identity_routes_to_distinct_events(
+    speaker_id: str,
+    event_type: str,
+) -> None:
+    assert speaker_to_voice_event(speaker_id) == event_type
 
 
 def test_voice_source_does_not_import_vision_project() -> None:
@@ -108,26 +338,36 @@ def test_voice_source_does_not_import_vision_project() -> None:
     assert "marsdog_perception." not in source
 
 
-def test_kws_final_intent_is_deduplicated_by_event_type() -> None:
+def test_kws_candidates_are_unique_and_scoped_to_one_utterance() -> None:
     tracker = UtteranceCommandTracker()
     tracker.begin("utterance-1")
 
-    assert tracker.record_immediate(EVT_VOICE_COMMAND_SIT)
-    assert not tracker.record_immediate(EVT_VOICE_COMMAND_SIT)
-    assert tracker.is_duplicate_final(EVT_VOICE_COMMAND_SIT)
-    assert not tracker.is_duplicate_final("EVT_VOICE_COMMAND_STAND_UP")
+    sit = {"event_type": EVT_VOICE_COMMAND_SIT, "action": "SIT"}
+    stand = {
+        "event_type": "EVT_VOICE_COMMAND_STAND_UP",
+        "action": "STAND_UP",
+    }
+    assert tracker.record_kws_candidate(sit)
+    assert not tracker.record_kws_candidate(sit)
+    assert tracker.kws_candidate_count == 1
+    assert tracker.single_kws_candidate() == sit
+    assert tracker.record_kws_candidate(stand)
+    assert tracker.kws_candidate_count == 2
+    assert tracker.single_kws_candidate() is None
 
     tracker.finish()
-    assert not tracker.is_duplicate_final(EVT_VOICE_COMMAND_SIT)
+    assert tracker.kws_candidate_count == 0
+    assert tracker.kws_candidates == ()
+    assert tracker.single_kws_candidate() is None
 
 
 @pytest.mark.parametrize(
-    ("text", "action"),
+    ("text", "intent"),
     [
-        ("站起来", "STAND_UP"),
-        ("等一下", "WAIT"),
+        ("站起来", "STAND"),
+        ("等一下", "STAY"),
         ("COMEHERE", "COME"),
-        ("shakehands", "SHAKE_HAND"),
+        ("shakehands", "SHAKE"),
         ("HIGHFIVE", "HIGH_FIVE"),
         ("followme", "FOLLOW"),
         ("playdead", "PLAY_DEAD"),
@@ -135,13 +375,14 @@ def test_kws_final_intent_is_deduplicated_by_event_type() -> None:
 )
 def test_rule_intent_covers_kws_commands_in_both_languages(
     text: str,
-    action: str,
+    intent: str,
 ) -> None:
     provider = RuleIntentProvider({})
     provider.start()
     event = provider.parse_intent(text)
     assert event is not None
-    assert event["action"] == action
+    assert event["intent"] == intent
+    assert event["action"] == intent
     assert event["control"] == "DO"
 
 

@@ -1,169 +1,207 @@
-"""Shared EMOTION|ACTION|CONTROL intent protocol helpers."""
+"""Model K ``SOCIAL|INTENT|CONTROL`` protocol helpers.
+
+The Model K output is a semantic classification.  It is deliberately kept
+separate from the deterministic command catalog: a model label only authorizes
+a concrete robot action when the downstream router contains an explicit,
+unambiguous allowlist entry.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 
-EMOTION_LABELS = frozenset({
-    "NONE",
-    "CALM",
-    "JOY",
-    "EXCITEMENT",
-    "ANXIETY",
-    "FEAR",
-    "SADNESS",
-    "LONELINESS",
-    "CURIOSITY",
-    "PRAISE",
-    "REPRIMAND",
-})
+NLU_PROTOCOL = "model_k_social_intent_control_v1"
 
-ACTION_LABELS = frozenset({
-    "NONE",
-    "COME",
-    "SHAKE_HAND",
-    "HIGH_FIVE",
-    "SIT",
-    "LIE_DOWN",
-    "STAND_UP",
-    "WAIT",
-    "FOLLOW",
-    "ROLL_OVER",
-    "SPIN",
-    "RETURN",
-    "DROP",
-    "PLAY_DEAD",
-    "BRING",
-    "FETCH",
-    "STOP",
-    "UNKNOWN",
-    "MULTI",
-})
+SOCIAL_LABELS = frozenset(
+    {
+        "NONE",
+        "CALL",
+        "PRAISE",
+        "SCOLD",
+        "COMFORT",
+        "PLAYFUL",
+        "OWNER_POSITIVE",
+        "OWNER_NEGATIVE",
+    }
+)
 
-CONTROL_LABELS = frozenset({
-    "NONE",
-    "DO",
-    "CANCEL",
-    "CLARIFY",
-})
+INTENT_LABELS = frozenset(
+    {
+        "NONE",
+        "GO",
+        "COME",
+        "FOLLOW",
+        "GO_OUT",
+        "GO_HOME",
+        "APPROACH",
+        "BACK",
+        "SIT",
+        "LIE",
+        "PLAY_DEAD",
+        "STAND",
+        "STAY",
+        "SHAKE",
+        "HIGH_FIVE",
+        "SPIN",
+        "ROLL",
+        "DROP",
+        "BARK",
+        "EAT",
+        "TOILET",
+        "CLEAN",
+        "SLEEP",
+        "PLAY",
+        "TUG",
+        "FIND_PERSON",
+        "DANCE",
+        "FETCH",
+        "FIND_TOY",
+        "OWNER_LEAVE",
+        "OWNER_RETURN",
+        "DOG_STATUS",
+        "DOG_PREFERENCE",
+        "DOG_CAPABILITY",
+    }
+)
 
-_ACTION_TO_COMMAND = {
-    "NONE": "CMD_NONE",
-    "COME": "CMD_COME_HERE",
-    "SHAKE_HAND": "CMD_HAND",
-    "HIGH_FIVE": "CMD_FIVE",
-    "SIT": "CMD_SIT",
-    "LIE_DOWN": "CMD_LIE_DOWN",
-    "STAND_UP": "CMD_STAND_UP",
-    "WAIT": "CMD_WAIT",
-    "FOLLOW": "CMD_FOLLOW",
-    "ROLL_OVER": "CMD_ROLL",
-    "SPIN": "CMD_SPIN",
-    "RETURN": "CMD_BACK",
-    "DROP": "CMD_SPIT",
-    "PLAY_DEAD": "CMD_DEAD",
-    "BRING": "CMD_BRING_OBJECT",
-    "FETCH": "CMD_FETCH_OBJECT",
-    "STOP": "CMD_STOP",
-    "UNKNOWN": "CMD_UNKNOWN",
-    "MULTI": "CMD_MULTI",
+CONTROL_LABELS = frozenset({"NONE", "DO", "STOP", "QUERY"})
+
+QUERY_ONLY_INTENTS = frozenset(
+    {"DOG_STATUS", "DOG_PREFERENCE", "DOG_CAPABILITY"}
+)
+OWNER_EVENT_INTENTS = frozenset({"OWNER_LEAVE", "OWNER_RETURN"})
+
+# Canonical semantic labels attached to deterministic command events.  These
+# values are metadata only; dispatch remains governed by command_catalog.yaml.
+COMMAND_KEY_TO_NLU: dict[str, tuple[str, str, str]] = {
+    "WALK": ("NONE", "GO", "DO"),
+    "COME": ("NONE", "COME", "DO"),
+    "FOLLOW": ("NONE", "FOLLOW", "DO"),
+    "GO_OUT": ("NONE", "GO_OUT", "DO"),
+    "GO_HOME": ("NONE", "GO_HOME", "DO"),
+    "APPROACH": ("NONE", "APPROACH", "DO"),
+    "BACK_UP": ("NONE", "BACK", "DO"),
+    "SIT": ("NONE", "SIT", "DO"),
+    "LIE_DOWN": ("NONE", "LIE", "DO"),
+    "PLAY_DEAD": ("NONE", "PLAY_DEAD", "DO"),
+    "STAND_UP": ("NONE", "STAND", "DO"),
+    "STAND_STILL": ("NONE", "STAY", "DO"),
+    "SHAKE_HAND": ("NONE", "SHAKE", "DO"),
+    "HIGH_FIVE": ("NONE", "HIGH_FIVE", "DO"),
+    "SPIN": ("NONE", "SPIN", "DO"),
+    "ROLL_OVER": ("NONE", "ROLL", "DO"),
+    "HOLD_POSITION": ("NONE", "STAY", "DO"),
+    "WAIT": ("NONE", "STAY", "DO"),
+    "DROP": ("NONE", "DROP", "DO"),
+    "QUIET": ("NONE", "BARK", "STOP"),
+    "BRING": ("NONE", "FETCH", "DO"),
+    "FETCH": ("NONE", "FETCH", "DO"),
+    "RETURN": ("NONE", "COME", "DO"),
+    "STOP": ("NONE", "STAY", "STOP"),
 }
 
-_CONTROL_TO_CATEGORY = {
-    "NONE": "none",
-    "DO": "command",
-    "CANCEL": "cancel",
-    "CLARIFY": "clarify",
-}
-
-_EMOTION_TO_CATEGORY = {
-    "PRAISE": "praise",
-    "REPRIMAND": "blame",
+COMMAND_KEY_TO_COMMAND_ID: dict[str, str] = {
+    key: f"CMD_{key}" for key in COMMAND_KEY_TO_NLU
 }
 
 
-def parse_intent_tag(raw: str) -> tuple[str, str, str]:
-    """Validate an exact EMOTION|ACTION|CONTROL model output.
+def validate_intent_combination(
+    social: str,
+    intent: str,
+    control: str,
+) -> bool:
+    """Return whether a three-axis result satisfies the frozen contract."""
 
-    The protocol intentionally does not normalize case, trim whitespace, remove
-    special tokens, or extract a valid-looking substring. Any such content
-    violates the model contract and is rejected.
-    """
-    if not isinstance(raw, str) or not raw:
-        raise ValueError("Intent output must be a non-empty string")
+    if (
+        social not in SOCIAL_LABELS
+        or intent not in INTENT_LABELS
+        or control not in CONTROL_LABELS
+    ):
+        return False
+    if intent == "NONE":
+        return control == "NONE"
+    if intent in QUERY_ONLY_INTENTS:
+        return control == "QUERY"
+    if intent in OWNER_EVENT_INTENTS:
+        return control == "DO"
+    return control in {"DO", "STOP", "QUERY"}
 
-    parts = raw.split("|")
+
+def parse_intent_tag(value: Any) -> tuple[str, str, str] | None:
+    """Strictly parse a Model K response; surrounding prose is rejected."""
+
+    if not isinstance(value, str):
+        return None
+    parts = [part.strip().upper() for part in value.strip().split("|")]
     if len(parts) != 3:
+        return None
+    social, intent, control = parts
+    if not validate_intent_combination(social, intent, control):
+        return None
+    return social, intent, control
+
+
+def make_intent_tag(social: str, intent: str, control: str) -> str:
+    social = str(social).strip().upper()
+    intent = str(intent).strip().upper()
+    control = str(control).strip().upper()
+    if not validate_intent_combination(social, intent, control):
         raise ValueError(
-            "Intent output must contain exactly three pipe-delimited fields"
+            f"invalid {NLU_PROTOCOL} value: {social}|{intent}|{control}"
         )
-
-    emotion, action, control = parts
-    if emotion not in EMOTION_LABELS:
-        raise ValueError(f"Invalid EMOTION label: {emotion!r}")
-    if action not in ACTION_LABELS:
-        raise ValueError(f"Invalid ACTION label: {action!r}")
-    if control not in CONTROL_LABELS:
-        raise ValueError(f"Invalid CONTROL label: {control!r}")
-
-    return emotion, action, control
-
-
-def make_intent_tag(emotion: str, action: str, control: str) -> str:
-    """Build and validate a protocol tag."""
-    tag = f"{emotion}|{action}|{control}"
-    parse_intent_tag(tag)
-    return tag
-
-
-def control_triggers_behavior_tree(control: str) -> bool:
-    """Return whether CONTROL requires behavior-tree handling."""
-    return control in {"DO", "CANCEL"}
+    return f"{social}|{intent}|{control}"
 
 
 def classification_to_event(
-    *,
-    emotion: str,
-    action: str,
+    social: str,
+    intent: str,
     control: str,
+    *,
     asr_text: str,
     source: str,
-    confidence: float,
-    extra_slots: list[dict[str, Any]] | None = None,
+    confidence: float = 0.0,
+    language: str = "zh",
+    command_id: str = "",
+    specific_event_type: str = "",
+    dispatch_role: str = "classification",
+    executable: bool = False,
+    extra_slots: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Convert a validated classification into an interaction-event payload."""
-    tag = make_intent_tag(emotion, action, control)
-    triggers_behavior_tree = control_triggers_behavior_tree(control)
-    slots = list(extra_slots or [])
-    slots.extend([
-        {"key": "emotion", "value": emotion},
-        {"key": "action", "value": action},
-        {"key": "control", "value": control},
-        {"key": "raw_tag", "value": tag},
-    ])
+    """Build common payload fields for a validated three-axis result."""
 
-    if control != "NONE":
-        intent_category = _CONTROL_TO_CATEGORY[control]
-    elif emotion != "NONE":
-        intent_category = _EMOTION_TO_CATEGORY.get(emotion, "emotion")
+    raw_tag = make_intent_tag(social, intent, control)
+    if not command_id and intent != "NONE":
+        command_id = f"INTENT_{intent}_{control}"
+    if control == "QUERY":
+        category = "query"
+    elif intent in {"PLAY", "TUG", "DANCE"}:
+        category = "play"
+    elif intent != "NONE":
+        category = "command"
+    elif social != "NONE":
+        category = "social"
     else:
-        intent_category = "none"
-
+        category = "none"
+    slots = list(extra_slots or [])
     return {
-        "event_type": "intent",
-        "asr_text": asr_text,
-        "emotion": emotion,
-        "action": action,
+        "asr_text": str(asr_text),
+        "social": social,
+        "intent": intent,
         "control": control,
-        "command_id": _ACTION_TO_COMMAND[action],
-        "intent_category": intent_category,
-        "intent_source": source,
+        # Deprecated aliases retained for one compatibility window.
+        "emotion": social,
+        "action": intent,
+        "language": str(language),
+        "command_id": command_id,
+        "intent_category": category,
+        "intent_source": str(source),
         "intent_confidence": float(confidence),
+        "nlu_protocol": NLU_PROTOCOL,
+        "raw_nlu_tag": raw_tag,
+        "specific_event_type": str(specific_event_type),
+        "dispatch_role": str(dispatch_role),
         "slots": slots,
-        "response_text": "",
-        # Kept for existing consumers. New consumers should use CONTROL.
-        "is_executable": triggers_behavior_tree,
-        "should_trigger_behavior_tree": triggers_behavior_tree,
-        "language": "zh",
+        "is_executable": bool(executable),
+        "should_trigger_behavior_tree": bool(executable),
     }

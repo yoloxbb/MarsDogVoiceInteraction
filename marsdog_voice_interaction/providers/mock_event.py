@@ -7,19 +7,26 @@ import time
 from typing import Any
 
 from marsdog_voice_interaction.messages.intent_protocol import (
+    COMMAND_KEY_TO_NLU,
     classification_to_event,
 )
 from marsdog_voice_interaction.messages.audio_event import WAKE_ANGLE_FRAME_ID
 from marsdog_voice_interaction.messages.voice_event_types import (
     ACTION_TO_VOICE_EVENT,
     EVT_VOICE_CALL_NAME,
+    EVT_VOICE_COMFORT,
+    EVT_VOICE_FOLK_ID,
     EVT_VOICE_HAPPY,
     EVT_VOICE_MASTER_ID,
+    EVT_VOICE_NEGATIVE_EMOTION,
     EVT_VOICE_NEUTRAL,
+    EVT_VOICE_PLAY_INTERACTION,
+    EVT_VOICE_POSITIVE_EMOTION,
     EVT_VOICE_PRAISE,
     EVT_VOICE_SAD,
     EVT_VOICE_SCOLD,
-    EVT_VOICE_STRANGER_ID,
+    EVT_VOICE_STATUS_CARE,
+    EVT_VOICE_UNMASTER_ID,
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
 
@@ -40,19 +47,22 @@ _COMMANDS = (
     ("装死", "PLAY_DEAD", "DO"),
     ("把玩具拿来", "BRING", "DO"),
     ("去找球", "FETCH", "DO"),
-    ("停止", "STOP", "CANCEL"),
+    ("停止", "STOP", "STOP"),
 )
 
 MOCK_AUDIO_EVENT_TYPES = (
     EVT_VOICE_CALL_NAME,
     EVT_VOICE_MASTER_ID,
-    EVT_VOICE_STRANGER_ID,
+    EVT_VOICE_FOLK_ID,
+    EVT_VOICE_UNMASTER_ID,
     EVT_VOICE_PRAISE,
     EVT_VOICE_SCOLD,
+    EVT_VOICE_COMFORT,
+    EVT_VOICE_PLAY_INTERACTION,
+    EVT_VOICE_STATUS_CARE,
+    EVT_VOICE_POSITIVE_EMOTION,
+    EVT_VOICE_NEGATIVE_EMOTION,
     *ACTION_TO_VOICE_EVENT.values(),
-    EVT_VOICE_HAPPY,
-    EVT_VOICE_SAD,
-    EVT_VOICE_NEUTRAL,
 )
 
 _MOCK_INTERACTION_EVENT_TYPES = tuple(
@@ -117,11 +127,18 @@ class MockEventProvider(BaseProvider):
         if event_type == EVT_VOICE_MASTER_ID:
             return {
                 "event_type": event_type,
-                "speaker_id": "mock_master",
+                "speaker_id": "owner",
                 "speaker_confidence": 0.95,
                 "state": "interaction",
             }
-        if event_type == EVT_VOICE_STRANGER_ID:
+        if event_type == EVT_VOICE_FOLK_ID:
+            return {
+                "event_type": event_type,
+                "speaker_id": "family_member_1",
+                "speaker_confidence": 0.95,
+                "state": "interaction",
+            }
+        if event_type == EVT_VOICE_UNMASTER_ID:
             return {
                 "event_type": event_type,
                 "speaker_id": "unknown",
@@ -130,43 +147,75 @@ class MockEventProvider(BaseProvider):
             }
 
         if event_type in ACTION_TO_VOICE_EVENT.values():
-            text, action, control = next(
+            text, command_key, _legacy_control = next(
                 item for item in _COMMANDS
                 if ACTION_TO_VOICE_EVENT[item[1]] == event_type
             )
+            social, intent, control = COMMAND_KEY_TO_NLU[command_key]
             event = classification_to_event(
-                emotion="NONE",
-                action=action,
+                social=social,
+                intent=intent,
                 control=control,
                 asr_text=text,
                 source="mock_event",
                 confidence=1.0,
+                specific_event_type=event_type,
+                dispatch_role="specific_command",
+                executable=True,
             )
+            event["action"] = command_key
         elif event_type == EVT_VOICE_PRAISE:
             event = classification_to_event(
-                emotion="PRAISE", action="NONE", control="NONE",
+                social="PRAISE", intent="NONE", control="NONE",
                 asr_text="你真棒", source="mock_event", confidence=1.0,
             )
         elif event_type == EVT_VOICE_SCOLD:
             event = classification_to_event(
-                emotion="REPRIMAND", action="NONE", control="NONE",
+                social="SCOLD", intent="NONE", control="NONE",
                 asr_text="你这样做不对", source="mock_event", confidence=1.0,
+            )
+        elif event_type == EVT_VOICE_COMFORT:
+            event = classification_to_event(
+                social="COMFORT", intent="NONE", control="NONE",
+                asr_text="不怕不怕", source="mock_event", confidence=1.0,
+            )
+        elif event_type == EVT_VOICE_PLAY_INTERACTION:
+            event = classification_to_event(
+                social="PLAYFUL", intent="PLAY", control="DO",
+                asr_text="来玩呀", source="mock_event", confidence=1.0,
+            )
+        elif event_type == EVT_VOICE_STATUS_CARE:
+            event = classification_to_event(
+                social="NONE", intent="DOG_STATUS", control="QUERY",
+                asr_text="你在哪里", source="mock_event", confidence=1.0,
+            )
+        elif event_type == EVT_VOICE_POSITIVE_EMOTION:
+            event = classification_to_event(
+                social="OWNER_POSITIVE", intent="NONE", control="NONE",
+                asr_text="我今天很开心", source="mock_event", confidence=1.0,
+            )
+        elif event_type == EVT_VOICE_NEGATIVE_EMOTION:
+            event = classification_to_event(
+                social="OWNER_NEGATIVE", intent="NONE", control="NONE",
+                asr_text="我有点难过", source="mock_event", confidence=1.0,
             )
         elif event_type == EVT_VOICE_HAPPY:
             event = classification_to_event(
-                emotion="JOY", action="NONE", control="NONE",
+                social="OWNER_POSITIVE", intent="NONE", control="NONE",
                 asr_text="我今天很开心", source="mock_event", confidence=1.0,
             )
         elif event_type == EVT_VOICE_SAD:
             event = classification_to_event(
-                emotion="SADNESS", action="NONE", control="NONE",
+                social="OWNER_NEGATIVE", intent="NONE", control="NONE",
                 asr_text="我有点难过", source="mock_event", confidence=1.0,
             )
-        else:
+        elif event_type == EVT_VOICE_NEUTRAL:
             event = classification_to_event(
-                emotion="CALM", action="NONE", control="NONE",
+                social="NONE", intent="NONE", control="NONE",
                 asr_text="你好", source="mock_event", confidence=1.0,
             )
+        else:
+            raise ValueError(f"Unsupported mock voice event: {event_type}")
         event.update({
             "event_type": event_type,
             "speaker_id": "mock_master",

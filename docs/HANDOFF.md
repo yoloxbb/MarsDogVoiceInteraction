@@ -6,7 +6,8 @@
 
 语音节点负责唤醒、录音/VAD、流式 KWS、ASR、声纹识别、完整产品词库匹配、
 非词库文本的意图分类，以及一次语音会话的生命周期。当前词库覆盖 116 条
-源数据，归并为 81 个路由组和 155 条可运行中文短语；其中 19 组是核心指令子集。
+源数据，归并为 81 个路由组和 155 条标准中文短语；每条另生成 10 个受控扩展，
+共 1705 个精确匹配入口；其中 19 组是核心指令子集。
 它只发布“听见了什么”和
 “会话状态”，不订阅视觉数据，也不直接发布 `/cmd_vel` 或调用动作系统。
 
@@ -22,7 +23,7 @@
 | 发布 | `/perception/voice/enrollment_event` | `std_msgs/msg/String` JSON | RELIABLE, KEEP_LAST 10 |
 | 提供 | `/perception/voice/task` | `marsdog_voice_interaction/srv/VoiceTask` | 管理声纹和监听状态 |
 | 提供 | `POST /api/v1/speakers` | FastAPI multipart | 上传 WAV，经 VAD 后注册并本地落盘 |
-| 提供 | `GET/PATCH/DELETE /api/v1/speakers...` | FastAPI JSON | 列表、修改姓名和删除声纹 |
+| 提供 | `GET/PATCH/DELETE /api/v1/speakers...` | FastAPI JSON | 列表、变更固定身份槽位和删除声纹 |
 
 完整 JSON 字段和任务参数见 [ROS2_CONTRACT.md](ROS2_CONTRACT.md)，测试日志、取证
 步骤和报告模板见 [TESTING_LOG_GUIDE.md](TESTING_LOG_GUIDE.md)。跨项目总契约归档
@@ -35,6 +36,17 @@
 - 唤醒成功后创建 `interaction_id`。
 - 从 `EVT_VOICE_CALL_NAME` 到最终 `EVT_STATE_CHANGED(state=idle)` 必须保持同一个 `interaction_id`。
 - 每句话使用新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享该 ID。
+
+### 声纹身份事件
+
+| `speaker_id` | 发布事件 | 下游含义 |
+|---|---|---|
+| `owner` | `EVT_VOICE_MASTER_ID` | 主人声纹 |
+| `family_member_1`～`family_member_4` | `EVT_VOICE_FOLK_ID` | 家人声纹 |
+| `unknown`、未匹配或历史自由名称 | `EVT_VOICE_UNMASTER_ID` | 非主人且非固定家人身份 |
+
+这些事件发布到 `/perception/audio_event`，由行为树等下游消费。Voice 只负责身份识别
+和事件发布，不直接调用动作系统。
 
 ### 行为树直接消费的事件
 
@@ -87,20 +99,23 @@ STAND_STILL / HOLD_POSITION / QUIET
 租约不会屏蔽录音、流式 KWS、STOP 或 `stop_listening`，会话终止时全部租约自动
 清除。可用 `get_interaction_state` 查询当前 ID 和有效租约。
 
-### 确定性词库、KWS 和去重
+### 确定性词库、KWS 和唯一来源仲裁
 
 ASR 得到文本后，节点先使用 `config/command_catalog.yaml` 做规范化后的整句精确匹配。
-目录以产品表的 116 条数据行为覆盖基线，将斜杠别名展开为 155 条中文短语，并归并成
-81 个稳定路由组。命中时直接发布该组配置的 `event_type`，并跳过 RKLLM/
+目录以产品表的 116 条数据行为覆盖基线，将斜杠别名展开为 155 条标准中文短语，
+每条按配置生成 10 个受控扩展，并归并成 81 个稳定路由组。标准短语或扩展命中时
+直接发布该组配置的 `event_type`，并跳过 RKLLM/
 规则意图；未命中才进入意图识别。词库中的“回来”明确归为 `COME`，不再归为旧版
 `RETURN`。
 
 产品表的 138 条英文仅作参考元数据，当前不参与确定性匹配。原因是表内存在
 `Good dog` 这类跨分类重复表达，在产品给出唯一归属前不能盲目直发。
 
-KWS 可在 VAD 结束前提前发布命令。最终词库事件与同一句已发布 KWS 事件相同时不再
-重复发布；二者冲突时保留先发的 KWS 事件、抑制后续冲突事件，并输出
-`command_conflict` 日志。下游仍应按
+KWS 在 VAD 结束前只缓存候选，不发布业务事件。ASR 完成后由 Voice 在 KWS 和 ASR
+链路之间选择唯一结果来源：短指令可选择唯一 KWS 候选，长句选择 ASR；ASR 目录结果
+与 KWS 冲突时选择 ASR，ASR 为空且只有一个候选时允许 KWS 回退。仲裁记录为
+`stage_complete stage=recognition_arbitration`。核心指令无论由哪一来源选中，都可能
+按契约发布 KNOWN 摘要和一个具体事件；这两条属于同一结果组。下游仍应按
 `interaction_id + utterance_id + event_type` 做幂等保护。
 
 ## 4. 启动与验证
@@ -147,15 +162,16 @@ Provider，不能只按模式名称判断真机或 Mock。
 | `providers.kws` | 流式关键词命令 |
 | `providers.asr` | Paraformer ASR |
 | `providers.speaker` | 声纹模型和阈值 |
-| `command_lexicon` | 完整产品词库（116 条源数据/81 个路由组/19 组核心子集）开关和目录路径 |
-| `providers.intent_*` | RKLLM 优先、规则回退 |
+| `command_lexicon` | 完整产品词库（116 条源数据/81 个路由组/155 条标准词句/1550 条受控扩展/19 组核心子集）开关和目录路径 |
+| `providers.intent_*` | Model K 优先、三轴兼容规则回退 |
 
 配置文件中的文件和目录均使用相对于 YAML 所在目录的路径：模型默认通过
 `../../models` 指向项目同级的 `models/`，注册数据通过 `../data` 指向本项目
 `data/`。FastAPI 上传的
-有效语音保存到 `data/speakers/<规范化姓名>/<序号>.wav`，对应 embedding 使用同名
-`.npy`。存储路径只能来自 `storage.root`，接口无权覆盖；人员总数硬限制为 5。
-单个人员的声纹样本数也硬限制为 5。不得把模型二进制或用户声纹数据复制到其他
+有效语音保存到 `data/speakers/<固定身份>/<序号>.wav`，固定身份只能是 `owner` 和
+`family_member_1`～`family_member_4`，对应 embedding 使用同名 `.npy`。存储路径
+只能来自 `storage.root`，接口无权覆盖；身份槽位总数固定为 5，单个身份的声纹样本
+数也硬限制为 5。不得把模型二进制或用户声纹数据复制到其他
 项目。当前 FastAPI 认证模块已移除，只能部署在可信开发局域网；生产认证方案后续
 另行设计。
 
@@ -167,7 +183,16 @@ Provider，不能只按模式名称判断真机或 Mock。
 - `wake_confidence` 始终在 `[0,1]`；硬件原始分数保存在 `wake_score_raw`。
 - 同一会话 ID 不在中途变化。
 - FOLLOW 事件只发布一次有效指令，且会话结束必有 idle 状态事件。
-- `control in {DO,CANCEL}` 时 `should_trigger_behavior_tree=true`。
+- 19 组核心目录指令按顺序发布不可执行的 `EVT_VOICE_COMMAND_KNOWN` 摘要和可执行的
+  具体事件；行为树只能用具体事件触发动作，不能把摘要再次当动作候选。
+- Model K `SOCIAL|INTENT|CONTROL` 先路由业务大类；命中显式动作白名单时按“社交
+  大类 → 可执行具体动作 → `EVT_VOICE_COMMAND_KNOWN` 摘要”发布。只有具体动作事件
+  可执行；大类和摘要不可执行。`NONE|NONE|NONE` 发布不可执行的
+  `EVT_VOICE_NEUTRAL`。
+- `FETCH/FIND_TOY` 还受 `object_targets.yaml` 的 18 类视觉目标门控。命中后
+  `EVT_VOICE_COMMAND_FETCH` 携带规范 `slots.object_name` 并可执行；未命中写入
+  `object_name=NONE` 且只发布原业务大类。Tree/Action 应按规范类别请求视觉目标，
+  Voice 不生成 `target_track_id`。
 - Topic 仍为 RELIABLE depth 10，与行为树订阅匹配。
 - 新增或修改确定性指令时，同时更新 `command_catalog.yaml`、`voice_event_types`、
   契约和测试，并通知行为树负责人增加事件白名单与 Behavior 映射、动作负责人确认

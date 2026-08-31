@@ -9,7 +9,7 @@ from typing import Any
 from marsdog_voice_interaction.utils.time_utils import now_stamp
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 WAKE_ANGLE_FRAME_ID = "microphone_array"
 
 _TEMPLATE: dict[str, Any] = {
@@ -25,6 +25,8 @@ _TEMPLATE: dict[str, Any] = {
     "asr_text": "",
     "speaker_id": "",
     "speaker_confidence": 0.0,
+    "social": "",
+    "intent": "",
     "emotion": "",
     "action": "",
     "control": "",
@@ -33,6 +35,10 @@ _TEMPLATE: dict[str, Any] = {
     "intent_category": "",
     "intent_source": "",
     "intent_confidence": 0.0,
+    "nlu_protocol": "",
+    "raw_nlu_tag": "",
+    "specific_event_type": "",
+    "dispatch_role": "",
     "slots": [],
     "response_text": "",
     "is_executable": False,

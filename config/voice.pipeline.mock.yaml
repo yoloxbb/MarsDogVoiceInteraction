@@ -17,6 +17,10 @@ command_lexicon:
   enabled: true
   catalog: command_catalog.yaml
 
+object_target_routing:
+  enabled: true
+  catalog: object_targets.yaml
+
 speaker_api:
   enabled: false
 
