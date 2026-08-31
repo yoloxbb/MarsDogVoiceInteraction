@@ -12,7 +12,6 @@ import marsdog_voice_interaction.core.speaker_enrollment_manager as storage
 from marsdog_voice_interaction.api.speaker_api import SpeakerApiServer
 from marsdog_voice_interaction.core.speaker_enrollment_manager import (
     SpeakerEnrollmentManager,
-    normalize_speaker_name,
     set_storage_root,
 )
 from marsdog_voice_interaction.messages.speaker_identity import (
@@ -32,9 +31,15 @@ class _Segment:
 
 
 class _Detector:
-    def __init__(self, start: int = 8000, length: int = 8000) -> None:
+    def __init__(
+        self,
+        start: int = 8000,
+        length: int = 8000,
+        level: float = 0.2,
+    ) -> None:
         self._start = start
         self._length = length
+        self._level = level
         self._segments: list[_Segment] = []
 
     def reset(self) -> None:
@@ -45,7 +50,7 @@ class _Detector:
 
     def flush(self) -> None:
         self._segments.append(
-            _Segment(self._start, [0.2] * self._length)
+            _Segment(self._start, [self._level] * self._length)
         )
 
     def empty(self) -> bool:
@@ -117,11 +122,15 @@ def isolated_speaker_storage(tmp_path: Path):  # type: ignore[no-untyped-def]
         storage._REGISTRY_PATH = original[2]
 
 
-def _wav(duration_sec: float = 2.0, sample_rate: int = 16000) -> bytes:
+def _wav(
+    duration_sec: float = 2.0,
+    sample_rate: int = 16000,
+    amplitude: float = 0.2,
+) -> bytes:
     count = int(duration_sec * sample_rate)
     samples = np.sin(
         2 * np.pi * 220 * np.arange(count, dtype=np.float32) / sample_rate
-    ) * 0.2
+    ) * amplitude
     return encode_pcm16_wav(samples, sample_rate)
 
 
@@ -152,10 +161,9 @@ def _post(
             transport=transport,
             base_url="http://testserver",
         ) as client:
-            data = {"name": name}
-            data.update(extra_data or {})
+            data = dict(extra_data or {})
             return await client.post(
-                "/api/v1/speakers",
+                f"/api/v1/speakers/{name}/samples",
                 data=data,
                 files={
                     "audio": (
@@ -184,13 +192,6 @@ def _request(
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(request())
-
-
-def test_speaker_name_is_unicode_safe_and_cannot_escape_storage() -> None:
-    assert normalize_speaker_name(" ../../张 三 ") == "张_三"
-    assert normalize_speaker_name(" Alice / Bob ") == "Alice_Bob"
-    with pytest.raises(ValueError):
-        normalize_speaker_name("../../")
 
 
 def test_uploaded_wav_is_trimmed_to_vad_speech() -> None:
@@ -257,7 +258,7 @@ def test_upload_appends_audio_and_embedding_under_fixed_identity(
     assert provider._manager.values["owner"] != [0.0, 0.0]
 
 
-def test_storage_exposes_exactly_five_identity_slots_and_crud_releases_one(
+def test_storage_exposes_exactly_five_identity_slots_and_sample_delete_releases_one(
     isolated_speaker_storage: Path,
 ) -> None:
     manager = SpeakerEnrollmentManager()
@@ -290,10 +291,9 @@ def test_storage_exposes_exactly_five_identity_slots_and_crud_releases_one(
     assert existing["ok"] is True
     assert existing["shots"] == 2
 
-    conflict = manager.rename_speaker("owner", "family_member_2")
-    assert conflict["status"] == 409
-
-    assert manager.delete_speaker("family_member_4")["ok"] is True
+    deleted = manager.delete_speaker_sample("family_member_4", 1)
+    assert deleted["ok"] is True
+    assert deleted["speaker_removed"] is True
     admitted = manager.enroll_speaker_from_audio(
         "family_member_4",
         _wav(),
@@ -312,7 +312,7 @@ def test_storage_exposes_exactly_five_identity_slots_and_crud_releases_one(
     }
 
 
-def test_legacy_name_is_unmaster_and_can_move_to_fixed_identity(
+def test_legacy_identity_data_is_not_loaded_or_exposed(
     isolated_speaker_storage: Path,
 ) -> None:
     legacy_directory = isolated_speaker_storage / "speakers" / "Alice"
@@ -324,18 +324,14 @@ def test_legacy_name_is_unmaster_and_can_move_to_fixed_identity(
         "speakers": {"Alice": {"shots": 1, "enrolled_at": 1.0}},
     })
     manager = SpeakerEnrollmentManager()
+    provider = _SpeakerProvider()
 
-    before = manager.list_speaker_records()
-    renamed = manager.rename_speaker("Alice", "owner")
-    after = manager.list_speaker_records()
+    listing = manager.list_speaker_records()
 
-    assert before["legacy_count"] == 1
-    assert before["speakers"][0]["role"] == "unmaster"
-    assert before["speakers"][0]["legacy"] is True
-    assert renamed["ok"] is True
-    assert after["legacy_count"] == 0
-    assert after["speakers"][0]["name"] == "owner"
-    assert after["speakers"][0]["role"] == "owner"
+    assert listing["count"] == 0
+    assert listing["speakers"] == []
+    assert manager.sync_to_provider(provider) == 0
+    assert provider._manager.values == {}
 
 
 def test_each_speaker_accepts_at_most_five_uploaded_samples(
@@ -367,6 +363,116 @@ def test_each_speaker_accepts_at_most_five_uploaded_samples(
     assert not (directory / "006.wav").exists()
     assert not (directory / "006.npy").exists()
     assert manager.list_speaker_records()["speakers"][0]["shots"] == 5
+
+
+def test_individual_sample_crud_preserves_ids_and_recomputes_centroid(
+    isolated_speaker_storage: Path,
+) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+
+    first = manager.enroll_speaker_from_audio(
+        "owner",
+        _wav(amplitude=0.1),
+        vad=_vad(),
+    )
+    second = manager.enroll_speaker_from_audio(
+        "owner",
+        _wav(amplitude=0.3),
+        vad=_vad(),
+    )
+    directory = isolated_speaker_storage / "speakers" / "owner"
+
+    assert first["sample_id"] == 1
+    assert second["sample_id"] == 2
+    assert manager.list_speaker_samples("owner")["sample_ids"] == [1, 2]
+    assert manager.get_speaker_sample("owner", 2)["ready"] is True
+    first_embedding = np.load(directory / "001.npy")
+    original_second_embedding = np.load(directory / "002.npy")
+
+    replaced = manager.replace_speaker_sample(
+        "owner",
+        2,
+        _wav(amplitude=0.5),
+        vad=_vad(),
+    )
+    replacement_embedding = np.load(directory / "002.npy")
+    centroid_after_replace = np.load(directory / "centroid.npy")
+
+    assert replaced["ok"] is True
+    assert replaced["sample_id"] == 2
+    assert replaced["shots"] == 2
+    assert not np.allclose(replacement_embedding, original_second_embedding)
+    assert np.allclose(
+        centroid_after_replace,
+        np.mean([first_embedding, replacement_embedding], axis=0),
+    )
+
+    deleted = manager.delete_speaker_sample("owner", 1)
+    centroid_after_delete = np.load(directory / "centroid.npy")
+
+    assert deleted["ok"] is True
+    assert deleted["remaining_sample_ids"] == [2]
+    assert deleted["speaker_removed"] is False
+    assert not (directory / "001.wav").exists()
+    assert not (directory / "001.npy").exists()
+    assert (directory / "002.wav").exists()
+    assert np.allclose(centroid_after_delete, replacement_embedding)
+
+    added = manager.enroll_speaker_from_audio(
+        "owner",
+        _wav(amplitude=0.2),
+        vad=_vad(),
+    )
+
+    assert added["sample_id"] == 1
+    assert added["shots"] == 2
+    assert manager.list_speaker_samples("owner")["sample_ids"] == [1, 2]
+
+
+def test_invalid_sample_replacement_keeps_original_files(
+    isolated_speaker_storage: Path,
+) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+    manager.enroll_speaker_from_audio("family_member_1", _wav(), vad=_vad())
+    directory = isolated_speaker_storage / "speakers" / "family_member_1"
+    original_audio = (directory / "001.wav").read_bytes()
+    original_embedding = (directory / "001.npy").read_bytes()
+    original_centroid = (directory / "centroid.npy").read_bytes()
+
+    result = manager.replace_speaker_sample(
+        "family_member_1",
+        1,
+        b"RIFF-invalid-wav",
+        vad=_vad(),
+    )
+
+    assert result["ok"] is False
+    assert (directory / "001.wav").read_bytes() == original_audio
+    assert (directory / "001.npy").read_bytes() == original_embedding
+    assert (directory / "centroid.npy").read_bytes() == original_centroid
+
+
+def test_deleting_last_sample_releases_identity_and_runtime_index(
+    isolated_speaker_storage: Path,
+) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+    manager.enroll_speaker_from_audio("owner", _wav(), vad=_vad())
+    provider = _SpeakerProvider()
+    manager.sync_to_provider(provider)
+    assert "owner" in provider._manager.values
+
+    deleted = manager.delete_speaker_sample("owner", 1)
+    synced = manager.sync_to_provider(provider)
+
+    assert deleted["speaker_removed"] is True
+    assert deleted["shots"] == 0
+    assert synced == 0
+    assert "owner" not in provider._manager.values
+    assert not (isolated_speaker_storage / "speakers" / "owner").exists()
+    assert manager.list_speaker_records()["count"] == 0
 
 
 def test_live_enrollment_required_shots_cannot_exceed_five(
@@ -529,7 +635,7 @@ def test_fastapi_rejects_non_wav_and_accepts_lan_host() -> None:
     server._validate_host()
 
 
-def test_fastapi_lists_changes_identity_and_deletes_speakers() -> None:
+def test_fastapi_lists_speakers_and_omits_removed_legacy_routes() -> None:
     speakers = {"owner": {"name": "owner", "shots": 1}}
 
     def listing() -> dict[str, object]:
@@ -541,59 +647,124 @@ def test_fastapi_lists_changes_identity_and_deletes_speakers() -> None:
             "speakers": list(speakers.values()),
         }
 
-    def rename(name: str, new_name: str) -> dict[str, object]:
-        if name not in speakers:
-            return {"ok": False, "status": 404, "error": "not found"}
-        speakers[new_name] = {**speakers.pop(name), "name": new_name}
-        return {
-            "ok": True,
-            "name": new_name,
-            "previous_name": name,
-            "changed": True,
-        }
-
-    def delete(name: str) -> dict[str, object]:
-        if speakers.pop(name, None) is None:
-            return {"ok": False, "status": 404, "error": "not found"}
-        return {"ok": True, "name": name}
-
     server = SpeakerApiServer(
         {},
         lambda name, payload: {"ok": True, "name": name},
         list_handler=listing,
-        rename_handler=rename,
-        delete_handler=delete,
     )
 
     listed = _request(server, "GET", "/api/v1/speakers")
-    renamed = _request(
-        server,
-        "PATCH",
-        "/api/v1/speakers/owner",
-        json={"name": "family_member_1"},
-    )
-    rejected_path = _request(
-        server,
-        "PATCH",
-        "/api/v1/speakers/family_member_1",
-        json={"name": "family_member_1", "storage_root": "/tmp/forbidden"},
-    )
-    deleted = _request(
-        server,
-        "DELETE",
-        "/api/v1/speakers/family_member_1",
-    )
-    missing = _request(
-        server,
-        "DELETE",
-        "/api/v1/speakers/family_member_1",
-    )
+    schema_paths = server.create_app().openapi()["paths"]
 
     assert listed.status_code == 200
     assert listed.json()["max_speakers"] == 5
     assert listed.json()["max_samples_per_speaker"] == 5
-    assert renamed.status_code == 200
-    assert renamed.json()["name"] == "family_member_1"
-    assert rejected_path.status_code == 422
+    assert "post" not in schema_paths["/api/v1/speakers"]
+    assert "/api/v1/speakers/{name}" not in schema_paths
+
+
+def test_fastapi_manages_and_downloads_individual_samples(
+    isolated_speaker_storage: Path,
+) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+
+    def upload(name: str, payload: bytes) -> dict[str, object]:
+        return manager.enroll_speaker_from_audio(name, payload, vad=_vad())
+
+    def replace(
+        name: str,
+        sample_id: int,
+        payload: bytes,
+    ) -> dict[str, object]:
+        return manager.replace_speaker_sample(
+            name,
+            sample_id,
+            payload,
+            vad=_vad(_Detector(level=0.4)),
+        )
+
+    server = SpeakerApiServer(
+        {},
+        upload,
+        list_handler=manager.list_speaker_records,
+        sample_list_handler=manager.list_speaker_samples,
+        sample_get_handler=manager.get_speaker_sample,
+        sample_replace_handler=replace,
+        sample_delete_handler=manager.delete_speaker_sample,
+    )
+
+    added = _request(
+        server,
+        "POST",
+        "/api/v1/speakers/owner/samples",
+        files={"audio": ("owner.wav", _wav(), "audio/wav")},
+    )
+    listed = _request(server, "GET", "/api/v1/speakers/owner/samples")
+    detail = _request(server, "GET", "/api/v1/speakers/owner/samples/1")
+    audio = _request(
+        server,
+        "GET",
+        "/api/v1/speakers/owner/samples/1/audio",
+    )
+    stored_audio = (
+        isolated_speaker_storage / "speakers" / "owner" / "001.wav"
+    ).read_bytes()
+    replaced = _request(
+        server,
+        "PUT",
+        "/api/v1/speakers/owner/samples/1",
+        files={"audio": ("replacement.wav", _wav(), "audio/wav")},
+    )
+    deleted = _request(
+        server,
+        "DELETE",
+        "/api/v1/speakers/owner/samples/1",
+    )
+    missing = _request(
+        server,
+        "GET",
+        "/api/v1/speakers/owner/samples/1",
+    )
+
+    assert added.status_code == 201
+    assert added.json()["sample_id"] == 1
+    assert listed.status_code == 200
+    assert listed.json()["sample_ids"] == [1]
+    assert detail.status_code == 200
+    assert detail.json()["sample_key"] == "001"
+    assert detail.json()["audio_url"].endswith("/samples/1/audio")
+    assert audio.status_code == 200
+    assert audio.headers["content-type"] == "audio/wav"
+    assert audio.content == stored_audio
+    assert replaced.status_code == 200
+    assert replaced.json()["replaced"] is True
     assert deleted.status_code == 200
+    assert deleted.json()["speaker_removed"] is True
     assert missing.status_code == 404
+
+
+def test_sample_api_rejects_unknown_identity_and_out_of_range_id() -> None:
+    server = SpeakerApiServer(
+        {},
+        lambda name, payload: {"ok": True, "name": name},
+        sample_get_handler=lambda name, sample_id: {
+            "ok": True,
+            "name": name,
+            "sample_id": sample_id,
+        },
+    )
+
+    unknown_identity = _request(
+        server,
+        "GET",
+        "/api/v1/speakers/alice/samples/1",
+    )
+    invalid_id = _request(
+        server,
+        "GET",
+        "/api/v1/speakers/owner/samples/6",
+    )
+
+    assert unknown_identity.status_code == 422
+    assert invalid_id.status_code == 422

@@ -12,12 +12,11 @@ from typing import Any
 from fastapi import (
     FastAPI,
     File,
-    Form,
     HTTPException,
     Path,
+    Response,
     UploadFile,
 )
-from pydantic import BaseModel, ConfigDict, Field
 
 from marsdog_voice_interaction.messages.speaker_identity import (
     SpeakerIdentity,
@@ -25,14 +24,6 @@ from marsdog_voice_interaction.messages.speaker_identity import (
 
 
 logger = logging.getLogger(__name__)
-
-
-class SpeakerRenameRequest(BaseModel):
-    """Move an enrolled voice print to another fixed identity slot."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: SpeakerIdentity = Field(description="目标身份槽位")
 
 
 class SpeakerApiServer:
@@ -43,14 +34,26 @@ class SpeakerApiServer:
         config: dict[str, Any],
         upload_handler: Callable[[str, bytes], dict[str, Any]],
         list_handler: Callable[[], dict[str, Any]] | None = None,
-        rename_handler: Callable[[str, str], dict[str, Any]] | None = None,
-        delete_handler: Callable[[str], dict[str, Any]] | None = None,
+        sample_list_handler: (
+            Callable[[str], dict[str, Any]] | None
+        ) = None,
+        sample_get_handler: (
+            Callable[[str, int], dict[str, Any]] | None
+        ) = None,
+        sample_replace_handler: (
+            Callable[[str, int, bytes], dict[str, Any]] | None
+        ) = None,
+        sample_delete_handler: (
+            Callable[[str, int], dict[str, Any]] | None
+        ) = None,
     ) -> None:
         self._config = dict(config)
         self._upload_handler = upload_handler
         self._list_handler = list_handler
-        self._rename_handler = rename_handler
-        self._delete_handler = delete_handler
+        self._sample_list_handler = sample_list_handler
+        self._sample_get_handler = sample_get_handler
+        self._sample_replace_handler = sample_replace_handler
+        self._sample_delete_handler = sample_delete_handler
         self._enabled = bool(config.get("enabled", True))
         self._host = str(config.get("host", "127.0.0.1")).strip()
         self._port = int(config.get("port", 8091))
@@ -124,11 +127,11 @@ class SpeakerApiServer:
     def create_app(self) -> Any:
         app = FastAPI(
             title="MarsDog Voice Speaker API",
-            version="1.1.0",
+            version="2.0.0",
             description=(
-                "Manage the fixed owner/family identity slots and upload "
-                "PCM16 WAV audio for VAD-trimmed enrollment. Storage is "
-                "config-owned."
+                "Manage individual PCM16 WAV samples in fixed owner/family "
+                "identity slots. Samples can be added, listed, downloaded, "
+                "replaced, or deleted. Storage is config-owned."
             ),
         )
 
@@ -185,26 +188,25 @@ class SpeakerApiServer:
         async def health() -> dict[str, Any]:
             return {"ok": True, "service": "marsdog-voice-speaker-api"}
 
-        @app.post("/api/v1/speakers", status_code=201)
-        async def upload_speaker(
-            name: SpeakerIdentity = Form(
-                ...,
-                description="选择 owner 或 family_member_1 到 family_member_4",
-            ),
+        @app.post(
+            "/api/v1/speakers/{name}/samples",
+            status_code=201,
+        )
+        async def add_speaker_sample(
             audio: UploadFile = File(...),
+            name: SpeakerIdentity = Path(
+                ...,
+                description="owner 或 family_member_1 到 family_member_4",
+            ),
         ) -> dict[str, Any]:
             payload = await read_wav(audio)
-            request_id = uuid.uuid4().hex
             result = await run_handler(
                 self._upload_handler,
                 name.value,
                 payload,
             )
             raise_for_result(result)
-            return {
-                "request_id": request_id,
-                **result,
-            }
+            return {"request_id": uuid.uuid4().hex, **result}
 
         @app.get("/api/v1/speakers")
         async def list_speakers() -> dict[str, Any]:
@@ -213,22 +215,87 @@ class SpeakerApiServer:
             raise_for_result(result)
             return result
 
-        @app.patch("/api/v1/speakers/{name}")
-        async def rename_speaker(
-            request: SpeakerRenameRequest,
-            name: str = Path(..., min_length=1, max_length=128),
+        @app.get("/api/v1/speakers/{name}/samples")
+        async def list_speaker_samples(
+            name: SpeakerIdentity = Path(...),
         ) -> dict[str, Any]:
-            handler = require_handler(self._rename_handler, "rename")
-            result = await run_handler(handler, name, request.name.value)
+            handler = require_handler(self._sample_list_handler, "sample list")
+            result = await run_handler(handler, name.value)
+            raise_for_result(result)
+            return result
+
+        @app.get("/api/v1/speakers/{name}/samples/{sample_id}")
+        async def get_speaker_sample(
+            name: SpeakerIdentity = Path(...),
+            sample_id: int = Path(..., ge=1, le=5),
+        ) -> dict[str, Any]:
+            handler = require_handler(self._sample_get_handler, "sample get")
+            result = await run_handler(handler, name.value, sample_id)
+            raise_for_result(result)
+            return result
+
+        @app.get("/api/v1/speakers/{name}/samples/{sample_id}/audio")
+        async def download_speaker_sample_audio(
+            name: SpeakerIdentity = Path(...),
+            sample_id: int = Path(..., ge=1, le=5),
+        ) -> Any:
+            handler = require_handler(self._sample_get_handler, "sample get")
+            result = await run_handler(handler, name.value, sample_id)
+            raise_for_result(result)
+            if not bool(result.get("audio_available", False)):
+                raise HTTPException(
+                    status_code=404,
+                    detail="speaker sample audio not found",
+                )
+            try:
+                with open(str(result["audio_path"]), "rb") as stream:
+                    payload = stream.read()
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail="speaker sample audio not found",
+                ) from exc
+            return Response(
+                content=payload,
+                media_type="audio/wav",
+                headers={
+                    "Content-Disposition": (
+                        "attachment; filename="
+                        f'"{name.value}_{sample_id:03d}.wav"'
+                    ),
+                },
+            )
+
+        @app.put("/api/v1/speakers/{name}/samples/{sample_id}")
+        async def replace_speaker_sample(
+            audio: UploadFile = File(...),
+            name: SpeakerIdentity = Path(...),
+            sample_id: int = Path(..., ge=1, le=5),
+        ) -> dict[str, Any]:
+            payload = await read_wav(audio)
+            handler = require_handler(
+                self._sample_replace_handler,
+                "sample replace",
+            )
+            result = await run_handler(
+                handler,
+                name.value,
+                sample_id,
+                payload,
+            )
             raise_for_result(result)
             return {"request_id": uuid.uuid4().hex, **result}
 
-        @app.delete("/api/v1/speakers/{name}")
-        async def delete_speaker(
-            name: str = Path(..., min_length=1, max_length=128),
+        @app.delete("/api/v1/speakers/{name}/samples/{sample_id}")
+        async def delete_speaker_sample(
+            name: SpeakerIdentity = Path(...),
+            sample_id: int = Path(..., ge=1, le=5),
         ) -> dict[str, Any]:
-            handler = require_handler(self._delete_handler, "delete")
-            result = await run_handler(handler, name)
+            handler = require_handler(
+                self._sample_delete_handler,
+                "sample delete",
+            )
+            result = await run_handler(handler, name.value, sample_id)
             raise_for_result(result)
             return {"request_id": uuid.uuid4().hex, **result}
 

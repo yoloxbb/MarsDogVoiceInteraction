@@ -392,17 +392,6 @@ float64 latency_ms     # 处理耗时
 
 无特殊参数，返回 `{"ok": true}`。
 
-#### `upload_speaker` — 上传 WAV 注册声纹（兼容接口）
-
-新客户端应使用下文 FastAPI multipart 接口。此任务保留给已有 ROS2 调用方，内部
-与 FastAPI 共用同一套 VAD、固定身份校验和落盘逻辑。
-
-| 方向 | 字段 | 说明 |
-|------|------|------|
-| 请求 `params_json` | `name` | 固定身份：`owner` 或 `family_member_1`～`family_member_4` |
-| | `audio_base64` | WAV 文件 Base64 |
-| 响应 `result_json` | `ok` | 是否成功 |
-
 #### `verify_speaker` — 验证说话人
 
 | 方向 | 字段 | 说明 |
@@ -412,18 +401,8 @@ float64 latency_ms     # 处理耗时
 | | `speaker_id` | 识别结果 |
 | | `confidence` | 匹配置信度 |
 
-#### `list_speakers` — 列出已注册说话人
-
-| 方向 | 字段 | 说明 |
-|------|------|------|
-| 响应 `result_json` | `speakers` | 已注册固定身份数组；历史数据可能仍显示旧名称 |
-
-#### `delete_speaker` — 删除说话人
-
-| 方向 | 字段 | 说明 |
-|------|------|------|
-| 请求 `params_json` | `name` | 要删除的固定身份；也可用于清理历史旧名称 |
-| 响应 `result_json` | `ok` | 是否成功 |
+旧版 `upload_speaker`、`list_speakers`、`delete_speaker` 任务已移除，调用时返回
+`unsupported task_type`。文件和样本管理统一使用下文 FastAPI 样本级接口。
 
 #### `start_listening` — 手动开始交互
 
@@ -482,13 +461,13 @@ ID 对应会话已经结束，返回失败且不得复活旧会话。
 Swagger 页面中的 `name` 是枚举选择，不是自由文本；页面只支持选择文件上传，不包含
 麦克风录音控件。
 
-### `POST /api/v1/speakers`
+### `POST /api/v1/speakers/{name}/samples`
 
 请求类型：`multipart/form-data`。
 
 | 位置 | 字段 | 必填 | 说明 |
 |---|---|---:|---|
-| Form | `name` | 是 | 只能选择 `owner`、`family_member_1`、`family_member_2`、`family_member_3`、`family_member_4` |
+| Path | `name` | 是 | 只能选择 `owner`、`family_member_1`、`family_member_2`、`family_member_3`、`family_member_4` |
 | File | `audio` | 是 | `.wav`；未压缩 16-bit PCM，1～8 声道，8～96 kHz |
 
 成功响应为 HTTP `201`：
@@ -499,6 +478,8 @@ Swagger 页面中的 `name` 是枚举选择，不是自由文本；页面只支�
   "ok": true,
   "name": "owner",
   "shots": 1,
+  "sample_id": 1,
+  "sample_key": "001",
   "audio_path": "/path/to/data/speakers/owner/001.wav",
   "embedding_path": "/path/to/data/speakers/owner/001.npy",
   "source_duration_ms": 3200.0,
@@ -512,7 +493,7 @@ Swagger 页面中的 `name` 是枚举选择，不是自由文本；页面只支�
 
 处理顺序固定为：解析 WAV → 转 16 kHz 单声道 → Silero VAD 截取有效语音 →
 校验固定身份 → 保存 WAV 和 embedding → 更新 `centroid.npy` 与注册表。相同身份
-不会覆盖旧样本，而是使用 `001/002/...` 递增。
+不会覆盖旧样本，而是分配 `1～5` 中最小的空闲稳定编号。
 
 落盘根目录只读取节点启动配置中的 `storage.root`。任何 HTTP 接口都不定义或接受
 可生效的路径参数，客户端不能覆盖该目录。上传成功还会明确返回
@@ -520,9 +501,7 @@ Swagger 页面中的 `name` 是枚举选择，不是自由文本；页面只支�
 检测到语音或有效语音不足 0.5 秒时不会创建目录或记录。
 
 系统固定提供 5 个身份槽位：1 个 `owner` 和 4 个 `family_member_*`。同一身份追加
-样本不增加身份数。历史自由名称不会自动删除，列表中以 `legacy=true/role=unmaster`
-标记；它们运行时只会发布 `EVT_VOICE_UNMASTER_ID`，可通过 PATCH 移入未占用的固定
-身份槽位，或通过 DELETE 清理。
+样本不增加身份数。旧版自由名称数据不再加载、列出或同步到运行时声纹索引。
 
 单个身份最多保存 5 个编号样本。上传相同身份时，当前样本数达到 5 后直接返回
 HTTP `409`，不会继续执行 VAD/声纹推理，也不会生成 `006.wav` 或 `006.npy`。
@@ -532,8 +511,8 @@ ROS2 录制注册的 `required_shots` 同样只能取 1～5。
 |---:|---|
 | `201` | 注册并落盘成功 |
 | `400` | 空文件 |
-| `404` | 修改或删除的人员不存在 |
-| `409` | 单个身份已有 5 个样本，或变更后的目标身份已存在 |
+| `404` | 人员或指定样本不存在 |
+| `409` | 单个身份已有 5 个样本，或样本文件状态不一致 |
 | `413` | 超过 `speaker_api.max_upload_mb` |
 | `415` | 文件扩展名不是 `.wav` |
 | `422` | 身份不在固定枚举、WAV 格式错误、VAD 无有效语音、有效语音过短或无法提取声纹 |
@@ -551,7 +530,6 @@ ROS2 录制注册的 `required_shots` 同样只能取 1～5。
 {
   "ok": true,
   "count": 1,
-  "legacy_count": 0,
   "max_speakers": 5,
   "max_samples_per_speaker": 5,
   "allowed_names": [
@@ -564,30 +542,67 @@ ROS2 录制注册的 `required_shots` 同样只能取 1～5。
   ],
   "speakers": [
     {
-      "name": "owner", "role": "owner", "legacy": false,
-      "shots": 2, "enrolled_at": 1787558400.0, "ready": true
+      "name": "owner", "role": "owner",
+      "shots": 2, "sample_ids": [1, 2],
+      "samples_url": "/api/v1/speakers/owner/samples",
+      "enrolled_at": 1787558400.0, "ready": true
     }
   ]
 }
 ```
 
-### `PATCH /api/v1/speakers/{name}`
+### 单条声纹样本 CRUD
 
-将现有声纹移到另一个尚未占用的固定身份槽位，并同步修改目录名称，请求为 JSON：
+单条样本接口只接受固定身份 `owner/family_member_1～4` 和 `sample_id=1～5`：
+
+| 方法和路径 | 请求 | 用途 |
+|---|---|---|
+| `POST /api/v1/speakers/{name}/samples` | multipart `audio=.wav` | 给指定身份新增样本 |
+| `GET /api/v1/speakers/{name}/samples` | 无 | 列出稳定样本 ID、文件状态和 WAV 下载地址 |
+| `GET /api/v1/speakers/{name}/samples/{sample_id}` | 无 | 查询一条样本的元数据 |
+| `GET /api/v1/speakers/{name}/samples/{sample_id}/audio` | 无 | 下载 VAD 后的 PCM16 WAV |
+| `PUT /api/v1/speakers/{name}/samples/{sample_id}` | multipart `audio=.wav` | 校验新音频并原位替换 WAV 和 embedding |
+| `DELETE /api/v1/speakers/{name}/samples/{sample_id}` | 无 | 只删除指定 WAV/embedding |
+
+样本列表响应示例：
 
 ```json
-{"name": "family_member_1"}
+{
+  "ok": true,
+  "name": "owner",
+  "role": "owner",
+  "shots": 2,
+  "max_samples_per_speaker": 5,
+  "sample_ids": [1, 2],
+  "samples": [
+    {
+      "sample_id": 1,
+      "sample_key": "001",
+      "audio_filename": "001.wav",
+      "embedding_filename": "001.npy",
+      "audio_url": "/api/v1/speakers/owner/samples/1/audio",
+      "audio_available": true,
+      "embedding_available": true,
+      "ready": true,
+      "audio_size_bytes": 32044,
+      "updated_at": 1787558400.0
+    }
+  ]
+}
 ```
 
-请求模型禁止额外字段，目标值也使用固定身份枚举，因此不能借此传入或修改存储
-路径。目标身份已经存在时返回 HTTP `409`。需要更新声纹音频时，使用
-`POST /api/v1/speakers` 上传相同身份的新
-WAV，系统会追加样本并重算 centroid。
+`sample_id` 在已有样本生命周期内保持稳定。删除 `001` 后不会重编号 `002`；以后新增
+样本会复用最小空闲编号。PUT 替换成功后 `sample_id` 不变，并重算
+`centroid.npy`。DELETE 删除非最后一条样本时重算 centroid；删除最后一条时同时删除
+身份目录和注册表记录并释放身份槽位。两种变更成功后均同步当前进程声纹检索索引。
 
-### `DELETE /api/v1/speakers/{name}`
+PUT 与新增上传使用完全相同的 WAV/VAD/有效语音/embedding 校验。新文件校验失败时
+原 WAV、embedding 和 centroid 保持不变。接口只允许下载 WAV，不提供 `.npy` 或
+`centroid.npy` 下载端点；这些生物特征模板继续只保存在设备本地。
 
-删除该人员目录中的 WAV、embedding、centroid 以及注册表记录，同时从当前进程的
-声纹检索索引移除。人员不存在时返回 HTTP `404`。此操作不可通过接口指定其他目录。
+旧版 `POST /api/v1/speakers`、`PATCH /api/v1/speakers/{name}` 和
+`DELETE /api/v1/speakers/{name}` 均已移除。删除整个身份应逐条调用样本 DELETE；
+删除最后一条时系统自动移除身份目录、注册表记录和运行时索引。
 
 ---
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 
 from marsdog_voice_interaction.core.interaction_state_machine import (
     Trigger,
@@ -263,6 +264,21 @@ def test_stop_listening_cancels_capture_immediately() -> None:
     assert not audio.is_capturing()
     assert audio.cancel_count == 1
     assert node.published[-1]["state_reason"] == "stop_listening"
+
+
+@pytest.mark.parametrize(
+    "task_type",
+    ["upload_speaker", "list_speakers", "delete_speaker"],
+)
+def test_removed_legacy_speaker_tasks_are_unsupported(task_type: str) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+
+    result = node._run_task(task_type, {})
+
+    assert result == {
+        "ok": False,
+        "error": f"unsupported task_type: {task_type}",
+    }
 
 
 def test_interaction_hold_pauses_idle_timeout(monkeypatch: Any) -> None:

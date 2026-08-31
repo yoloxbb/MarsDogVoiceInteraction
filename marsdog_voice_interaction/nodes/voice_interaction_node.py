@@ -375,8 +375,12 @@ class VoiceInteractionNode(Node):
                 config,
                 self._enroll_uploaded_speaker,
                 list_handler=self._list_speakers_for_api,
-                rename_handler=self._rename_speaker_for_api,
-                delete_handler=self._delete_speaker_for_api,
+                sample_list_handler=self._list_speaker_samples_for_api,
+                sample_get_handler=self._get_speaker_sample_for_api,
+                sample_replace_handler=(
+                    self._replace_speaker_sample_for_api
+                ),
+                sample_delete_handler=self._delete_speaker_sample_for_api,
             )
             ready = self._speaker_api.start()
             self._speaker_api_status = {
@@ -417,6 +421,8 @@ class VoiceInteractionNode(Node):
             result="success" if result.get("ok") else "failure",
             speaker_name=str(result.get("name", name)),
             shots=int(result.get("shots", 0)),
+            sample_id=int(result.get("sample_id", 0)),
+            sample_key=str(result.get("sample_key", "")),
             source_duration_ms=float(result.get("source_duration_ms", 0.0)),
             speech_duration_ms=float(result.get("speech_duration_ms", 0.0)),
             segment_count=int(result.get("segment_count", 0)),
@@ -442,38 +448,97 @@ class VoiceInteractionNode(Node):
         )
         return result
 
-    def _rename_speaker_for_api(
-        self,
-        name: str,
-        new_name: str,
-    ) -> dict[str, Any]:
+    def _list_speaker_samples_for_api(self, name: str) -> dict[str, Any]:
         started = time.perf_counter()
         with self._speaker_operation_lock:
-            result = self._enrollment.rename_speaker(name, new_name)
-            if result.get("ok"):
-                self._sync_speaker_registry()
+            result = self._enrollment.list_speaker_samples(name)
         self._trace(
             "speaker_management",
-            operation="rename",
+            operation="sample_list",
             result="success" if result.get("ok") else "failure",
-            speaker_name=str(result.get("name", new_name)),
-            previous_name=str(result.get("previous_name", name)),
+            speaker_name=str(result.get("name", name)),
+            shots=int(result.get("shots", 0)),
+            sample_ids=list(result.get("sample_ids", [])),
             latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
             error=str(result.get("error", "")),
         )
         return result
 
-    def _delete_speaker_for_api(self, name: str) -> dict[str, Any]:
+    def _get_speaker_sample_for_api(
+        self,
+        name: str,
+        sample_id: int,
+    ) -> dict[str, Any]:
         started = time.perf_counter()
         with self._speaker_operation_lock:
-            result = self._enrollment.delete_speaker(name)
+            result = self._enrollment.get_speaker_sample(name, sample_id)
+        self._trace(
+            "speaker_management",
+            operation="sample_get",
+            result="success" if result.get("ok") else "failure",
+            speaker_name=str(result.get("name", name)),
+            sample_id=int(result.get("sample_id", sample_id)),
+            latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
+            error=str(result.get("error", "")),
+        )
+        return result
+
+    def _replace_speaker_sample_for_api(
+        self,
+        name: str,
+        sample_id: int,
+        audio_bytes: bytes,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        if self._upload_vad is None:
+            result = {"ok": False, "error": "上传音频 VAD 不可用"}
+        else:
+            with self._speaker_operation_lock:
+                result = self._enrollment.replace_speaker_sample(
+                    name,
+                    sample_id,
+                    audio_bytes,
+                    vad=self._upload_vad,
+                )
+                if result.get("ok"):
+                    self._sync_speaker_registry()
+        self._trace(
+            "speaker_management",
+            operation="sample_replace",
+            result="success" if result.get("ok") else "failure",
+            speaker_name=str(result.get("name", name)),
+            sample_id=int(result.get("sample_id", sample_id)),
+            shots=int(result.get("shots", 0)),
+            source_duration_ms=float(result.get("source_duration_ms", 0.0)),
+            speech_duration_ms=float(result.get("speech_duration_ms", 0.0)),
+            segment_count=int(result.get("segment_count", 0)),
+            audio_valid=bool(result.get("audio_valid", False)),
+            has_effective_speech=bool(
+                result.get("has_effective_speech", False)
+            ),
+            latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
+            error=str(result.get("error", "")),
+        )
+        return result
+
+    def _delete_speaker_sample_for_api(
+        self,
+        name: str,
+        sample_id: int,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        with self._speaker_operation_lock:
+            result = self._enrollment.delete_speaker_sample(name, sample_id)
             if result.get("ok"):
                 self._sync_speaker_registry()
         self._trace(
             "speaker_management",
-            operation="delete",
+            operation="sample_delete",
             result="success" if result.get("ok") else "failure",
             speaker_name=str(result.get("name", name)),
+            sample_id=int(result.get("deleted_sample_id", sample_id)),
+            shots=int(result.get("shots", 0)),
+            speaker_removed=bool(result.get("speaker_removed", False)),
             latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
             error=str(result.get("error", "")),
         )
@@ -1953,24 +2018,6 @@ class VoiceInteractionNode(Node):
         if task_type == "cancel_speaker_enrollment":
             with self._speaker_operation_lock:
                 return self._enrollment.cancel_speaker()
-        if task_type == "upload_speaker":
-            payload = base64.b64decode(
-                str(params.get("audio_base64", "")), validate=True
-            )
-            return self._enroll_uploaded_speaker(
-                str(params.get("name", "")),
-                payload,
-            )
-        if task_type == "list_speakers":
-            with self._speaker_operation_lock:
-                return {
-                    "ok": True,
-                    "speakers": self._enrollment.list_enrolled_speakers(),
-                }
-        if task_type == "delete_speaker":
-            return self._delete_speaker_for_api(
-                str(params.get("name", ""))
-            )
         if task_type == "verify_speaker":
             speaker = self._providers.get("speaker")
             audio_data = self._decode_audio_params(params) or self._latest_audio

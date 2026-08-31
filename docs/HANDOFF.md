@@ -22,8 +22,8 @@
 | 发布 | `/perception/audio_event` | `std_msgs/msg/String` JSON | RELIABLE, KEEP_LAST 10 |
 | 发布 | `/perception/voice/enrollment_event` | `std_msgs/msg/String` JSON | RELIABLE, KEEP_LAST 10 |
 | 提供 | `/perception/voice/task` | `marsdog_voice_interaction/srv/VoiceTask` | 管理声纹和监听状态 |
-| 提供 | `POST /api/v1/speakers` | FastAPI multipart | 上传 WAV，经 VAD 后注册并本地落盘 |
-| 提供 | `GET/PATCH/DELETE /api/v1/speakers...` | FastAPI JSON | 列表、变更固定身份槽位和删除声纹 |
+| 提供 | `GET /api/v1/speakers` | FastAPI JSON | 查询固定身份槽位及样本数量 |
+| 提供 | `/api/v1/speakers/{name}/samples...` | FastAPI multipart/JSON/WAV | 单条样本新增、查询、WAV 下载、替换和删除；变更后重算 centroid 并同步运行时索引 |
 
 完整 JSON 字段和任务参数见 [ROS2_CONTRACT.md](ROS2_CONTRACT.md)，测试日志、取证
 步骤和报告模板见 [TESTING_LOG_GUIDE.md](TESTING_LOG_GUIDE.md)。跨项目总契约归档
@@ -43,7 +43,7 @@
 |---|---|---|
 | `owner` | `EVT_VOICE_MASTER_ID` | 主人声纹 |
 | `family_member_1`～`family_member_4` | `EVT_VOICE_FOLK_ID` | 家人声纹 |
-| `unknown`、未匹配或历史自由名称 | `EVT_VOICE_UNMASTER_ID` | 非主人且非固定家人身份 |
+| `unknown` 或未匹配 | `EVT_VOICE_UNMASTER_ID` | 非主人且非固定家人身份 |
 
 这些事件发布到 `/perception/audio_event`，由行为树等下游消费。Voice 只负责身份识别
 和事件发布，不直接调用动作系统。

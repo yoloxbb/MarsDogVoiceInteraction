@@ -220,8 +220,8 @@ ros2 launch marsdog_voice_interaction voice.launch.py \
 | `service_complete` | VoiceTask 返回 | `task_id/task_type/result/latency_ms/task_result` | Service 成败与耗时 |
 | `interaction_hold` | 租约申请、续租、释放或到期 | `operation/result/hold_token/reason` | 验证保持租约生命周期 |
 | `enrollment_publish` | 发布注册进度 | `result/speaker_id/latency_ms` | 声纹注册阶段结果 |
-| `speaker_api_upload` | 上传文件进入声纹业务处理后结束 | `result/speaker_name/audio_valid/has_effective_speech/source_duration_ms/speech_duration_ms/segment_count/latency_ms` | 判断 WAV 内容解析、VAD 截取、声纹提取和落盘结果；不代表完整 HTTP 请求耗时 |
-| `speaker_management` | 查询、身份槽位变更或删除 | `operation/result/speaker_name/speaker_count/latency_ms` | 复核声纹管理和运行时索引同步；槽位变更的内部 `operation` 仍为 `rename` |
+| `speaker_api_upload` | 上传文件进入声纹业务处理后结束 | `result/speaker_name/sample_id/sample_key/audio_valid/has_effective_speech/source_duration_ms/speech_duration_ms/segment_count/latency_ms` | 判断 WAV 内容解析、VAD 截取、声纹提取和落盘结果；不代表完整 HTTP 请求耗时 |
+| `speaker_management` | 查询或单条样本变更 | `operation/result/speaker_name/sample_id/shots/speaker_count/latency_ms` | 复核样本级 CRUD、centroid 和运行时索引同步 |
 | `interaction_end` | 会话结束 | `reason/interaction_id/state` | 确认超时或手动停止 |
 
 ### 4.1 通用字段
@@ -295,7 +295,7 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `wake_angle` | number | 唤醒方位角，单位度；Voice 不应用安装偏移。 |
 | `wake_confidence` / `wake_score_raw` | number | 归一化唤醒置信度和硬件原始分数；原始分数只在完整 `payload` 中保证可见。 |
 | `asr_text` / `language` | string | 清洗后的 ASR 文本和语言标识。 |
-| `speaker_id` / `speaker_confidence` | string / number | 固定身份 `owner`、`family_member_1`～`family_member_4` 或 `unknown`，以及当前实现的匹配指示值；历史自由名称按 UNMASTER 处理。 |
+| `speaker_id` / `speaker_confidence` | string / number | 固定身份 `owner`、`family_member_1`～`family_member_4` 或 `unknown`，以及当前实现的匹配指示值。 |
 | `social` / `intent` / `control` | string | Model K 正式三轴；目录核心指令也携带规范三轴，例如 QUIET 为 `NONE|BARK|STOP`。 |
 | `emotion` / `action` | string | 兼容字段；模型事件分别镜像 `social/intent`，具体目录事件的 `action` 保留 `command_key`。新测试不得把它们当正式三轴。 |
 | `command_id` / `intent_category` / `intent_source` | string | 命令标识、分类类别及决策来源；目录事件要求 `command_id` 等于目录声明值、`intent_source=command_lexicon`。 |
@@ -321,8 +321,8 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `service_complete` | `service/task_id/task_type/task_result/error/latency_ms` | 一次 VoiceTask 回调总耗时和完整返回对象。`result=success/failure`。 |
 | `interaction_hold` | `operation/hold_token/reason/lease_sec/idle_timer_reset` | `operation=acquire/renew/release/expire`；不同操作只输出适用字段。 |
 | `enrollment_publish` | `topic/speaker_id/payload/latency_ms` | 一次录音注册样本的 embedding、进度处理和发布耗时；最终样本还包含落盘及运行时同步。`result=progress/complete`。 |
-| `speaker_api_upload` | `speaker_name/shots/source_duration_ms/speech_duration_ms/segment_count/audio_valid/has_effective_speech/error/latency_ms` | FastAPI 已读完文件后，业务 Handler 内的 WAV 内容解析、VAD、embedding、落盘和运行时同步总耗时；不包含 multipart 解析、网络上传、文件读取、HTTP 响应序列化。当前没有各子步骤的独立耗时。 |
-| `speaker_management` | `operation/speaker_name/previous_name/speaker_count/error/latency_ms` | `operation=list/rename/delete`；字段随操作变化。`rename/delete` 成功时同步调用已经完成，但运行时识别结果仍需实际验证；`list` 不触发同步。 |
+| `speaker_api_upload` | `speaker_name/shots/sample_id/sample_key/source_duration_ms/speech_duration_ms/segment_count/audio_valid/has_effective_speech/error/latency_ms` | FastAPI 已读完文件后，业务 Handler 内的 WAV 内容解析、VAD、embedding、落盘和运行时同步总耗时；不包含 multipart 解析、网络上传、文件读取、HTTP 响应序列化。当前没有各子步骤的独立耗时。 |
+| `speaker_management` | `operation/speaker_name/sample_id/sample_ids/shots/speaker_removed/speaker_count/error/latency_ms` | `operation=list/sample_list/sample_get/sample_replace/sample_delete`；字段随操作变化。变更成功时同步调用已经完成，但运行时识别结果仍需实际验证；查询不触发同步。 |
 | `interaction_end` | `reason/state` | 会话结束原因和最终状态；`reason` 常见为 `interaction_timeout/stop_listening`。 |
 
 ### 4.6 总耗时的正确计算
@@ -491,14 +491,38 @@ ros2 topic echo /perception/voice/enrollment_event
 `speaker_api_upload` 日志：
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8091/api/v1/speakers \
-  -F 'name=owner' \
+curl -sS -X POST http://127.0.0.1:8091/api/v1/speakers/owner/samples \
   -F 'audio=@/path/to/qa-speaker.wav;type=audio/wav'
 ```
 
 `name` 只能从 `owner`、`family_member_1`、`family_member_2`、
 `family_member_3`、`family_member_4` 中选择，FastAPI `/docs` 应显示枚举选择而不是
 自由文本输入。
+
+单条样本 CRUD 使用稳定的 `sample_id=1～5`：
+
+```bash
+# 新增、列表、详情和下载
+curl -sS -X POST http://127.0.0.1:8091/api/v1/speakers/owner/samples \
+  -F 'audio=@/path/to/owner-new.wav;type=audio/wav'
+curl -sS http://127.0.0.1:8091/api/v1/speakers/owner/samples
+curl -sS http://127.0.0.1:8091/api/v1/speakers/owner/samples/1
+curl -sS -o /tmp/owner-001.wav \
+  http://127.0.0.1:8091/api/v1/speakers/owner/samples/1/audio
+
+# 替换 family_member_1 的第 2 条及删除 owner 的第 1 条
+curl -sS -X PUT \
+  http://127.0.0.1:8091/api/v1/speakers/family_member_1/samples/2 \
+  -F 'audio=@/path/to/family-1-replacement.wav;type=audio/wav'
+curl -sS -X DELETE \
+  http://127.0.0.1:8091/api/v1/speakers/owner/samples/1
+```
+
+样本查询应返回 `sample_id/sample_key/audio_url/audio_available/embedding_available`；
+下载内容必须与该编号落盘 WAV 一致。接口不提供 `.npy` 或 centroid 下载。替换失败时
+原三份文件哈希必须不变；替换成功、删除非最后一条样本后必须重算 centroid 并实际
+验证运行时仍能识别该身份。删除最后一条样本应返回 `speaker_removed=true`，人员目录
+和注册表记录消失，运行时索引移除且身份槽位可重新注册。
 
 判定成功时必须同时满足：HTTP `201`、`ok=true`、`speech_duration_ms>0`、返回的
 `audio_path/embedding_path` 存在，且落盘 WAV 仅包含 VAD 保留的有效语音。不能仅以
@@ -511,12 +535,12 @@ curl -sS -X POST http://127.0.0.1:8091/api/v1/speakers \
 | Uvicorn access log | 客户端地址、HTTP 方法、路径和最终状态码 | VAD、embedding 和落盘是否正确 |
 | HTTP 响应 JSON | 成功时的 `request_id/ok/name/speaker_role/shots/path/duration`，失败时的 `detail` | ROS 运行时声纹索引是否能实际命中 |
 | `speaker_api_upload` | Handler 内 WAV 解析、VAD、embedding、落盘及同步调用结果 | multipart/网络上传耗时，以及 FastAPI 在进入 Handler 前拒绝的请求 |
-| `speaker_management` | GET/PATCH/DELETE 业务操作结果 | FastAPI 路径或请求体校验阶段直接拒绝的请求 |
+| `speaker_management` | 人员列表及样本级 GET/PUT/DELETE 业务操作结果 | FastAPI 路径、multipart 或请求体校验阶段直接拒绝的请求 |
 
 以下情况由 FastAPI 在调用声纹业务 Handler 前直接返回，因此通常只有 access log 和
 HTTP 响应，**没有** `speaker_api_upload/speaker_management`：
 
-- 缺少 `name` 或 `audio`、`name` 不在固定枚举、PATCH 请求体结构/目标身份不合法：HTTP `422`；
+- 缺少 `audio` 或身份路径不在固定枚举：HTTP `422`；
 - 空上传文件：HTTP `400`；
 - 文件超过配置大小：HTTP `413`；
 - 文件名扩展名不是 `.wav`：HTTP `415`；
@@ -535,13 +559,19 @@ Uvicorn access log 关联；不得声称已经通过 `request_id` 完成日志�
 - 请求中附带 `storage_root/path/output_dir` 等字段，必须不能改变配置中的落盘目录。
 - 分别建立 `owner` 和 4 个 `family_member_*`，确认恰好 5 个固定身份槽位；提交任意
   自定义姓名或 `family_member_5` 返回 HTTP `422`，且不调用业务 Handler、不落盘。
-- 给已有身份追加样本仍成功；PATCH 只能改到另一个未占用的固定身份槽位，目标已
-  占用返回 HTTP `409`。
+- 给已有身份追加样本仍成功；旧版顶层 POST、身份 PATCH 和整人 DELETE 不应出现在
+  OpenAPI 中，也不得继续作为测试调用入口。
 - 对同一人员连续上传 5 个有效样本后，第 6 个返回 HTTP `409`，目录内不得出现
   `006.wav/006.npy`；`GET` 返回 `max_samples_per_speaker=5`。
+- 删除 `001` 时 `002` 不得重编号；再次新增应复用最小空闲编号 `001`，已有 `002`
+  的内容和样本 ID 保持不变。
+- 分别替换 `owner/001` 和 `family_member_1/002`，检查 VAD 后 WAV、对应 embedding、
+  centroid、注册表 `shots` 和运行时索引一致；损坏 WAV/无语音替换必须失败且原文件
+  不变。
+- 删除非最后一条样本后只移除对应 `.wav/.npy`；删除最后一条后释放整个身份槽位。
 - `GET` 返回 `count=5/max_speakers=5`、完整 `allowed_names`、空的
-  `available_names`，且每项 `role` 正确；`PATCH` 变更身份后目录和检索名称同步；
-  `DELETE` 后身份目录及运行时索引均移除，随后可以重新注册该空闲槽位。
+  `available_names`，且每项 `role` 正确；逐条删除至最后一条后，身份目录及运行时
+  索引均移除，随后可以重新注册该空闲槽位。
 
 声纹识别事件按下表判定；三类事件都在 `/perception/audio_event` 上发布，由行为树等
 下游消费：
@@ -551,7 +581,6 @@ Uvicorn access log 关联；不得声称已经通过 `request_id` 完成日志�
 | 主人 | `owner` | `EVT_VOICE_MASTER_ID` |
 | 任一家人 | `family_member_1`～`family_member_4` | `EVT_VOICE_FOLK_ID` |
 | 未注册/未匹配人员 | `unknown` | `EVT_VOICE_UNMASTER_ID` |
-| 历史自由名称（兼容数据） | 原历史名称 | `EVT_VOICE_UNMASTER_ID` |
 
 新运行时不得再发布 `EVT_VOICE_STRANGER_ID`。仅看到
 `stage_complete stage=speaker result=matched` 还不够，必须检查同一
@@ -590,8 +619,9 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 | 会话保持 | hold 后不超时；release/租约到期后恢复超时 | Service 结果、`interaction_hold`、结束时间 |
 | 声纹注册 | 注册 Topic 连续进度，最终 `done=true` | `enrollment_publish result=complete/latency_ms` |
 | 声纹 API 上传 | `runtime_start.speaker_api.ready=true`，HTTP 201，`audio_valid/has_effective_speech=true`，VAD 后 WAV/embedding/centroid 均落盘 | `speaker_api_upload result=success` 及源音频/有效语音/总耗时 |
-| 声纹身份限制与管理 | 固定 5 个身份槽位；自由名称返回 422；列表、身份变更、删除与目录及运行时索引一致 | HTTP 状态码和 `speaker_management operation/result/latency_ms` |
+| 声纹身份限制与管理 | 固定 5 个身份槽位；自由名称返回 422；列表和样本删除与目录及运行时索引一致 | HTTP 状态码和 `speaker_management operation/result/latency_ms` |
 | 单人样本限制 | 每人最多 5 个；第 6 次同名上传返回 409 且无 `006` 文件 | HTTP 状态码、列表 `shots/max_samples_per_speaker` 和目录文件数 |
+| 单条声纹样本 CRUD | 稳定 ID 查询/WAV 下载正确；替换或删除后 centroid、注册表和运行时索引同步；删最后一条释放身份 | HTTP 状态码及 `speaker_management operation=sample_list/sample_get/sample_replace/sample_delete` |
 
 判定时遵守以下规则：
 

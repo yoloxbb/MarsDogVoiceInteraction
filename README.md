@@ -205,8 +205,7 @@ Base64：
 Swagger `/docs` 当前只提供文件选择和接口调试，不提供浏览器麦克风录音。
 
 ```bash
-curl -X POST http://127.0.0.1:8091/api/v1/speakers \
-  -F 'name=owner' \
+curl -X POST http://127.0.0.1:8091/api/v1/speakers/owner/samples \
   -F 'audio=@/path/to/speaker.wav;type=audio/wav'
 ```
 
@@ -235,36 +234,52 @@ data/speakers/owner/
 # 查询人员和样本数
 curl http://127.0.0.1:8091/api/v1/speakers
 
-# 将现有声纹改到另一个尚未占用的固定身份槽位
-curl -X PATCH http://127.0.0.1:8091/api/v1/speakers/owner \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"family_member_1"}'
+# 给 owner 新增一条样本
+curl -X POST http://127.0.0.1:8091/api/v1/speakers/owner/samples \
+  -F 'audio=@/path/to/new-owner.wav;type=audio/wav'
 
-# 删除该人员的 WAV、embedding、centroid 和注册表记录
-curl -X DELETE http://127.0.0.1:8091/api/v1/speakers/family_member_1
+# 查询 owner 的具体样本及稳定 sample_id
+curl http://127.0.0.1:8091/api/v1/speakers/owner/samples
+curl http://127.0.0.1:8091/api/v1/speakers/owner/samples/1
+
+# 下载 owner 的第 1 条 VAD 后 WAV；不提供 embedding 下载接口
+curl -o owner-001.wav \
+  http://127.0.0.1:8091/api/v1/speakers/owner/samples/1/audio
+
+# 用新音频替换 family_member_1 的第 2 条样本
+curl -X PUT \
+  http://127.0.0.1:8091/api/v1/speakers/family_member_1/samples/2 \
+  -F 'audio=@/path/to/replacement.wav;type=audio/wav'
+
+# 只删除 owner 的第 1 条样本
+curl -X DELETE \
+  http://127.0.0.1:8091/api/v1/speakers/owner/samples/1
 ```
 
-更新已有身份的声音时，继续使用上传接口并选择相同身份；新有效音频会作为下一条
-样本追加，随后重新计算该人员的 `centroid.npy`。
+样本编号是稳定的 `1～5`：删除 `001` 不会把 `002` 重命名为 `001`；下次新增会复用
+最小空闲编号。替换和删除都会重新计算该身份的 `centroid.npy` 并同步当前进程的声纹
+检索索引。删除最后一条样本时，该身份目录和注册表记录一并移除，身份槽位重新可用。
+新增、替换都执行与原上传接口相同的 WAV、VAD、有效语音和 embedding 校验，失败时
+保留原样本。旧版顶层上传、身份改名和整人删除接口已移除；删除一个身份时，应逐条
+删除其样本，最后一条删除成功后身份目录和注册表记录会自动移除。
 
 运行时声纹事件按身份固定路由：`owner` 发布 `EVT_VOICE_MASTER_ID`，任一
-`family_member_1`～`family_member_4` 发布 `EVT_VOICE_FOLK_ID`，未匹配、
-`unknown` 或历史自由名称发布 `EVT_VOICE_UNMASTER_ID`。身份事件仍由行为树等下游
+`family_member_1`～`family_member_4` 发布 `EVT_VOICE_FOLK_ID`，`unknown` 或
+未匹配人员发布 `EVT_VOICE_UNMASTER_ID`。身份事件仍由行为树等下游
 通过 `/perception/audio_event` 消费，不由 Voice 直接调用动作系统。
 
 当前配置监听 `0.0.0.0:8091`，局域网内直接访问，不包含 Token 或其他身份验证：
 
 ```bash
-curl -F 'name=owner' \
-  -F 'audio=@/path/to/speaker.wav;type=audio/wav' \
-  http://DOG_IP:8091/api/v1/speakers
+curl -F 'audio=@/path/to/speaker.wav;type=audio/wav' \
+  http://DOG_IP:8091/api/v1/speakers/owner/samples
 ```
 
-接口会直接暴露声纹的上传、查询、身份槽位变更和删除能力，目前只应运行在可信开发
+接口会直接暴露声纹样本的上传、查询、下载、替换和删除能力，目前只应运行在可信开发
 局域网。
 认证模块已移除，后续生产认证方案需要另行设计和接入。
 
-健康检查为 `GET /health`。完整状态码、字段和兼容接口见
+健康检查为 `GET /health`。完整状态码和字段见
 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)。
 
 ## ROS2 接口
@@ -280,8 +295,7 @@ curl -F 'name=owner' \
 - `start_listening`、`stop_listening`
 - `hold_interaction`、`release_interaction_hold`、`get_interaction_state`
 - `start_speaker_enrollment`、`cancel_speaker_enrollment`
-- `upload_speaker`（旧客户端兼容）、`verify_speaker`
-- `list_speakers`、`delete_speaker`
+- `verify_speaker`
 
 接口发现与监听：
 
