@@ -25,14 +25,39 @@
 
 每条用例至少满足：
 
-1. `speech.asr_text` 与播放文本一致，或符合用例事先允许的等价转写。
-2. 同一个 `utterance_id` 出现 `stage_complete stage=command_lexicon result=matched`。
-3. 日志中的 `command_key/command_id/event_type` 与本表一致；核心行还须按下方三轴表
-   检查 `social/intent/control/raw_nlu_tag`。
+1. `speech.asr_text` 与播放文本一致，或符合用例事先允许的等价转写；若符合下方
+   “KWS 修正 ASR 同音转写”的条件，则 ASR 转写单项记为失败，但命令功能可按最终
+   仲裁事件单独判定。
+2. ASR 目录路径必须在同一个 `utterance_id` 出现
+   `stage_complete stage=command_lexicon result=matched`；KWS 同音纠正路径则必须如实
+   记录 `result=no_match`，并满足下方独立证据链。
+3. 最终发布事件中的 `command_key/command_id/event_type` 与本表一致；核心行还须按
+   下方三轴表检查 `social/intent/control/raw_nlu_tag`。
 4. ASR 目录被选中时，最终 `event_publish.intent_source=command_lexicon`，且不再进入
    `stage=intent`；短句由 KWS 选中时来源为 `kws`。
 5. 同一句必须有 `stage_complete stage=recognition_arbitration`，且只允许一个识别来源
    发布业务结果。核心命令的 KNOWN 摘要和具体事件属于同一个结果组。
+
+### KWS 修正 ASR 同音转写的判定
+
+核心短指令可能出现 ASR 同音误识别，但流式 KWS 候选正确。例如用户实际说“击掌”，
+`speech.asr_text` 为“机长”时，只要同一个 `utterance_id` 同时满足以下条件，命令功能
+仍判定为 **PASS（KWS 路径）**：
+
+1. `stage=kws result=candidate`，候选为 `HIGH_FIVE` /
+   `EVT_VOICE_COMMAND_HIGH_FIVE`；
+2. `stage=command_lexicon result=no_match`，不得把“机长”伪报为目录命中；
+3. `stage=recognition_arbitration result=kws_selected`、`selected_source=kws`，且
+   `reason=short_asr_kws_preferred`；
+4. 最终先发布一条不可执行的 `EVT_VOICE_COMMAND_KNOWN`，再发布一条可执行的
+   `EVT_VOICE_COMMAND_HIGH_FIVE`，两条事件均属于 KWS 选中的同一结果组，不得重复，
+   且该句不得再进入 Model K 产生另一组业务事件。
+
+该结果只证明“击掌命令被正确路由”，不能把 `speech.asr_text=机长` 计为 ASR 正确，
+也不能计为 `CAT-029` 的 `catalog_exact` 命中。测试报告应分别记录：ASR 转写单项
+**FAIL（同音误识别）**、KWS/命令路由单项 **PASS**。若 ASR 已精确命中另一个目录命令、
+同句存在多个不同 KWS 候选，或最终事件不是 `EVT_VOICE_COMMAND_HIGH_FIVE`，则不适用
+此例外，必须按实际仲裁结果判定。
 
 ### 受控扩展的判定
 
@@ -199,7 +224,35 @@ object_catalog_version=<目录版本>
 “看看那个布偶娃娃在哪里”只发布不可执行的 `EVT_VOICE_STATUS_CARE`，不能把整个三轴
 改写成 `NONE|NONE|NONE`。
 
-### 3.4 产品示例的相似句测试表
+### 3.4 意图识别事件组示例表
+
+下表集中给出 Model K 三轴标签经过开发侧固定路由后的最终事件。`BT` 一列与“发布
+事件（按顺序）”逐项对应：`是` 表示该事件允许进入行为树，`否` 表示只传递语义或
+状态。一个事件组内的所有事件必须共用同一 `interaction_id/utterance_id` 和
+`raw_nlu_tag`。
+
+| 输入示例 | 模型输出 `raw_nlu_tag` | 发布事件（按顺序） | `dispatch_role`（按顺序） | BT（按顺序） | 核对重点 |
+|---|---|---|---|---|---|
+| 旺财看看我 | `CALL|NONE|NONE` | `EVT_VOICE_CALL_NAME` | `semantic_classification` | 否 | 只表达呼唤，不生成动作候选。 |
+| 你今天表现得特别优秀 | `PRAISE|NONE|NONE` | `EVT_VOICE_PRAISE` | `semantic_classification` | 否 | 单一社交事件。 |
+| 你表现很好现在坐稳 | `PRAISE|SIT|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `specific_command` → `semantic_classification` | 否 → 是 → 否 | 只有 SIT 是可执行事件；KNOWN 只是命令摘要。 |
+| 往前走几步 | `NONE|GO|DO` | `EVT_VOICE_COMMAND_WALK` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | 模型标签使用 `GO`，具体事件按白名单映射为 WALK。 |
+| 不允许再碰这些吃的 | `SCOLD|EAT|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `semantic_classification` | 否 → 否 | `EAT|STOP` 不在具体动作白名单，不能拼出具体命令事件。 |
+| 别紧张我就在这里 | `COMFORT|NONE|NONE` | `EVT_VOICE_COMFORT` | `semantic_classification` | 否 | 安抚大类事件。 |
+| 咱们一起做个游戏 | `PLAYFUL|PLAY|DO` | `EVT_VOICE_PLAY_INTERACTION` | `semantic_classification` | 否 | SOCIAL 与 INTENT 导出同一事件时去重，只发布一次。 |
+| 身体有没有哪里难受 | `NONE|DOG_STATUS|QUERY` | `EVT_VOICE_STATUS_CARE` | `semantic_classification` | 否 | 查询类统一路由到状态关怀。 |
+| 看看那个球在哪里 | `NONE|FIND_TOY|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` | `specific_command` → `semantic_classification` | 是 → 否 | ASR 目标匹配成功；FETCH 携带规范化 `object_name=dog toy ball`。 |
+| 看看那个布偶娃娃在哪里 | `NONE|FIND_TOY|QUERY` | `EVT_VOICE_STATUS_CARE` | `semantic_classification` | 否 | 目标不在 18 类白名单；携带 `object_name=NONE/object_match_source=unsupported`。 |
+| 最近事情太多让我很焦虑 | `OWNER_NEGATIVE|NONE|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` | `semantic_classification` | 否 | 主人消极状态大类。 |
+| 今天所有事情都特别顺心 | `OWNER_POSITIVE|NONE|NONE` | `EVT_VOICE_POSITIVE_EMOTION` | `semantic_classification` | 否 | 主人积极状态大类。 |
+| 等一下记得读这条消息 | `NONE|NONE|NONE` | `EVT_VOICE_NEUTRAL` | `semantic_classification` | 否 | 合法中性/OOS 标签，不等同于模型解析失败。 |
+| `<模型输出不符合三轴协议>` | 无有效标签 | `EVT_VOICE_COMMAND_UNKNOWN` | `diagnostic` | 否 | 仅模型和规则均无有效协议结果时使用，不能代替合法 NEUTRAL。 |
+
+测试时不能只检查事件组中“出现过某个事件”。必须同时核对事件数量、发布顺序和每条
+事件的 `should_trigger_behavior_tree`；尤其禁止让 `EVT_VOICE_COMMAND_KNOWN` 与具体
+动作事件同时进入行为树，避免同一句生成两个动作候选。
+
+### 3.5 产品示例的相似句测试表
 
 下列“测试相似句”均已确认不在当前 1705 个确定性匹配入口中，适合直接验证 Model K。
 测试团队还应围绕每行自行补充同义改写，但期望标签必须遵守训练标注协议，不能仅凭
@@ -261,7 +314,7 @@ object_catalog_version=<目录版本>
 前置条件，不是 Voice 的分类标签。Voice 只授权白名单具体事件进入行为树；是否满足
 数值门限、是否真正执行仍必须另做下游验收。
 
-### 3.5 结果判定要求
+### 3.6 结果判定要求
 
 每条 Model K 用例必须同时满足：
 

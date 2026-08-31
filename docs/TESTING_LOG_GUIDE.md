@@ -92,6 +92,34 @@ Voice 日志不能证明动作已经执行。
 | 8 | 使用相似音、否定反转和未配置的前后缀探索拒识，例如“官过来”“你要不要过来”“不要坐下”。 | 记录 KWS、ASR、`command_lexicon matched/no_match`、`match_strategy`、意图阶段和任何可执行事件。 | 目录只能命中标准词/句或配置明确生成的扩展，不能因子串命中；“请你坐下”应命中，但“不要坐下”“请你不要坐下”不得命中 SIT。流式 KWS 的相似音拒识仍属 `KNOWN-GAP`。 |
 | 9 | 播放陌生词，并在最后一次有效 ASR 文本后等待至少 10 秒。 | 先看到 `command_lexicon result=no_match`，再看 Model K 三轴及 `event_types`，最后出现同会话 idle 和 `interaction_end`。 | 合法 OOS `NONE|NONE|NONE` 发布不可执行的 `EVT_VOICE_NEUTRAL`；只有模型与规则均无有效协议结果才发非执行 UNKNOWN 诊断。不发布可执行动作、不崩溃，约 10 秒后待机。 |
 
+### ASR 同音误识别由 KWS 正确路由时如何记分
+
+ASR 转写准确率与最终命令功能必须分项统计，同一个 `utterance_id` 可以出现“ASR
+单项 FAIL、命令路由 PASS”。典型用例是用户说“击掌”，`speech.asr_text=机长`，但
+KWS 已产生唯一 `HIGH_FIVE` 候选：
+
+```text
+stage_complete stage=kws result=candidate
+  command_key=HIGH_FIVE event_type=EVT_VOICE_COMMAND_HIGH_FIVE
+stage_complete stage=asr result=ok
+  speech.asr_text=机长
+stage_complete stage=command_lexicon result=no_match
+stage_complete stage=recognition_arbitration result=kws_selected
+  selected_source=kws reason=short_asr_kws_preferred
+event_publish event_type=EVT_VOICE_COMMAND_KNOWN intent_source=kws
+event_publish event_type=EVT_VOICE_COMMAND_HIGH_FIVE intent_source=kws
+utterance_complete result=published_kws_selected
+```
+
+以上证据完整且没有第二个识别来源的业务结果时：
+
+- 编号 4 的 ASR 转写单项记 **FAIL（“击掌”误识别为“机长”）**；
+- 编号 5 的最终命令路由和编号 6 的 KWS/ASR 仲裁记 **PASS**；
+- 不得将本次记为 `command_lexicon catalog_exact` 成功，也不得因 ASR 文本错误而把已经
+  正确发布的 `EVT_VOICE_COMMAND_HIGH_FIVE` 判为 Voice 命令功能失败；
+- 若缺少正确 KWS 候选、存在多个不同 KWS 候选、ASR 命中了冲突目录事件、最终事件
+  错误或重复发布，则命令路由不能 PASS。
+
 ### 测试常用固定日志关键字
 
 测试表中要求的“SDK 日志关键字”统一使用下列稳定字段，不依赖第三方 SDK 的临时
@@ -556,7 +584,7 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 | 声纹识别 | `owner` 发布 MASTER，`family_member_*` 发布 FOLK，未匹配/历史名称发布 UNMASTER | `stage_complete stage=speaker latency_ms/speaker_id/speaker_confidence`；当前 confidence 仅为匹配指示值 |
 | 完整确定性词库 | 核心项发布不可执行 KNOWN 摘要及目录具体事件，其他项发布目录事件；该句不执行 Intent | `command_lexicon matched/latency_ms`，核心另查两个 `dispatch_role` 和 `specific_event_type` |
 | 目录外意图 | 三轴及事件顺序符合契约；仅白名单具体动作可执行 | `command_lexicon no_match` 后检查 `stage=intent social/intent/control/event_types/latency_ms`；找物类还要检查 `stage=object_target` |
-| KWS/ASR 仲裁 | 短指令可选 KWS；长句、多个 KWS 候选或目录冲突选择 ASR；只发布一个来源的业务结果 | `stage_complete stage=recognition_arbitration result/selected_source/reason/kws_candidate_count` |
+| KWS/ASR 仲裁 | 短指令可选 KWS；例如“击掌”被 ASR 转写为“机长”但唯一 HIGH_FIVE 候选胜出时，ASR 单项失败、命令路由通过；长句、多个 KWS 候选或目录冲突选择 ASR；只发布一个来源的业务结果 | `stage_complete stage=recognition_arbitration result/selected_source/reason/kws_candidate_count` |
 | 静默结束 | 发布匹配 ID 的 `EVT_STATE_CHANGED state=idle` | `interaction_end reason=interaction_timeout`，约 10 秒 |
 | 手动监听 | VoiceTask 返回成功并带当前 ID | `service_complete latency_ms/task_result` |
 | 会话保持 | hold 后不超时；release/租约到期后恢复超时 | Service 结果、`interaction_hold`、结束时间 |
