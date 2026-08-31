@@ -157,6 +157,12 @@ latency_ms                                  float          处理延迟（ms）
 一次。`NONE|NONE|NONE` 固定发布不可执行的 `EVT_VOICE_NEUTRAL`，不伪造成
 UNKNOWN。
 
+动作标签优先发布已定义的 `EVT_VOICE_COMMAND_*` 具体事件，而不是只发布 KNOWN。
+其中 `STAND|DO` 固定映射为 `EVT_VOICE_COMMAND_STAND_UP`；`STAY|DO` 必须结合
+ASR 原文区分：站立保持语义映射 `EVT_VOICE_COMMAND_STAND_STILL`，原地不动语义
+映射 `EVT_VOICE_COMMAND_HOLD_POSITION`。无法可靠区分时只保留不可执行的
+`EVT_VOICE_COMMAND_KNOWN`，禁止猜测具体动作。
+
 #### Model K 找物/捡取目标物门控
 
 `intent in {FETCH,FIND_TOY}` 时，节点在模型分类后使用 ASR 原文查询

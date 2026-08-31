@@ -147,7 +147,7 @@ stage_complete stage=intent result=parsed
 | `INTENT!=NONE` 且 `CONTROL=QUERY` | `EVT_VOICE_STATUS_CARE` | 查询类统一进入状态关怀。 |
 | `INTENT=PLAY/TUG/DANCE` 且非 `QUERY` | `EVT_VOICE_PLAY_INTERACTION` | 娱乐意图统一进入游戏互动。 |
 | 其他 `INTENT!=NONE` 且 `CONTROL=DO/STOP` | `EVT_VOICE_COMMAND_KNOWN` | 只表示识别到粗类命令，不是具体动作事件。 |
-| `NONE|NONE|NONE` | `EVT_VOICE_NEUTRAL` | 中性/OOS 统一事件；不可执行。 |
+| `NONE\|NONE\|NONE` | `EVT_VOICE_NEUTRAL` | 中性/OOS 统一事件；不可执行。 |
 
 一个结果同时包含 SOCIAL、可执行白名单 INTENT 时，按“社交大类 → 具体动作 →
 `EVT_VOICE_COMMAND_KNOWN` 摘要”的顺序发布；如果社交轴和意图轴导出同一个大类事件
@@ -161,29 +161,36 @@ stage_complete stage=intent result=parsed
 只有下表一一对应、无需目标槽位的组合可以由模型额外生成具体动作事件。表外标签
 仍只发布第 3.1 节业务大类；禁止通过字符串拼接自行生成事件名。
 
-| `INTENT|CONTROL` | `command_key` | 具体事件 |
+| `INTENT\|CONTROL` | `command_key` | 具体事件 |
 |---|---|---|
-| `GO|DO` | `WALK` | `EVT_VOICE_COMMAND_WALK` |
-| `COME|DO` | `COME` | `EVT_VOICE_COMMAND_COME` |
-| `FOLLOW|DO` | `FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` |
-| `GO_OUT|DO` | `GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` |
-| `GO_HOME|DO` | `GO_HOME` | `EVT_VOICE_COMMAND_GO_HOME` |
-| `APPROACH|DO` | `APPROACH` | `EVT_VOICE_COMMAND_APPROACH` |
-| `BACK|DO` | `BACK_UP` | `EVT_VOICE_COMMAND_BACK_UP` |
-| `SIT|DO` | `SIT` | `EVT_VOICE_COMMAND_SIT` |
-| `LIE|DO` | `LIE_DOWN` | `EVT_VOICE_COMMAND_LIE_DOWN` |
-| `PLAY_DEAD|DO` | `PLAY_DEAD` | `EVT_VOICE_COMMAND_PLAY_DEAD` |
-| `SHAKE|DO` | `SHAKE_HAND` | `EVT_VOICE_COMMAND_SHAKE_HAND` |
-| `HIGH_FIVE|DO` | `HIGH_FIVE` | `EVT_VOICE_COMMAND_HIGH_FIVE` |
-| `SPIN|DO` | `SPIN` | `EVT_VOICE_COMMAND_SPIN` |
-| `ROLL|DO` | `ROLL_OVER` | `EVT_VOICE_COMMAND_ROLL_OVER` |
-| `DROP|DO` | `DROP` | `EVT_VOICE_COMMAND_DROP` |
-| `BARK|STOP` | `QUIET` | `EVT_VOICE_COMMAND_QUIET` |
-| `TOILET|DO` | `TOILET` | `EVT_VOICE_COMMAND_TOILET` |
-| `CLEAN|DO` | `CLEAN` | `EVT_VOICE_COMMAND_CLEAN` |
-| `SLEEP|DO` | `SLEEP` | `EVT_VOICE_COMMAND_SLEEP` |
+| `GO\|DO` | `WALK` | `EVT_VOICE_COMMAND_WALK` |
+| `COME\|DO` | `COME` | `EVT_VOICE_COMMAND_COME` |
+| `FOLLOW\|DO` | `FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` |
+| `GO_OUT\|DO` | `GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` |
+| `GO_HOME\|DO` | `GO_HOME` | `EVT_VOICE_COMMAND_GO_HOME` |
+| `APPROACH\|DO` | `APPROACH` | `EVT_VOICE_COMMAND_APPROACH` |
+| `BACK\|DO` | `BACK_UP` | `EVT_VOICE_COMMAND_BACK_UP` |
+| `SIT\|DO` | `SIT` | `EVT_VOICE_COMMAND_SIT` |
+| `LIE\|DO` | `LIE_DOWN` | `EVT_VOICE_COMMAND_LIE_DOWN` |
+| `PLAY_DEAD\|DO` | `PLAY_DEAD` | `EVT_VOICE_COMMAND_PLAY_DEAD` |
+| `STAND\|DO` | `STAND_UP` | `EVT_VOICE_COMMAND_STAND_UP` |
+| `SHAKE\|DO` | `SHAKE_HAND` | `EVT_VOICE_COMMAND_SHAKE_HAND` |
+| `HIGH_FIVE\|DO` | `HIGH_FIVE` | `EVT_VOICE_COMMAND_HIGH_FIVE` |
+| `SPIN\|DO` | `SPIN` | `EVT_VOICE_COMMAND_SPIN` |
+| `ROLL\|DO` | `ROLL_OVER` | `EVT_VOICE_COMMAND_ROLL_OVER` |
+| `DROP\|DO` | `DROP` | `EVT_VOICE_COMMAND_DROP` |
+| `BARK\|STOP` | `QUIET` | `EVT_VOICE_COMMAND_QUIET` |
+| `TOILET\|DO` | `TOILET` | `EVT_VOICE_COMMAND_TOILET` |
+| `CLEAN\|DO` | `CLEAN` | `EVT_VOICE_COMMAND_CLEAN` |
+| `SLEEP\|DO` | `SLEEP` | `EVT_VOICE_COMMAND_SLEEP` |
 
-`STAND/STAY/EAT/FIND_PERSON` 等标签存在动作分支或缺少目标槽位，当前不在白名单。
+`STAY|DO` 不是一一对应标签，必须再结合 ASR 原文确定具体事件：包含“站好、站着、
+站稳、站直、站立、站姿”等站立语义时发布 `EVT_VOICE_COMMAND_STAND_STILL`；包含
+“别动、不要动、不准动、不许动、保持不动、等着、原地、不要走、停下”等保持语义时
+发布 `EVT_VOICE_COMMAND_HOLD_POSITION`。未能可靠区分时只发布不可执行的
+`EVT_VOICE_COMMAND_KNOWN`，不能猜测动作。
+
+`EAT/FIND_PERSON` 等标签仍因动作条件或目标槽位未冻结而不在具体白名单。
 `FETCH/FIND_TOY` 使用下一节独立目标物门控。具体动作事件必须是事件组中唯一的可执行
 事件；大类事件和 KNOWN 摘要不能再次生成行为树候选。
 
@@ -205,9 +212,9 @@ stairs                    cat                       dog
 
 | 模型标签 | 事件顺序 | 可执行事件 |
 |---|---|---|
-| `NONE|FIND_TOY|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` | 只有 FETCH |
-| `NONE|FIND_TOY|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` | 只有 FETCH |
-| `NONE|FETCH|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` | 只有 FETCH |
+| `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` | 只有 FETCH |
+| `NONE\|FIND_TOY\|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` | 只有 FETCH |
+| `NONE\|FETCH\|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` | 只有 FETCH |
 
 具体事件使用 `command_key=FETCH/command_id=CMD_FETCH_OBJECT`，并携带：
 
@@ -233,19 +240,22 @@ object_catalog_version=<目录版本>
 
 | 输入示例 | 模型输出 `raw_nlu_tag` | 发布事件（按顺序） | `dispatch_role`（按顺序） | BT（按顺序） | 核对重点 |
 |---|---|---|---|---|---|
-| 旺财看看我 | `CALL|NONE|NONE` | `EVT_VOICE_CALL_NAME` | `semantic_classification` | 否 | 只表达呼唤，不生成动作候选。 |
-| 你今天表现得特别优秀 | `PRAISE|NONE|NONE` | `EVT_VOICE_PRAISE` | `semantic_classification` | 否 | 单一社交事件。 |
-| 你表现很好现在坐稳 | `PRAISE|SIT|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `specific_command` → `semantic_classification` | 否 → 是 → 否 | 只有 SIT 是可执行事件；KNOWN 只是命令摘要。 |
-| 往前走几步 | `NONE|GO|DO` | `EVT_VOICE_COMMAND_WALK` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | 模型标签使用 `GO`，具体事件按白名单映射为 WALK。 |
-| 不允许再碰这些吃的 | `SCOLD|EAT|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `semantic_classification` | 否 → 否 | `EAT|STOP` 不在具体动作白名单，不能拼出具体命令事件。 |
-| 别紧张我就在这里 | `COMFORT|NONE|NONE` | `EVT_VOICE_COMFORT` | `semantic_classification` | 否 | 安抚大类事件。 |
-| 咱们一起做个游戏 | `PLAYFUL|PLAY|DO` | `EVT_VOICE_PLAY_INTERACTION` | `semantic_classification` | 否 | SOCIAL 与 INTENT 导出同一事件时去重，只发布一次。 |
-| 身体有没有哪里难受 | `NONE|DOG_STATUS|QUERY` | `EVT_VOICE_STATUS_CARE` | `semantic_classification` | 否 | 查询类统一路由到状态关怀。 |
-| 看看那个球在哪里 | `NONE|FIND_TOY|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` | `specific_command` → `semantic_classification` | 是 → 否 | ASR 目标匹配成功；FETCH 携带规范化 `object_name=dog toy ball`。 |
-| 看看那个布偶娃娃在哪里 | `NONE|FIND_TOY|QUERY` | `EVT_VOICE_STATUS_CARE` | `semantic_classification` | 否 | 目标不在 18 类白名单；携带 `object_name=NONE/object_match_source=unsupported`。 |
-| 最近事情太多让我很焦虑 | `OWNER_NEGATIVE|NONE|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` | `semantic_classification` | 否 | 主人消极状态大类。 |
-| 今天所有事情都特别顺心 | `OWNER_POSITIVE|NONE|NONE` | `EVT_VOICE_POSITIVE_EMOTION` | `semantic_classification` | 否 | 主人积极状态大类。 |
-| 等一下记得读这条消息 | `NONE|NONE|NONE` | `EVT_VOICE_NEUTRAL` | `semantic_classification` | 否 | 合法中性/OOS 标签，不等同于模型解析失败。 |
+| 旺财看看我 | `CALL\|NONE\|NONE` | `EVT_VOICE_CALL_NAME` | `semantic_classification` | 否 | 只表达呼唤，不生成动作候选。 |
+| 你今天表现得特别优秀 | `PRAISE\|NONE\|NONE` | `EVT_VOICE_PRAISE` | `semantic_classification` | 否 | 单一社交事件。 |
+| 你表现很好现在坐稳 | `PRAISE\|SIT\|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `specific_command` → `semantic_classification` | 否 → 是 → 否 | 只有 SIT 是可执行事件；KNOWN 只是命令摘要。 |
+| 往前走几步 | `NONE\|GO\|DO` | `EVT_VOICE_COMMAND_WALK` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | 模型标签使用 `GO`，具体事件按白名单映射为 WALK。 |
+| 站端正了 | `NONE\|STAND\|DO` | `EVT_VOICE_COMMAND_STAND_UP` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | `STAND` 是明确的起立动作。 |
+| 保持站立姿势 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_STAND_STILL` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | `STAY` 结合 ASR 中的站立语义解析为 STAND_STILL。 |
+| 保持原地不要走 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_HOLD_POSITION` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | `STAY` 结合 ASR 中的原地/不要走语义解析为 HOLD_POSITION。 |
+| 不允许再碰这些吃的 | `SCOLD\|EAT\|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `semantic_classification` | 否 → 否 | `EAT\|STOP` 不在具体动作白名单，不能拼出具体命令事件。 |
+| 别紧张我就在这里 | `COMFORT\|NONE\|NONE` | `EVT_VOICE_COMFORT` | `semantic_classification` | 否 | 安抚大类事件。 |
+| 咱们一起做个游戏 | `PLAYFUL\|PLAY\|DO` | `EVT_VOICE_PLAY_INTERACTION` | `semantic_classification` | 否 | SOCIAL 与 INTENT 导出同一事件时去重，只发布一次。 |
+| 身体有没有哪里难受 | `NONE\|DOG_STATUS\|QUERY` | `EVT_VOICE_STATUS_CARE` | `semantic_classification` | 否 | 查询类统一路由到状态关怀。 |
+| 看看那个球在哪里 | `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` | `specific_command` → `semantic_classification` | 是 → 否 | ASR 目标匹配成功；FETCH 携带规范化 `object_name=dog toy ball`。 |
+| 看看那个布偶娃娃在哪里 | `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_STATUS_CARE` | `semantic_classification` | 否 | 目标不在 18 类白名单；携带 `object_name=NONE/object_match_source=unsupported`。 |
+| 最近事情太多让我很焦虑 | `OWNER_NEGATIVE\|NONE\|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` | `semantic_classification` | 否 | 主人消极状态大类。 |
+| 今天所有事情都特别顺心 | `OWNER_POSITIVE\|NONE\|NONE` | `EVT_VOICE_POSITIVE_EMOTION` | `semantic_classification` | 否 | 主人积极状态大类。 |
+| 等一下记得读这条消息 | `NONE\|NONE\|NONE` | `EVT_VOICE_NEUTRAL` | `semantic_classification` | 否 | 合法中性/OOS 标签，不等同于模型解析失败。 |
 | `<模型输出不符合三轴协议>` | 无有效标签 | `EVT_VOICE_COMMAND_UNKNOWN` | `diagnostic` | 否 | 仅模型和规则均无有效协议结果时使用，不能代替合法 NEUTRAL。 |
 
 测试时不能只检查事件组中“出现过某个事件”。必须同时核对事件数量、发布顺序和每条
@@ -260,55 +270,55 @@ object_catalog_version=<目录版本>
 
 | 产品类别 / 原示例 | 测试相似句示例 | 期望 `raw_nlu_tag` | 期望事件（按顺序） |
 |---|---|---|---|
-| 走 / 去 | 往前走几步 | `NONE|GO|DO` | `EVT_VOICE_COMMAND_WALK` → `EVT_VOICE_COMMAND_KNOWN` |
-| 过来 / 回来 / 到我这儿来 | 赶紧回到我身边 | `NONE|COME|DO` | `EVT_VOICE_COMMAND_COME` → `EVT_VOICE_COMMAND_KNOWN` |
-| 跟着我 / 跟我走 | 一路跟在我后面 | `NONE|FOLLOW|DO` | `EVT_VOICE_COMMAND_FOLLOW` → `EVT_VOICE_COMMAND_KNOWN` |
-| 出去玩 / 出去溜溜 | 咱们到外面溜达 | `NONE|GO_OUT|DO` | `EVT_VOICE_COMMAND_GO_OUT` → `EVT_VOICE_COMMAND_KNOWN` |
-| 回家 | 现在回到你的窝里 | `NONE|GO_HOME|DO` | `EVT_VOICE_COMMAND_GO_HOME` → `EVT_VOICE_COMMAND_KNOWN` |
-| 靠近点 | 再贴近我一些 | `NONE|APPROACH|DO` | `EVT_VOICE_COMMAND_APPROACH` → `EVT_VOICE_COMMAND_KNOWN` |
-| 退后 | 向后退两步 | `NONE|BACK|DO` | `EVT_VOICE_COMMAND_BACK_UP` → `EVT_VOICE_COMMAND_KNOWN` |
-| 坐 / 坐下 / 蹲下 | 把屁股坐稳 | `NONE|SIT|DO` | `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
-| 趴下 / 躺下 | 趴到垫子上 | `NONE|LIE|DO` | `EVT_VOICE_COMMAND_LIE_DOWN` → `EVT_VOICE_COMMAND_KNOWN` |
-| 装死 | 假装中枪倒下 | `NONE|PLAY_DEAD|DO` | `EVT_VOICE_COMMAND_PLAY_DEAD` → `EVT_VOICE_COMMAND_KNOWN` |
-| 起来 / 站起来 | 站端正了 | `NONE|STAND|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 站好 / 站着 | 保持站立姿势 | `NONE|STAY|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 别动 / 等着 / 不许动 | 保持原地不要走 | `NONE|STAY|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 握手 / 抬手 | 把爪子递给我 | `NONE|SHAKE|DO` | `EVT_VOICE_COMMAND_SHAKE_HAND` → `EVT_VOICE_COMMAND_KNOWN` |
-| 击掌 / 拍手 | 抬起爪子和我碰掌 | `NONE|HIGH_FIVE|DO` | `EVT_VOICE_COMMAND_HIGH_FIVE` → `EVT_VOICE_COMMAND_KNOWN` |
-| 转圈 | 原地绕一整圈 | `NONE|SPIN|DO` | `EVT_VOICE_COMMAND_SPIN` → `EVT_VOICE_COMMAND_KNOWN` |
-| 翻滚 | 在地上滚一圈 | `NONE|ROLL|DO` | `EVT_VOICE_COMMAND_ROLL_OVER` → `EVT_VOICE_COMMAND_KNOWN` |
-| 放下 / 松开 / 松口 | 把嘴里的东西松开 | `NONE|DROP|DO` | `EVT_VOICE_COMMAND_DROP` → `EVT_VOICE_COMMAND_KNOWN` |
-| 安静 / 闭嘴 / 别叫 | 现在不要发出叫声 | `NONE|BARK|STOP` | `EVT_VOICE_COMMAND_QUIET` → `EVT_VOICE_COMMAND_KNOWN` |
-| 昵称：小狗 / 小宝贝等 | 旺财看看我 | `CALL|NONE|NONE` | `EVT_VOICE_CALL_NAME` |
-| 夸奖 / 鼓励 | 你今天表现得特别优秀 | `PRAISE|NONE|NONE` | `EVT_VOICE_PRAISE` |
-| 夸奖并要求坐下 | 你表现很好现在坐稳 | `PRAISE|SIT|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
-| 一般责备 / 纠正 | 你这样做真的不听话 | `SCOLD|NONE|NONE` | `EVT_VOICE_SCOLD` |
-| 不准吃饭 | 不允许再碰这些吃的 | `SCOLD|EAT|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` |
-| 不怕不怕 / 没事没事 | 别紧张我就在这里 | `COMFORT|NONE|NONE` | `EVT_VOICE_COMFORT` |
-| 疼不疼 / 你怎么了 | 身体有没有哪里难受 | `NONE|DOG_STATUS|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 摸摸头 / 抱抱 | 让我抱抱安慰你 | `COMFORT|NONE|NONE` | `EVT_VOICE_COMFORT` |
-| 吃饭 / 吃零食 / 吃罐罐 | 现在去吃点东西 | `NONE|EAT|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 肚子饿不饿 / 想不想吃 / 吃啥 | 现在是不是有点饿 | `NONE|EAT|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 去尿尿 / 去便便 | 该去解决一下大小便了 | `NONE|TOILET|DO` | `EVT_VOICE_COMMAND_TOILET` → `EVT_VOICE_COMMAND_KNOWN` |
-| 擦一擦手 / 脚 | 把爪子清理干净 | `NONE|CLEAN|DO` | `EVT_VOICE_COMMAND_CLEAN` → `EVT_VOICE_COMMAND_KNOWN` |
-| 睡觉 / 睡吧 / 休息 | 回窝好好休息一会儿 | `NONE|SLEEP|DO` | `EVT_VOICE_COMMAND_SLEEP` → `EVT_VOICE_COMMAND_KNOWN` |
-| 来玩 / 一起玩 / 玩不玩 | 咱们一起做个游戏 | `PLAYFUL|PLAY|DO` | `EVT_VOICE_PLAY_INTERACTION`（去重后 1 条） |
-| 拔河比赛 | 和我进行一场拔河 | `PLAYFUL|TUG|DO` | `EVT_VOICE_PLAY_INTERACTION`（去重后 1 条） |
-| 我不要 / 我不玩 | 这个游戏先不要继续了 | `NONE|PLAY|STOP` | `EVT_VOICE_PLAY_INTERACTION` |
-| 去找爸爸 / 去找妈妈 | 帮我找到家里的爸爸 | `NONE|FIND_PERSON|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 跳个舞 | 给大家表演一段舞蹈 | `NONE|DANCE|DO` | `EVT_VOICE_PLAY_INTERACTION` |
-| 拿给我 / 给我 / 去拿 / 叼回来 / 捡球 | 把那只球叼到我面前 | `NONE|FETCH|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` |
-| 查询受支持目标 | 看看那个球在哪里 | `NONE|FIND_TOY|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` |
-| 查询不支持目标 | 看看那个布偶娃娃在哪里 | `NONE|FIND_TOY|QUERY` | `EVT_VOICE_STATUS_CARE`；`object_name=NONE` |
-| 找泛指玩具 | 看看玩具被放在哪里 | `NONE|FIND_TOY|DO` | `EVT_VOICE_COMMAND_KNOWN`；`object_name=NONE` |
-| 我要出门了 / 你自己在家 / 等我回来 / 拜拜 | 我现在要去上班了 | `NONE|OWNER_LEAVE|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 我回来了 | 我已经到家啦 | `NONE|OWNER_RETURN|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 你在干嘛 / 你在哪里 / 你想什么 | 告诉我你现在在做什么 | `NONE|DOG_STATUS|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 喜欢吗 / 好玩吗 | 这个游戏你觉得有意思吗 | `NONE|DOG_PREFERENCE|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 你听得懂吗 / 你会什么 / 你学会了吗 | 你现在能够完成哪些动作 | `NONE|DOG_CAPABILITY|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 我好想你 | 一整天没见到你我很想念 | `OWNER_NEGATIVE|NONE|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` |
-| 主人消极状态表达 | 最近事情太多让我很焦虑 | `OWNER_NEGATIVE|NONE|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` |
-| 主人积极状态表达 | 今天所有事情都特别顺心 | `OWNER_POSITIVE|NONE|NONE` | `EVT_VOICE_POSITIVE_EMOTION` |
+| 走 / 去 | 往前走几步 | `NONE\|GO\|DO` | `EVT_VOICE_COMMAND_WALK` → `EVT_VOICE_COMMAND_KNOWN` |
+| 过来 / 回来 / 到我这儿来 | 赶紧回到我身边 | `NONE\|COME\|DO` | `EVT_VOICE_COMMAND_COME` → `EVT_VOICE_COMMAND_KNOWN` |
+| 跟着我 / 跟我走 | 一路跟在我后面 | `NONE\|FOLLOW\|DO` | `EVT_VOICE_COMMAND_FOLLOW` → `EVT_VOICE_COMMAND_KNOWN` |
+| 出去玩 / 出去溜溜 | 咱们到外面溜达 | `NONE\|GO_OUT\|DO` | `EVT_VOICE_COMMAND_GO_OUT` → `EVT_VOICE_COMMAND_KNOWN` |
+| 回家 | 现在回到你的窝里 | `NONE\|GO_HOME\|DO` | `EVT_VOICE_COMMAND_GO_HOME` → `EVT_VOICE_COMMAND_KNOWN` |
+| 靠近点 | 再贴近我一些 | `NONE\|APPROACH\|DO` | `EVT_VOICE_COMMAND_APPROACH` → `EVT_VOICE_COMMAND_KNOWN` |
+| 退后 | 向后退两步 | `NONE\|BACK\|DO` | `EVT_VOICE_COMMAND_BACK_UP` → `EVT_VOICE_COMMAND_KNOWN` |
+| 坐 / 坐下 / 蹲下 | 把屁股坐稳 | `NONE\|SIT\|DO` | `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
+| 趴下 / 躺下 | 趴到垫子上 | `NONE\|LIE\|DO` | `EVT_VOICE_COMMAND_LIE_DOWN` → `EVT_VOICE_COMMAND_KNOWN` |
+| 装死 | 假装中枪倒下 | `NONE\|PLAY_DEAD\|DO` | `EVT_VOICE_COMMAND_PLAY_DEAD` → `EVT_VOICE_COMMAND_KNOWN` |
+| 起来 / 站起来 | 站端正了 | `NONE\|STAND\|DO` | `EVT_VOICE_COMMAND_STAND_UP` → `EVT_VOICE_COMMAND_KNOWN` |
+| 站好 / 站着 | 保持站立姿势 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_STAND_STILL` → `EVT_VOICE_COMMAND_KNOWN` |
+| 别动 / 等着 / 不许动 | 保持原地不要走 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_HOLD_POSITION` → `EVT_VOICE_COMMAND_KNOWN` |
+| 握手 / 抬手 | 把爪子递给我 | `NONE\|SHAKE\|DO` | `EVT_VOICE_COMMAND_SHAKE_HAND` → `EVT_VOICE_COMMAND_KNOWN` |
+| 击掌 / 拍手 | 抬起爪子和我碰掌 | `NONE\|HIGH_FIVE\|DO` | `EVT_VOICE_COMMAND_HIGH_FIVE` → `EVT_VOICE_COMMAND_KNOWN` |
+| 转圈 | 原地绕一整圈 | `NONE\|SPIN\|DO` | `EVT_VOICE_COMMAND_SPIN` → `EVT_VOICE_COMMAND_KNOWN` |
+| 翻滚 | 在地上滚一圈 | `NONE\|ROLL\|DO` | `EVT_VOICE_COMMAND_ROLL_OVER` → `EVT_VOICE_COMMAND_KNOWN` |
+| 放下 / 松开 / 松口 | 把嘴里的东西松开 | `NONE\|DROP\|DO` | `EVT_VOICE_COMMAND_DROP` → `EVT_VOICE_COMMAND_KNOWN` |
+| 安静 / 闭嘴 / 别叫 | 现在不要发出叫声 | `NONE\|BARK\|STOP` | `EVT_VOICE_COMMAND_QUIET` → `EVT_VOICE_COMMAND_KNOWN` |
+| 昵称：小狗 / 小宝贝等 | 旺财看看我 | `CALL\|NONE\|NONE` | `EVT_VOICE_CALL_NAME` |
+| 夸奖 / 鼓励 | 你今天表现得特别优秀 | `PRAISE\|NONE\|NONE` | `EVT_VOICE_PRAISE` |
+| 夸奖并要求坐下 | 你表现很好现在坐稳 | `PRAISE\|SIT\|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
+| 一般责备 / 纠正 | 你这样做真的不听话 | `SCOLD\|NONE\|NONE` | `EVT_VOICE_SCOLD` |
+| 不准吃饭 | 不允许再碰这些吃的 | `SCOLD\|EAT\|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` |
+| 不怕不怕 / 没事没事 | 别紧张我就在这里 | `COMFORT\|NONE\|NONE` | `EVT_VOICE_COMFORT` |
+| 疼不疼 / 你怎么了 | 身体有没有哪里难受 | `NONE\|DOG_STATUS\|QUERY` | `EVT_VOICE_STATUS_CARE` |
+| 摸摸头 / 抱抱 | 让我抱抱安慰你 | `COMFORT\|NONE\|NONE` | `EVT_VOICE_COMFORT` |
+| 吃饭 / 吃零食 / 吃罐罐 | 现在去吃点东西 | `NONE\|EAT\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
+| 肚子饿不饿 / 想不想吃 / 吃啥 | 现在是不是有点饿 | `NONE\|EAT\|QUERY` | `EVT_VOICE_STATUS_CARE` |
+| 去尿尿 / 去便便 | 该去解决一下大小便了 | `NONE\|TOILET\|DO` | `EVT_VOICE_COMMAND_TOILET` → `EVT_VOICE_COMMAND_KNOWN` |
+| 擦一擦手 / 脚 | 把爪子清理干净 | `NONE\|CLEAN\|DO` | `EVT_VOICE_COMMAND_CLEAN` → `EVT_VOICE_COMMAND_KNOWN` |
+| 睡觉 / 睡吧 / 休息 | 回窝好好休息一会儿 | `NONE\|SLEEP\|DO` | `EVT_VOICE_COMMAND_SLEEP` → `EVT_VOICE_COMMAND_KNOWN` |
+| 来玩 / 一起玩 / 玩不玩 | 咱们一起做个游戏 | `PLAYFUL\|PLAY\|DO` | `EVT_VOICE_PLAY_INTERACTION`（去重后 1 条） |
+| 拔河比赛 | 和我进行一场拔河 | `PLAYFUL\|TUG\|DO` | `EVT_VOICE_PLAY_INTERACTION`（去重后 1 条） |
+| 我不要 / 我不玩 | 这个游戏先不要继续了 | `NONE\|PLAY\|STOP` | `EVT_VOICE_PLAY_INTERACTION` |
+| 去找爸爸 / 去找妈妈 | 帮我找到家里的爸爸 | `NONE\|FIND_PERSON\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
+| 跳个舞 | 给大家表演一段舞蹈 | `NONE\|DANCE\|DO` | `EVT_VOICE_PLAY_INTERACTION` |
+| 拿给我 / 给我 / 去拿 / 叼回来 / 捡球 | 把那只球叼到我面前 | `NONE\|FETCH\|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` |
+| 查询受支持目标 | 看看那个球在哪里 | `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` |
+| 查询不支持目标 | 看看那个布偶娃娃在哪里 | `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_STATUS_CARE`；`object_name=NONE` |
+| 找泛指玩具 | 看看玩具被放在哪里 | `NONE\|FIND_TOY\|DO` | `EVT_VOICE_COMMAND_KNOWN`；`object_name=NONE` |
+| 我要出门了 / 你自己在家 / 等我回来 / 拜拜 | 我现在要去上班了 | `NONE\|OWNER_LEAVE\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
+| 我回来了 | 我已经到家啦 | `NONE\|OWNER_RETURN\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
+| 你在干嘛 / 你在哪里 / 你想什么 | 告诉我你现在在做什么 | `NONE\|DOG_STATUS\|QUERY` | `EVT_VOICE_STATUS_CARE` |
+| 喜欢吗 / 好玩吗 | 这个游戏你觉得有意思吗 | `NONE\|DOG_PREFERENCE\|QUERY` | `EVT_VOICE_STATUS_CARE` |
+| 你听得懂吗 / 你会什么 / 你学会了吗 | 你现在能够完成哪些动作 | `NONE\|DOG_CAPABILITY\|QUERY` | `EVT_VOICE_STATUS_CARE` |
+| 我好想你 | 一整天没见到你我很想念 | `OWNER_NEGATIVE\|NONE\|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` |
+| 主人消极状态表达 | 最近事情太多让我很焦虑 | `OWNER_NEGATIVE\|NONE\|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` |
+| 主人积极状态表达 | 今天所有事情都特别顺心 | `OWNER_POSITIVE\|NONE\|NONE` | `EVT_VOICE_POSITIVE_EMOTION` |
 
 产品文档中的“饥饿值、排泄值、清洁值、困倦值”等执行条件属于行为树/Action 的下游
 前置条件，不是 Voice 的分类标签。Voice 只授权白名单具体事件进入行为树；是否满足

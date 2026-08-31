@@ -7,6 +7,7 @@ command; model labels outside that allowlist remain non-executable.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from marsdog_voice_interaction.messages.intent_protocol import (
@@ -24,6 +25,7 @@ from marsdog_voice_interaction.messages.voice_event_types import (
     EVT_VOICE_COMMAND_GO_HOME,
     EVT_VOICE_COMMAND_GO_OUT,
     EVT_VOICE_COMMAND_HIGH_FIVE,
+    EVT_VOICE_COMMAND_HOLD_POSITION,
     EVT_VOICE_COMMAND_KNOWN,
     EVT_VOICE_COMMAND_LIE_DOWN,
     EVT_VOICE_COMMAND_PLAY_DEAD,
@@ -33,6 +35,8 @@ from marsdog_voice_interaction.messages.voice_event_types import (
     EVT_VOICE_COMMAND_SIT,
     EVT_VOICE_COMMAND_SLEEP,
     EVT_VOICE_COMMAND_SPIN,
+    EVT_VOICE_COMMAND_STAND_STILL,
+    EVT_VOICE_COMMAND_STAND_UP,
     EVT_VOICE_COMMAND_TOILET,
     EVT_VOICE_COMMAND_WALK,
     EVT_VOICE_COMFORT,
@@ -58,10 +62,10 @@ _SOCIAL_EVENTS = {
 _PLAY_INTENTS = frozenset({"PLAY", "TUG", "DANCE"})
 
 # Model classifications only gain execution authority through this explicit
-# one-to-one allowlist.  Ambiguous labels such as STAND, STAY, EAT and
-# FIND_PERSON deliberately stay coarse until their slots/product semantics are
-# frozen.  FETCH/FIND_TOY use a separate supported-object gate below.  Tuple
-# values are (command_key, command_id, event_type).
+# one-to-one allowlist.  Ambiguous labels such as STAY, EAT and FIND_PERSON
+# deliberately stay coarse until the ASR text or slots resolve the concrete
+# product action.  FETCH/FIND_TOY use a separate supported-object gate below.
+# Tuple values are (command_key, command_id, event_type).
 _MODEL_COMMAND_ALLOWLIST: dict[
     tuple[str, str], tuple[str, str, str]
 ] = {
@@ -95,6 +99,9 @@ _MODEL_COMMAND_ALLOWLIST: dict[
     ("PLAY_DEAD", "DO"): (
         "PLAY_DEAD", "CMD_DEAD", EVT_VOICE_COMMAND_PLAY_DEAD,
     ),
+    ("STAND", "DO"): (
+        "STAND_UP", "CMD_STAND_UP", EVT_VOICE_COMMAND_STAND_UP,
+    ),
     ("SHAKE", "DO"): (
         "SHAKE_HAND", "CMD_HAND", EVT_VOICE_COMMAND_SHAKE_HAND,
     ),
@@ -124,6 +131,41 @@ _MODEL_COMMAND_ALLOWLIST: dict[
     ),
 }
 
+_ROUTE_TEXT_SEPARATORS = re.compile(
+    r"[，。！？、；：“”\"'（）【】《》…—～,.!?;:()\[\]<>/\s]+"
+)
+_STAY_STAND_STILL_MARKERS = (
+    "站好",
+    "站着",
+    "站稳",
+    "站直",
+    "站立",
+    "站姿",
+    "standstill",
+    "staystanding",
+    "remainstanding",
+)
+_STAY_HOLD_POSITION_MARKERS = (
+    "别动",
+    "不要动",
+    "不准动",
+    "不许动",
+    "不能动",
+    "保持不动",
+    "等着",
+    "等等",
+    "原地",
+    "不要走",
+    "别走",
+    "停下",
+    "dontmove",
+    "donotmove",
+    "staythere",
+    "holdstill",
+    "waitthere",
+    "stopmoving",
+)
+
 
 def _slot_value(slots: list[dict[str, str]], key: str) -> str:
     for slot in slots:
@@ -136,10 +178,33 @@ def _model_command_route(
     intent: str,
     control: str,
     object_name: str = "",
+    asr_text: str = "",
 ) -> tuple[str, str, str] | None:
     route = _MODEL_COMMAND_ALLOWLIST.get((intent, control))
     if route is not None:
         return route
+    if intent == "STAY" and control == "DO":
+        normalized_text = _ROUTE_TEXT_SEPARATORS.sub(
+            "", str(asr_text)
+        ).lower()
+        if any(
+            marker in normalized_text
+            for marker in _STAY_STAND_STILL_MARKERS
+        ):
+            return (
+                "STAND_STILL",
+                "CMD_STAND_STILL",
+                EVT_VOICE_COMMAND_STAND_STILL,
+            )
+        if any(
+            marker in normalized_text
+            for marker in _STAY_HOLD_POSITION_MARKERS
+        ):
+            return (
+                "HOLD_POSITION",
+                "CMD_HOLD_POSITION",
+                EVT_VOICE_COMMAND_HOLD_POSITION,
+            )
     if object_name and object_name != "NONE":
         if intent == "FIND_TOY" and control in {"DO", "QUERY"}:
             return (
@@ -162,6 +227,7 @@ def derive_intent_routes(
     control: str,
     *,
     object_name: str = "",
+    asr_text: str = "",
 ) -> list[tuple[str, str]]:
     """Return ordered ``(event_type, derived_axis)`` routes without duplicates."""
 
@@ -170,7 +236,12 @@ def derive_intent_routes(
     if social_event:
         routes.append((social_event, "social"))
 
-    command_route = _model_command_route(intent, control, object_name)
+    command_route = _model_command_route(
+        intent,
+        control,
+        object_name,
+        asr_text,
+    )
     if command_route:
         routes.append((command_route[2], "specific_command"))
 
@@ -216,12 +287,18 @@ def route_classification_events(
     )
     events: list[dict[str, Any]] = []
     object_name = _slot_value(base["slots"], "object_name")
-    command_route = _model_command_route(intent, control, object_name)
+    command_route = _model_command_route(
+        intent,
+        control,
+        object_name,
+        asr_text,
+    )
     for event_type, derived_axis in derive_intent_routes(
         social,
         intent,
         control,
         object_name=object_name,
+        asr_text=asr_text,
     ):
         event = dict(base)
         event["event_type"] = event_type

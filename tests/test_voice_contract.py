@@ -151,6 +151,7 @@ def test_model_k_multi_axis_routes_specific_command_before_summary() -> None:
             "PLAY_DEAD",
             "EVT_VOICE_COMMAND_PLAY_DEAD",
         ),
+        ("STAND", "DO", "STAND_UP", "EVT_VOICE_COMMAND_STAND_UP"),
         ("SHAKE", "DO", "SHAKE_HAND", "EVT_VOICE_COMMAND_SHAKE_HAND"),
         ("HIGH_FIVE", "DO", "HIGH_FIVE", "EVT_VOICE_COMMAND_HIGH_FIVE"),
         ("SPIN", "DO", "SPIN", "EVT_VOICE_COMMAND_SPIN"),
@@ -188,7 +189,6 @@ def test_model_k_explicit_command_allowlist(
 @pytest.mark.parametrize(
     ("intent", "control"),
     [
-        ("STAND", "DO"),
         ("STAY", "DO"),
         ("EAT", "DO"),
         ("FETCH", "DO"),
@@ -211,6 +211,53 @@ def test_model_k_ambiguous_commands_remain_summary_only(
         EVT_VOICE_COMMAND_KNOWN
     ]
     assert not events[0]["should_trigger_behavior_tree"]
+
+
+@pytest.mark.parametrize(
+    ("asr_text", "command_key", "event_type"),
+    [
+        (
+            "保持站立姿势",
+            "STAND_STILL",
+            "EVT_VOICE_COMMAND_STAND_STILL",
+        ),
+        (
+            "保持原地不要走",
+            "HOLD_POSITION",
+            "EVT_VOICE_COMMAND_HOLD_POSITION",
+        ),
+        (
+            "Please remain standing",
+            "STAND_STILL",
+            "EVT_VOICE_COMMAND_STAND_STILL",
+        ),
+        (
+            "Hold still and don't move",
+            "HOLD_POSITION",
+            "EVT_VOICE_COMMAND_HOLD_POSITION",
+        ),
+    ],
+)
+def test_model_k_stay_uses_asr_text_to_resolve_specific_command(
+    asr_text: str,
+    command_key: str,
+    event_type: str,
+) -> None:
+    events = route_classification_events(
+        "NONE",
+        "STAY",
+        "DO",
+        asr_text=asr_text,
+        source="rkllm_model_k",
+    )
+
+    assert [event["event_type"] for event in events] == [
+        event_type,
+        EVT_VOICE_COMMAND_KNOWN,
+    ]
+    assert events[0]["action"] == command_key
+    assert events[0]["should_trigger_behavior_tree"]
+    assert not events[1]["should_trigger_behavior_tree"]
 
 
 def test_model_k_find_query_requires_supported_object_for_specific_event() -> None:
