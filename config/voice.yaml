@@ -5,6 +5,15 @@ logging:
   file: true
   event_trace: true
 
+audio_debug:
+  enabled: true
+  output_dir: /tmp/voice_debug
+  save_raw_capture: true
+  save_vad_segment: true
+  save_asr_input: true
+  compare_asr: false
+  debug_disable_extra_pre_roll: false
+
 mock:
   enabled: false
   mode: pipeline

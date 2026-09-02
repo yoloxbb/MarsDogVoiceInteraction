@@ -216,6 +216,7 @@ class VoiceInteractionNode(Node):
             command_lexicon=self._command_lexicon_status,
             object_target_routing=self._object_target_status,
             kws_arbitration=self._kws_arbitration,
+            audio_debug=dict(self._config.get("audio_debug", {})),
             providers={
                 name: {
                     "class": type(provider).__name__,
@@ -634,6 +635,7 @@ class VoiceInteractionNode(Node):
         if not section.get("enabled", True):
             return None
         config = dict(section.get("config", {}))
+        config["audio_debug"] = dict(self._config.get("audio_debug", {}))
         if section.get("type", "sherpa") == "sherpa":
             from marsdog_voice_interaction.providers.audio_sherpa import (
                 AudioSherpaProvider,
@@ -664,11 +666,11 @@ class VoiceInteractionNode(Node):
         provider.start()
         return provider
 
-    @staticmethod
-    def _build_asr(section: dict[str, Any]) -> BaseProvider | None:
+    def _build_asr(self, section: dict[str, Any]) -> BaseProvider | None:
         if not section.get("enabled", True):
             return None
-        config = section.get("config", {})
+        config = dict(section.get("config", {}))
+        config["audio_debug"] = dict(self._config.get("audio_debug", {}))
         if section.get("type", "sherpa") == "sherpa":
             from marsdog_voice_interaction.providers.asr_sherpa import (
                 ASRSherpaProvider,
@@ -829,6 +831,10 @@ class VoiceInteractionNode(Node):
                     if result is not None:
                         self._poll_kws_events()
                         self._finish_kws_utterance()
+                        if self._command_tracker.utterance_id:
+                            result["utterance_id"] = (
+                                self._command_tracker.utterance_id
+                            )
                         self._latest_audio = result
                         has_voice = bool(result.get("has_voice", True))
                         capture_started = getattr(
@@ -1556,6 +1562,9 @@ class VoiceInteractionNode(Node):
         kws = self._providers.get("kws")
         if kws is not None and kws.is_available():
             kws.start_utterance()  # type: ignore[attr-defined]
+        set_utterance_id = getattr(audio, "set_utterance_id", None)
+        if callable(set_utterance_id):
+            set_utterance_id(utterance_id)
         audio.start_capture()  # type: ignore[attr-defined]
         self._trace(
             "stage_start",

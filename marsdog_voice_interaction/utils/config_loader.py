@@ -14,6 +14,7 @@ import yaml
 
 _CONFIG_PATH_FIELDS = (
     ("logging", "dir"),
+    ("audio_debug", "output_dir"),
     ("storage", "root"),
     ("command_lexicon", "catalog"),
     ("object_target_routing", "catalog"),

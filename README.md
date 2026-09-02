@@ -27,7 +27,8 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 - VAD 与流式 KWS 复用同一份 16 kHz 麦克风数据，不重复打开设备。
 - KWS 命中中英文核心动作词后只缓存候选。VAD 结束、ASR 得到完整文本后再做
   KWS/ASR 仲裁，避免长句中包含短关键词时提前误触发动作。
-- 使用 Paraformer 完成整句 ASR，优先精确匹配完整产品词库。当前目录覆盖
+- 使用当前配置的 Paraformer 完成整句 ASR（实现仍支持 SenseVoice），优先精确匹配
+  完整产品词库。当前目录覆盖
   116 条源数据（其中 19 组为核心指令），归并为 81 个路由组、155 条标准
   中文词/句；每条另有 10 个受控扩展，共 1705 个精确匹配入口。19 组核心指令命中后先发布不可执行的
   `EVT_VOICE_COMMAND_KNOWN` 识别摘要，再发布目录指定的可执行
@@ -195,6 +196,34 @@ ROS2 绝对名称。
 
 调节 VAD 阈值前，应先检查系统麦克风输入设备和硬件增益。阈值过低会把风扇、
 碰撞声等环境噪声误判为语音。
+
+### VAD → ASR 调试音频
+
+正式配置可通过顶层 `audio_debug` 开关保存同一个 `utterance_id` 的三阶段证据：
+
+```yaml
+audio_debug:
+  enabled: true
+  output_dir: /tmp/voice_debug
+  save_raw_capture: true
+  save_vad_segment: true
+  save_asr_input: true
+  compare_asr: false
+  debug_disable_extra_pre_roll: false
+```
+
+目录内的 `01_raw_capture.wav` 是连续麦克风输入，`02_vad_segment.wav` 是 VAD
+原始 segment（多段时使用原始采集间隔保留真实停顿），`03_asr_input.wav` 是紧邻
+当前 ASR recognizer `accept_waveform()` 前保存的最终 ndarray。三者均为单声道 IEEE float32
+WAV。日志 `audio_debug/vad_boundary/asr_boundary/vad_join` 分别记录幅值和格式、VAD
+起止、实际 pre-roll、原始与拼接后停顿。
+
+只切换 `debug_disable_extra_pre_roll` 可执行 A/B：`true` 为 VAD 原始 segment 直接送
+ASR，`false` 为额外 `pre_roll_sec` 加 VAD segment；其他 VAD/ASR 参数不变。
+`compare_asr: true` 会在正常识别外再用同一模型识别三份 WAV，开销较大，默认关闭。
+
+调试结束后应将 `audio_debug.enabled` 设为 `false`；关闭时不创建目录、WAV 或执行对照
+识别。
 
 ## 声纹上传 API
 
@@ -458,6 +487,16 @@ arecord -l
 ```
 
 如需固定输入设备，在 `providers.audio.config.device` 中配置设备名称或索引。
+
+### VAD 取消收音超时
+
+会话静默超时时，节点会取消当前 VAD 收音。`sounddevice` 路径只读取
+`read_available` 已确认就绪的帧，并由 `vad-capture` worker 独占
+PortAudio 流的关闭，避免取消线程与 worker 同时清理流。如果仍出现
+`VAD capture worker did not stop`，错误日志中的 `backend`、`phase` 和
+`worker_age_sec` 分别用于确认采音后端、卡住阶段和线程存活时间；同时检查后续是否出现
+`VAD capture start ignored because the previous worker has not exited`，后者才表示残留
+线程正在阻止下一轮收音。
 
 ## 目录结构
 

@@ -612,11 +612,37 @@ def test_real_audio_capture_can_be_cancelled_without_stale_result() -> None:
     assert provider.poll_result() is None
 
 
-def test_blocked_sounddevice_read_is_aborted_during_cancel(
+def test_capture_timeout_log_includes_backend_phase_and_worker_age(
+    caplog: Any,
+) -> None:
+    release_worker = threading.Event()
+    provider = AudioSherpaProvider({})
+    provider.available = True
+
+    def ignore_cancel(
+        _cancel_event: threading.Event,
+    ) -> dict[str, Any]:
+        release_worker.wait(1.0)
+        return {"has_voice": False, "audio_samples": []}
+
+    provider._stream_vad = ignore_cancel  # type: ignore[method-assign]
+    provider.start_capture()
+
+    assert not provider.cancel_capture(timeout=0.01)
+    assert "backend=sounddevice" in caplog.text
+    assert "phase=worker_starting" in caplog.text
+    assert "worker_age_sec=" in caplog.text
+    assert "VAD capture worker Python stack" in caplog.text
+    assert "ignore_cancel" in caplog.text
+
+    release_worker.set()
+    assert provider.cancel_capture(timeout=0.5)
+
+
+def test_sounddevice_wait_is_cancelled_without_cross_thread_abort(
     monkeypatch: Any,
 ) -> None:
-    read_started = threading.Event()
-    read_released = threading.Event()
+    wait_started = threading.Event()
 
     class BlockingInputStream:
         instances: list["BlockingInputStream"] = []
@@ -630,22 +656,24 @@ def test_blocked_sounddevice_read_is_aborted_during_cancel(
         def start(self) -> None:
             return None
 
+        @property
+        def read_available(self) -> int:
+            wait_started.set()
+            return 0
+
         def read(self, frames: int) -> tuple[np.ndarray, None]:
-            read_started.set()
-            read_released.wait(5.0)
-            return np.zeros((frames, 1), dtype=np.float32), None
+            del frames
+            raise AssertionError("read() must not block when no frames are ready")
 
         def abort(self) -> None:
             self.abort_count += 1
-            read_released.set()
 
         def stop(self) -> None:
-            read_released.set()
+            return None
 
         def close(self) -> None:
             self.close_count += 1
             self.close_thread_name = threading.current_thread().name
-            read_released.set()
 
     class FakeVad:
         is_speech_detected = False
@@ -669,14 +697,38 @@ def test_blocked_sounddevice_read_is_aborted_during_cancel(
     provider.available = True
     provider.start_capture()
 
-    assert read_started.wait(0.5)
+    assert wait_started.wait(0.5)
     assert provider.cancel_capture(timeout=0.5)
     assert not provider.is_capturing()
     assert provider.poll_result() is None
     stream = BlockingInputStream.instances[0]
-    assert stream.abort_count == 1
+    assert stream.abort_count == 0
     assert stream.close_count == 1
     assert stream.close_thread_name == "vad-capture"
+
+
+def test_sounddevice_reads_only_after_complete_chunk_is_available() -> None:
+    class ReadyInputStream:
+        read_count = 0
+
+        @property
+        def read_available(self) -> int:
+            return 320
+
+        def read(self, frames: int) -> tuple[np.ndarray, None]:
+            assert frames == 320
+            self.read_count += 1
+            return np.ones((frames, 1), dtype=np.float32), None
+
+    provider = AudioSherpaProvider({})
+    provider._capturing = True
+    stream = ReadyInputStream()
+
+    chunk = provider._read_sounddevice_chunk(stream, threading.Event())
+
+    assert chunk is not None
+    assert chunk.shape == (320, 1)
+    assert stream.read_count == 1
 
 
 def test_blocked_arecord_read_is_terminated_during_cancel(

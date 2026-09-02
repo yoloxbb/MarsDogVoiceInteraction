@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from marsdog_voice_interaction.providers.base import BaseProvider
+from marsdog_voice_interaction.utils.audio_debug import AudioDebugRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class ASRSherpaProvider(BaseProvider):
         self._language = config.get("language", "zh")
         self._use_itn = bool(config.get("use_itn", True))
         self._num_threads = int(config.get("num_threads", 4))
+        self._audio_debug = AudioDebugRecorder(config.get("audio_debug"))
 
         self._recognizer: Any = None  # OfflineRecognizer
 
@@ -149,29 +151,48 @@ class ASRSherpaProvider(BaseProvider):
             t0 = time.perf_counter()
 
             # Ensure float32 and correct sample rate
-            if not isinstance(samples, np.ndarray):
-                samples = np.array(samples, dtype=np.float32)
-            samples = samples.astype(np.float32)
+            received = np.asarray(samples)
+            received_dtype = str(received.dtype)
+            received_shape = tuple(received.shape)
+            samples = received.astype(np.float32)
 
-            sr = audio_data.get("sample_rate", self._sample_rate)
+            sr = int(audio_data.get("sample_rate", self._sample_rate))
+            utterance_id = str(audio_data.get("utterance_id", "")).strip()
+            if self._audio_debug.enabled and utterance_id:
+                logger.info(
+                    "audio_debug asr_format utterance_id=%s "
+                    "sample_rate=%d received_dtype=%s received_shape=%s "
+                    "normalized_dtype=%s normalized_shape=%s",
+                    utterance_id,
+                    sr,
+                    received_dtype,
+                    received_shape,
+                    str(samples.dtype),
+                    tuple(samples.shape),
+                )
+                # This is deliberately immediately before accept_waveform():
+                # 03_asr_input.wav is the exact normalized ndarray seen below.
+                self._audio_debug.save(
+                    utterance_id, "asr_input", samples, sr,
+                )
+                if sr != self._sample_rate:
+                    logger.error(
+                        "audio_debug ASR sample-rate mismatch "
+                        "utterance_id=%s actual=%d expected=%d",
+                        utterance_id,
+                        sr,
+                        self._sample_rate,
+                    )
+                if samples.ndim != 1:
+                    logger.error(
+                        "audio_debug ASR channel/shape mismatch "
+                        "utterance_id=%s shape=%s expected=mono_1d",
+                        utterance_id,
+                        tuple(samples.shape),
+                    )
 
             # Create stream and feed audio
-            stream = self._recognizer.create_stream()
-            stream.accept_waveform(sample_rate=sr, waveform=samples)
-
-            # Run recognition
-            self._recognizer.decode_stream(stream)
-
-            result = stream.result
-            asr_text = result.text
-            if self._model_type == "paraformer":
-                # Paraformer is Chinese-only; no language tag in output.
-                language = "zh"
-            else:
-                language = _normalize_sense_voice_language(
-                    getattr(result, "lang", ""),
-                    self._language,
-                )
+            asr_text, language = self._decode_waveform(samples, sr)
             latency_ms = (time.perf_counter() - t0) * 1000.0
 
             logger.info(
@@ -181,13 +202,75 @@ class ASRSherpaProvider(BaseProvider):
                 latency_ms,
             )
 
-            return {
+            response = {
                 "asr_text": asr_text,
                 "language": language,
                 "confidence": 0.90,
                 "latency_ms": round(latency_ms, 2),
             }
+            if (
+                self._audio_debug.enabled
+                and self._audio_debug.compare_asr
+                and utterance_id
+            ):
+                response["debug_asr_compare"] = self.compare_debug_utterance(
+                    utterance_id,
+                )
+            return response
 
         except Exception as exc:
             logger.error("ASR transcription error: %s", exc, exc_info=True)
             return {"asr_text": "", "language": self._language, "confidence": 0.0}
+
+    def _decode_waveform(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+    ) -> tuple[str, str]:
+        """Decode one waveform with the provider's already-loaded model."""
+        stream = self._recognizer.create_stream()
+        stream.accept_waveform(
+            sample_rate=int(sample_rate),
+            waveform=np.asarray(samples, dtype=np.float32),
+        )
+        self._recognizer.decode_stream(stream)
+        result = stream.result
+        if self._model_type == "paraformer":
+            language = "zh"
+        else:
+            language = _normalize_sense_voice_language(
+                getattr(result, "lang", ""), self._language,
+            )
+        return str(result.text), language
+
+    def compare_debug_utterance(self, utterance_id: str) -> dict[str, str]:
+        """Run RAW, VAD and final ASR-input WAVs through this same model."""
+        labels = (("raw", "RAW"), ("vad", "VAD"), ("asr_input", "ASR_INPUT"))
+        results: dict[str, str] = {}
+        try:
+            for audio_type, label in labels:
+                samples, sample_rate = self._audio_debug.load(
+                    utterance_id, audio_type,
+                )
+                if samples.ndim != 1:
+                    raise ValueError(
+                        f"{audio_type} is not mono: shape={samples.shape}"
+                    )
+                text, _ = self._decode_waveform(samples, sample_rate)
+                results[label] = text
+            logger.info(
+                "ASR_COMPARE utterance_id=%s\nRAW:\n%s\nVAD:\n%s\n"
+                "ASR_INPUT:\n%s",
+                utterance_id,
+                results["RAW"],
+                results["VAD"],
+                results["ASR_INPUT"],
+            )
+        except Exception as exc:
+            logger.error(
+                "ASR_COMPARE failed utterance_id=%s: %s",
+                utterance_id,
+                exc,
+                exc_info=True,
+            )
+        return results

@@ -10,13 +10,17 @@ Requires: sherpa-onnx, sounddevice (or pyaudio)
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
+import traceback
+import uuid
 from typing import Any, Callable
 
 import numpy as np
 
 from marsdog_voice_interaction.providers.base import BaseProvider
+from marsdog_voice_interaction.utils.audio_debug import AudioDebugRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,7 @@ except ImportError:
 
 # ── Audio chunk size in samples (20ms at 16kHz) ────────────────
 _CHUNK_SAMPLES = 320  # 20ms
+_CAPTURE_POLL_SEC = 0.02
 
 
 class AudioSherpaProvider(BaseProvider):
@@ -66,6 +71,11 @@ class AudioSherpaProvider(BaseProvider):
         self._pre_roll_sec = max(0.0, float(config.get("pre_roll_sec", 0.3)))
         self._num_threads = int(config.get("num_threads", 4))
         self._device = config.get("device")  # None = default mic
+        self._audio_debug = AudioDebugRecorder(config.get("audio_debug"))
+        self._debug_disable_extra_pre_roll = (
+            self._audio_debug.enabled
+            and self._audio_debug.disable_extra_pre_roll
+        )
 
         self._vad: Any = None  # VoiceActivityDetector
         self._capture_thread: threading.Thread | None = None
@@ -76,6 +86,10 @@ class AudioSherpaProvider(BaseProvider):
         self._capture_cancel_event: threading.Event | None = None
         self._active_input_stream: Any = None
         self._active_arecord_process: Any = None
+        self._capture_phase = "idle"
+        self._capture_started_monotonic = 0.0
+        self._next_utterance_id = ""
+        self._active_utterance_id = ""
         self._chunk_callback: (
             Callable[[np.ndarray, int], None] | None
         ) = None
@@ -148,6 +162,11 @@ class AudioSherpaProvider(BaseProvider):
         """Observe live microphone chunks without opening a second device."""
         self._chunk_callback = callback
 
+    def set_utterance_id(self, utterance_id: str) -> None:
+        """Associate the next capture with the node's utterance ID."""
+        with self._capture_lock:
+            self._next_utterance_id = str(utterance_id).strip()
+
     def start_capture(self) -> None:
         """Start background capture (non-blocking).
 
@@ -175,6 +194,12 @@ class AudioSherpaProvider(BaseProvider):
             self._speech_active = False
             self._capture_result = None
             self._capture_cancel_event = cancel_event
+            self._capture_phase = "worker_starting"
+            self._capture_started_monotonic = time.monotonic()
+            self._active_utterance_id = (
+                self._next_utterance_id or uuid.uuid4().hex
+            )
+            self._next_utterance_id = ""
 
         self._capture_thread = threading.Thread(
             target=self._capture_thread_fn,
@@ -183,7 +208,11 @@ class AudioSherpaProvider(BaseProvider):
             daemon=True,
         )
         self._capture_thread.start()
-        logger.debug("VAD capture thread started")
+        logger.debug(
+            "vad_worker_start_requested utterance_id=%s backend=%s",
+            self._active_utterance_id,
+            _CAPTURE_BACKEND or "none",
+        )
 
     def cancel_capture(self, timeout: float = 2.0) -> bool:
         """Cancel an active capture and discard any pending result.
@@ -198,6 +227,13 @@ class AudioSherpaProvider(BaseProvider):
             self._speech_active = False
             if cancel_event is not None:
                 cancel_event.set()
+            utterance_id = self._active_utterance_id
+            phase_at_stop = self._capture_phase
+        logger.debug(
+            "stop_requested utterance_id=%s phase=%s",
+            utterance_id,
+            phase_at_stop,
+        )
 
         if (
             thread is not None
@@ -205,23 +241,15 @@ class AudioSherpaProvider(BaseProvider):
             and thread is not threading.current_thread()
         ):
             deadline = time.monotonic() + max(0.0, timeout)
-            interrupted_stream: Any = None
             interrupted_process: Any = None
             while thread.is_alive():
                 with self._capture_lock:
-                    active_stream = self._active_input_stream
                     active_process = self._active_arecord_process
-                if (
-                    active_stream is not None
-                    and active_stream is not interrupted_stream
-                ):
-                    self._interrupt_capture_backend(active_stream, None)
-                    interrupted_stream = active_stream
                 if (
                     active_process is not None
                     and active_process is not interrupted_process
                 ):
-                    self._interrupt_capture_backend(None, active_process)
+                    self._terminate_arecord_process(active_process)
                     interrupted_process = active_process
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -231,41 +259,50 @@ class AudioSherpaProvider(BaseProvider):
         worker_stopped = thread is None or not thread.is_alive()
         with self._capture_lock:
             self._capture_result = None
+            phase = self._capture_phase
+            started = self._capture_started_monotonic
             if self._capture_thread is thread and worker_stopped:
                 self._capture_thread = None
                 self._capture_cancel_event = None
+                self._capture_phase = "idle"
+                self._capture_started_monotonic = 0.0
 
         if not worker_stopped:
-            logger.error("VAD capture worker did not stop within %.1fs", timeout)
+            worker_age = max(0.0, time.monotonic() - started) if started else 0.0
+            logger.error(
+                "VAD capture worker did not stop within %.1fs "
+                "(backend=%s phase=%s worker_age_sec=%.2f)",
+                timeout,
+                _CAPTURE_BACKEND or "none",
+                phase,
+                worker_age,
+            )
+            frame = (
+                sys._current_frames().get(thread.ident)
+                if thread is not None and thread.ident is not None else None
+            )
+            if frame is not None:
+                logger.error(
+                    "VAD capture worker Python stack "
+                    "utterance_id=%s thread=%s:\n%s",
+                    utterance_id,
+                    thread.name,
+                    "".join(traceback.format_stack(frame)),
+                )
         return worker_stopped
 
     @staticmethod
-    def _interrupt_capture_backend(
-        stream: Any,
-        process: Any,
-    ) -> None:
-        """Unblock a backend read so the worker can observe cancellation."""
-
-        if stream is not None:
-            # The capture worker owns the InputStream lifecycle and closes it
-            # in _stream_vad()'s finally block.  Closing it here races that
-            # cleanup and can make PortAudio free the same native stream twice.
-            abort = getattr(stream, "abort", None)
-            if callable(abort):
-                try:
-                    abort()
-                except Exception:
-                    pass
-        if process is not None:
+    def _terminate_arecord_process(process: Any) -> None:
+        """Unblock an arecord pipe read during cancellation."""
+        try:
+            running = process.poll() is None
+        except Exception:
+            running = False
+        if running:
             try:
-                running = process.poll() is None
+                process.terminate()
             except Exception:
-                running = False
-            if running:
-                try:
-                    process.terminate()
-                except Exception:
-                    pass
+                pass
 
     def poll_result(self) -> dict[str, Any] | None:
         """Non-blocking poll for capture result.
@@ -305,6 +342,148 @@ class AudioSherpaProvider(BaseProvider):
         with self._capture_lock:
             self._speech_active = bool(detected)
 
+    def _set_capture_phase(
+        self,
+        cancel_event: threading.Event,
+        phase: str,
+    ) -> None:
+        """Record the worker phase without overwriting a newer capture."""
+        with self._capture_lock:
+            if self._capture_cancel_event is cancel_event:
+                self._capture_phase = phase
+
+    def _read_sounddevice_chunk(
+        self,
+        stream: Any,
+        cancel_event: threading.Event,
+    ) -> np.ndarray | None:
+        """Read only frames PortAudio reports as immediately available.
+
+        ``InputStream.read()`` may remain blocked inside ALSA after another
+        thread requests cancellation.  Polling ``read_available`` keeps the
+        VAD worker cancellation-aware while preserving worker-only stream
+        cleanup.
+        """
+        poll_deadline = time.monotonic() + _CAPTURE_POLL_SEC
+        while self._capturing and not cancel_event.is_set():
+            available = int(stream.read_available)
+            if available >= _CHUNK_SAMPLES:
+                chunk, _ = stream.read(_CHUNK_SAMPLES)
+                return chunk
+            remaining = poll_deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            cancel_event.wait(min(_CAPTURE_POLL_SEC, remaining))
+        return None
+
+    def _debug_segment(self, segment: Any) -> dict[str, Any]:
+        samples = np.asarray(segment.samples, dtype=np.float32).reshape(-1)
+        start = max(0, int(getattr(segment, "start", 0)))
+        return {
+            "start": start,
+            "end": start + int(samples.size),
+            "samples": samples.copy(),
+        }
+
+    def _save_capture_debug(
+        self,
+        utterance_id: str,
+        raw_capture: np.ndarray,
+        segments: list[dict[str, Any]],
+        asr_input: np.ndarray,
+    ) -> str:
+        """Persist the three waveform stages and their boundary evidence."""
+        if not self._audio_debug.enabled:
+            return ""
+        sample_rate = self._sample_rate
+        raw = np.asarray(raw_capture, dtype=np.float32).reshape(-1)
+        asr_waveform = np.asarray(asr_input, dtype=np.float32).reshape(-1)
+        self._audio_debug.save(utterance_id, "raw", raw, sample_rate)
+
+        vad_parts: list[np.ndarray] = []
+        previous_end: int | None = None
+        for index, item in enumerate(segments, start=1):
+            start = int(item["start"])
+            end = int(item["end"])
+            samples = np.asarray(item["samples"], dtype=np.float32)
+            if previous_end is not None and start > previous_end:
+                # Preserve the real captured gap in the diagnostic VAD WAV.
+                vad_parts.append(raw[previous_end:min(start, raw.size)])
+            vad_parts.append(samples)
+            logger.info(
+                "vad_boundary utterance_id=%s segment_index=%d "
+                "speech_start_sample=%d speech_end_sample=%d "
+                "speech_start_ms=%.2f speech_end_ms=%.2f num_samples=%d",
+                utterance_id,
+                index,
+                start,
+                end,
+                start / sample_rate * 1000.0,
+                end / sample_rate * 1000.0,
+                samples.size,
+            )
+            if previous_end is not None:
+                original_gap = max(0, start - previous_end)
+                joined_gap = (
+                    min(start, int(self._pre_roll_sec * sample_rate))
+                    if not self._debug_disable_extra_pre_roll else 0
+                )
+                logger.info(
+                    "vad_join utterance_id=%s segment_index=%d "
+                    "segment_count=%d original_gap_ms=%.2f "
+                    "joined_gap_ms=%.2f join_strategy=%s",
+                    utterance_id,
+                    index,
+                    len(segments),
+                    original_gap / sample_rate * 1000.0,
+                    joined_gap / sample_rate * 1000.0,
+                    (
+                        "concatenate_with_extra_pre_roll"
+                        if not self._debug_disable_extra_pre_roll
+                        else "direct_segment_concatenation"
+                    ),
+                )
+            previous_end = end
+
+        vad_waveform = (
+            np.concatenate(vad_parts)
+            if vad_parts else np.array([], dtype=np.float32)
+        )
+        self._audio_debug.save(utterance_id, "vad", vad_waveform, sample_rate)
+        self._audio_debug.save(
+            utterance_id, "asr_input", asr_waveform, sample_rate,
+        )
+
+        if segments:
+            first_start = int(segments[0]["start"])
+            configured = int(self._pre_roll_sec * sample_rate)
+            asr_start = (
+                first_start
+                if self._debug_disable_extra_pre_roll
+                else max(0, first_start - configured)
+            )
+            asr_end = int(segments[-1]["end"])
+            actual_pre_roll = first_start - asr_start
+        else:
+            asr_start = 0
+            asr_end = 0
+            actual_pre_roll = 0
+        logger.info(
+            "asr_boundary utterance_id=%s asr_start_sample=%d "
+            "asr_end_sample=%d asr_num_samples=%d "
+            "configured_pre_roll_ms=%.2f actual_pre_roll_ms=%.2f "
+            "extra_pre_roll_applied=%s segment_count=%d",
+            utterance_id,
+            asr_start,
+            asr_end,
+            asr_waveform.size,
+            self._pre_roll_sec * 1000.0,
+            actual_pre_roll / sample_rate * 1000.0,
+            bool(not self._debug_disable_extra_pre_roll and actual_pre_roll),
+            len(segments),
+        )
+        return str(self._audio_debug.utterance_dir(utterance_id))
+
     # ── Thread: streaming VAD capture ──────────────────────────
 
     def _capture_thread_fn(
@@ -312,34 +491,50 @@ class AudioSherpaProvider(BaseProvider):
         cancel_event: threading.Event,
     ) -> None:
         """Background thread: stream mic to VAD until speech detected."""
+        result: dict[str, Any] | None = None
+        with self._capture_lock:
+            utterance_id = self._active_utterance_id
+        logger.debug(
+            "vad_worker_start utterance_id=%s backend=%s",
+            utterance_id,
+            _CAPTURE_BACKEND or "none",
+        )
         try:
             result = self._stream_vad(cancel_event)
+        except Exception as exc:
+            if cancel_event.is_set():
+                logger.debug("VAD capture worker cancelled: %s", exc)
+            else:
+                import traceback as _tb
+
+                print(f"[VAD ERROR] {exc}", flush=True)
+                _tb.print_exc()
+                logger.error(
+                    "VAD capture thread error: %s", exc, exc_info=True,
+                )
+                result = {
+                    "audio_samples": np.array([], dtype=np.float32),
+                    "sample_rate": self._sample_rate,
+                    "duration_ms": 0.0,
+                    "has_voice": False,
+                }
+        finally:
             with self._capture_lock:
                 if self._capture_cancel_event is cancel_event:
-                    if not cancel_event.is_set():
+                    if not cancel_event.is_set() and result is not None:
                         self._capture_result = result
                     self._capturing = False
                     self._speech_active = False
                     self._capture_thread = None
                     self._capture_cancel_event = None
-        except Exception as exc:
-            import traceback as _tb
-            print(f"[VAD ERROR] {exc}", flush=True)
-            _tb.print_exc()
-            logger.error("VAD capture thread error: %s", exc, exc_info=True)
-            with self._capture_lock:
-                if self._capture_cancel_event is cancel_event:
-                    if not cancel_event.is_set():
-                        self._capture_result = {
-                            "audio_samples": np.array([], dtype=np.float32),
-                            "sample_rate": self._sample_rate,
-                            "duration_ms": 0.0,
-                            "has_voice": False,
-                        }
-                    self._capturing = False
-                    self._speech_active = False
-                    self._capture_thread = None
-                    self._capture_cancel_event = None
+                    self._capture_phase = "idle"
+                    self._capture_started_monotonic = 0.0
+                    self._active_utterance_id = ""
+            logger.debug(
+                "vad_worker_stopped utterance_id=%s cancelled=%s",
+                utterance_id,
+                cancel_event.is_set(),
+            )
 
     def _stream_vad(
         self,
@@ -362,11 +557,19 @@ class AudioSherpaProvider(BaseProvider):
         # Accumulate all raw audio (for debugging / re-processing)
         all_audio: list[float] = []
         speech_segment: np.ndarray | None = None
+        debug_segments: list[dict[str, Any]] = []
         t_start = time.perf_counter()
         stream: Any = None
         fallback_to_arecord = False
+        exit_reason = "unknown"
+        before_read_logged = False
+        first_read_logged = False
+        first_vad_logged = False
+        with self._capture_lock:
+            utterance_id = self._active_utterance_id
 
         try:
+            self._set_capture_phase(cancel_event, "sounddevice_open")
             stream = sd.InputStream(
                 samplerate=self._sample_rate,
                 channels=1,
@@ -387,7 +590,9 @@ class AudioSherpaProvider(BaseProvider):
                     "duration_ms": 0.0,
                     "has_voice": False,
                 }
+            self._set_capture_phase(cancel_event, "sounddevice_start")
             stream.start()
+            self._set_capture_phase(cancel_event, "sounddevice_wait")
 
             while True:
                 # Check for shutdown
@@ -396,45 +601,18 @@ class AudioSherpaProvider(BaseProvider):
                     or not self._capturing
                     or cancel_event.is_set()
                 ):
+                    exit_reason = "stop_requested"
                     break
 
-                # Read one chunk
-                chunk, _ = stream.read(_CHUNK_SAMPLES)
-                if cancel_event.is_set() or not self._capturing:
-                    break
-                chunk = chunk.flatten()
-                all_audio.extend(chunk.tolist())
-                self._notify_chunk(chunk)
-
-                # Feed to VAD
-                self._vad.accept_waveform(chunk.tolist())
-                self._refresh_speech_active()
                 elapsed = time.perf_counter() - t_start
-
-                # ── Check for completed speech segment ──
-                if not self._vad.empty():
-                    # VAD found a complete utterance!
-                    segment = self._vad.front
-                    samples = self._segment_with_pre_roll(
-                        segment,
-                        np.asarray(all_audio, dtype=np.float32),
-                    )
-                    if len(samples) > 0:
-                        speech_segment = samples
-                        self._vad.pop()
-                        duration_ms = (len(samples) / self._sample_rate) * 1000.0
-                        logger.info(
-                            "VAD detected speech: %.1fms (%.1fs into capture)",
-                            duration_ms, elapsed,
-                        )
-                        break
-
-                # ── Timeout: no speech after max duration ──
                 if elapsed > self._max_duration_sec:
                     # Flush any pending segments
+                    self._set_capture_phase(cancel_event, "vad_flush")
                     self._vad.flush()
                     while not self._vad.empty():
                         seg = self._vad.front
+                        if self._audio_debug.enabled:
+                            debug_segments.append(self._debug_segment(seg))
                         s = self._segment_with_pre_roll(
                             seg,
                             np.asarray(all_audio, dtype=np.float32),
@@ -448,15 +626,104 @@ class AudioSherpaProvider(BaseProvider):
                         self._vad.pop()
 
                     if speech_segment is not None and len(speech_segment) > 0:
-                        duration_ms = (len(speech_segment) / self._sample_rate) * 1000.0
+                        duration_ms = (
+                            len(speech_segment) / self._sample_rate
+                        ) * 1000.0
                         logger.info(
                             "VAD got speech at timeout: %.1fms", duration_ms,
                         )
+                        exit_reason = "vad_flush_voice"
                         break
 
                     # True timeout — no speech at all
                     logger.debug("VAD max duration reached, no speech detected")
+                    exit_reason = "max_duration_silence"
                     break
+
+                # Never enter a blocking read until PortAudio reports that a
+                # complete chunk is ready.  This bounds cancellation latency.
+                self._set_capture_phase(cancel_event, "sounddevice_wait")
+                if not before_read_logged:
+                    logger.debug(
+                        "before_audio_read utterance_id=%s backend=sounddevice",
+                        utterance_id,
+                    )
+                    before_read_logged = True
+                chunk = self._read_sounddevice_chunk(stream, cancel_event)
+                if chunk is None:
+                    continue
+                if not first_read_logged:
+                    chunk_array = np.asarray(chunk)
+                    channel_count = (
+                        int(chunk_array.shape[1])
+                        if chunk_array.ndim == 2 else 1
+                    )
+                    logger.debug(
+                        "after_audio_read utterance_id=%s backend=sounddevice "
+                        "num_samples=%d shape=%s dtype=%s channels=%d",
+                        utterance_id,
+                        int(chunk_array.size),
+                        tuple(chunk_array.shape),
+                        str(chunk_array.dtype),
+                        channel_count,
+                    )
+                    if self._audio_debug.enabled:
+                        logger.info(
+                            "audio_capture_format utterance_id=%s "
+                            "backend=sounddevice sample_rate=%d shape=%s "
+                            "dtype=%s channels=%d",
+                            utterance_id,
+                            self._sample_rate,
+                            tuple(chunk_array.shape),
+                            str(chunk_array.dtype),
+                            channel_count,
+                        )
+                    if channel_count != 1:
+                        logger.error(
+                            "audio_debug microphone channel mismatch "
+                            "utterance_id=%s channels=%d expected=1",
+                            utterance_id,
+                            channel_count,
+                        )
+                    first_read_logged = True
+                if cancel_event.is_set() or not self._capturing:
+                    exit_reason = "stop_requested_after_read"
+                    break
+                chunk = chunk.flatten()
+                all_audio.extend(chunk.tolist())
+                self._notify_chunk(chunk)
+
+                # Feed to VAD
+                self._set_capture_phase(cancel_event, "vad_process")
+                if not first_vad_logged:
+                    logger.debug("before_vad utterance_id=%s", utterance_id)
+                self._vad.accept_waveform(chunk.tolist())
+                self._refresh_speech_active()
+                if not first_vad_logged:
+                    logger.debug("after_vad utterance_id=%s", utterance_id)
+                    first_vad_logged = True
+                elapsed = time.perf_counter() - t_start
+
+                # ── Check for completed speech segment ──
+                if not self._vad.empty():
+                    # VAD found a complete utterance!
+                    segment = self._vad.front
+                    if self._audio_debug.enabled:
+                        debug_segments.append(self._debug_segment(segment))
+                    samples = self._segment_with_pre_roll(
+                        segment,
+                        np.asarray(all_audio, dtype=np.float32),
+                    )
+                    if len(samples) > 0:
+                        speech_segment = samples
+                        self._vad.pop()
+                        duration_ms = (len(samples) / self._sample_rate) * 1000.0
+                        logger.info(
+                            "VAD detected speech: %.1fms (%.1fs into capture)",
+                            duration_ms, elapsed,
+                        )
+                        exit_reason = "vad_complete"
+                        break
 
         except sd.PortAudioError as exc:
             if cancel_event.is_set():
@@ -477,10 +744,21 @@ class AudioSherpaProvider(BaseProvider):
                 _tb.print_exc()
                 logger.error("VAD stream error: %s", exc, exc_info=True)
         finally:
+            logger.debug(
+                "leaving_loop utterance_id=%s reason=%s phase=%s",
+                utterance_id,
+                exit_reason,
+                self._capture_phase,
+            )
+            logger.debug(
+                "releasing_resources utterance_id=%s backend=sounddevice",
+                utterance_id,
+            )
             with self._capture_lock:
                 if self._active_input_stream is stream:
                     self._active_input_stream = None
             if stream is not None:
+                self._set_capture_phase(cancel_event, "sounddevice_close")
                 if not cancel_event.is_set():
                     try:
                         stream.stop()
@@ -496,20 +774,29 @@ class AudioSherpaProvider(BaseProvider):
 
         if speech_segment is not None and len(speech_segment) > 0:
             duration_ms = (len(speech_segment) / self._sample_rate) * 1000.0
-            return {
+            result = {
                 "audio_samples": speech_segment,
                 "sample_rate": self._sample_rate,
                 "duration_ms": duration_ms,
                 "has_voice": True,
             }
-
-        # No speech detected
-        return {
-            "audio_samples": np.array(all_audio, dtype=np.float32),
-            "sample_rate": self._sample_rate,
-            "duration_ms": (len(all_audio) / self._sample_rate) * 1000.0,
-            "has_voice": False,
-        }
+        else:
+            # No speech detected
+            result = {
+                "audio_samples": np.array(all_audio, dtype=np.float32),
+                "sample_rate": self._sample_rate,
+                "duration_ms": (len(all_audio) / self._sample_rate) * 1000.0,
+                "has_voice": False,
+            }
+        if self._audio_debug.enabled:
+            result["debug_audio_dir"] = self._save_capture_debug(
+                utterance_id,
+                np.asarray(all_audio, dtype=np.float32),
+                debug_segments,
+                np.asarray(result["audio_samples"], dtype=np.float32),
+            )
+            result["utterance_id"] = utterance_id
+        return result
 
     def _stream_vad_arecord(
         self,
@@ -520,8 +807,16 @@ class AudioSherpaProvider(BaseProvider):
 
         all_audio: list[np.ndarray] = []
         speech_segment: np.ndarray | None = None
+        debug_segments: list[dict[str, Any]] = []
         process: subprocess.Popen[bytes] | None = None
+        before_read_logged = False
+        first_read_logged = False
+        first_vad_logged = False
+        exit_reason = "unknown"
+        with self._capture_lock:
+            utterance_id = self._active_utterance_id
         try:
+            self._set_capture_phase(cancel_event, "arecord_open")
             cmd = [
                 "arecord",
                 "-f", "S16_LE",
@@ -554,10 +849,27 @@ class AudioSherpaProvider(BaseProvider):
             started = time.perf_counter()
             chunk_bytes = _CHUNK_SAMPLES * 2
             while self._capturing and not cancel_event.is_set():
+                self._set_capture_phase(cancel_event, "arecord_read")
+                if not before_read_logged:
+                    logger.debug(
+                        "before_audio_read utterance_id=%s backend=arecord",
+                        utterance_id,
+                    )
+                    before_read_logged = True
                 raw = process.stdout.read(chunk_bytes)
                 if not raw:
+                    exit_reason = "arecord_eof"
                     break
+                if not first_read_logged:
+                    logger.debug(
+                        "after_audio_read utterance_id=%s backend=arecord "
+                        "num_bytes=%d",
+                        utterance_id,
+                        len(raw),
+                    )
+                    first_read_logged = True
                 if cancel_event.is_set() or not self._capturing:
+                    exit_reason = "stop_requested_after_read"
                     break
                 if len(raw) % 2:
                     raw = raw[:-1]
@@ -568,21 +880,45 @@ class AudioSherpaProvider(BaseProvider):
                 if samples.size == 0:
                     continue
                 all_audio.append(samples)
+                if (
+                    first_read_logged
+                    and len(all_audio) == 1
+                    and self._audio_debug.enabled
+                ):
+                    logger.info(
+                        "audio_capture_format utterance_id=%s backend=arecord "
+                        "sample_rate=%d shape=%s dtype=%s channels=1 "
+                        "source_encoding=PCM16_LE normalized=true",
+                        utterance_id,
+                        self._sample_rate,
+                        tuple(samples.shape),
+                        str(samples.dtype),
+                    )
                 self._notify_chunk(samples)
+                self._set_capture_phase(cancel_event, "vad_process")
+                if not first_vad_logged:
+                    logger.debug("before_vad utterance_id=%s", utterance_id)
                 self._vad.accept_waveform(samples.tolist())
                 self._refresh_speech_active()
+                if not first_vad_logged:
+                    logger.debug("after_vad utterance_id=%s", utterance_id)
+                    first_vad_logged = True
 
                 if not self._vad.empty():
                     segment = self._vad.front
+                    if self._audio_debug.enabled:
+                        debug_segments.append(self._debug_segment(segment))
                     speech_segment = self._segment_with_pre_roll(
                         segment,
                         np.concatenate(all_audio),
                     )
                     self._vad.pop()
                     if speech_segment.size:
+                        exit_reason = "vad_complete"
                         break
 
                 if time.perf_counter() - started > self._max_duration_sec:
+                    exit_reason = "max_duration"
                     break
 
             if speech_segment is None and not cancel_event.is_set():
@@ -590,6 +926,8 @@ class AudioSherpaProvider(BaseProvider):
                 speech_parts: list[np.ndarray] = []
                 while not self._vad.empty():
                     segment = self._vad.front
+                    if self._audio_debug.enabled:
+                        debug_segments.append(self._debug_segment(segment))
                     captured = (
                         np.concatenate(all_audio)
                         if all_audio
@@ -610,6 +948,17 @@ class AudioSherpaProvider(BaseProvider):
         except Exception as exc:
             logger.error("arecord error: %s", exc, exc_info=True)
         finally:
+            logger.debug(
+                "leaving_loop utterance_id=%s reason=%s phase=%s",
+                utterance_id,
+                exit_reason,
+                self._capture_phase,
+            )
+            logger.debug(
+                "releasing_resources utterance_id=%s backend=arecord",
+                utterance_id,
+            )
+            self._set_capture_phase(cancel_event, "arecord_close")
             if process is not None and process.poll() is None:
                 process.terminate()
                 try:
@@ -621,6 +970,11 @@ class AudioSherpaProvider(BaseProvider):
                 if self._active_arecord_process is process:
                     self._active_arecord_process = None
 
+        captured = (
+            np.concatenate(all_audio)
+            if all_audio
+            else np.array([], dtype=np.float32)
+        )
         if speech_segment is not None and speech_segment.size:
             duration_ms = (
                 speech_segment.size / self._sample_rate
@@ -629,25 +983,28 @@ class AudioSherpaProvider(BaseProvider):
                 "VAD (arecord): detected %.1fms speech",
                 duration_ms,
             )
-            return {
+            result = {
                 "audio_samples": speech_segment,
                 "sample_rate": self._sample_rate,
                 "duration_ms": duration_ms,
                 "has_voice": True,
             }
-
-        captured = (
-            np.concatenate(all_audio)
-            if all_audio
-            else np.array([], dtype=np.float32)
-        )
-
-        return {
-            "audio_samples": captured,
-            "sample_rate": self._sample_rate,
-            "duration_ms": (captured.size / self._sample_rate) * 1000.0,
-            "has_voice": False,
-        }
+        else:
+            result = {
+                "audio_samples": captured,
+                "sample_rate": self._sample_rate,
+                "duration_ms": (captured.size / self._sample_rate) * 1000.0,
+                "has_voice": False,
+            }
+        if self._audio_debug.enabled:
+            result["debug_audio_dir"] = self._save_capture_debug(
+                utterance_id,
+                captured,
+                debug_segments,
+                np.asarray(result["audio_samples"], dtype=np.float32),
+            )
+            result["utterance_id"] = utterance_id
+        return result
 
     def has_voice(self, audio_data: dict[str, Any] | None = None) -> bool:
         """Check if audio segment contains voice activity."""
@@ -662,7 +1019,11 @@ class AudioSherpaProvider(BaseProvider):
     ) -> np.ndarray:
         """Prepend raw audio before the VAD start so quiet initials survive."""
         samples = np.asarray(segment.samples, dtype=np.float32)
-        if samples.size == 0 or self._pre_roll_sec <= 0:
+        if (
+            samples.size == 0
+            or self._pre_roll_sec <= 0
+            or self._debug_disable_extra_pre_roll
+        ):
             return samples
 
         segment_start = int(getattr(segment, "start", 0))

@@ -5,6 +5,10 @@ logging:
   file: true
   event_trace: true
 
+audio_debug:
+  enabled: false
+  output_dir: /tmp/voice_debug
+
 mock:
   enabled: true
   mode: pipeline

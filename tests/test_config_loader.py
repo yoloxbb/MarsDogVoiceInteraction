@@ -15,6 +15,8 @@ def test_load_config_resolves_declared_paths_from_yaml_directory(
         """
 logging:
   dir: ../log
+audio_debug:
+  output_dir: ../debug_audio
 storage:
   root: ../data
 command_lexicon:
@@ -40,6 +42,9 @@ topics:
     config = load_config(config_path)
 
     assert config["logging"]["dir"] == str(tmp_path / "log")
+    assert config["audio_debug"]["output_dir"] == str(
+        tmp_path / "debug_audio"
+    )
     assert config["storage"]["root"] == str(tmp_path / "data")
     assert config["command_lexicon"]["catalog"] == str(
         config_dir / "command_catalog.yaml"

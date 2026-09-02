@@ -160,7 +160,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 | `providers.wakeup` | 讯飞串口唤醒板 `/dev/ttyACM0` |
 | `providers.audio` | 16 kHz VAD 和录音 |
 | `providers.kws` | 流式关键词命令 |
-| `providers.asr` | Paraformer ASR |
+| `providers.asr` | 当前为 Paraformer ASR；provider 实现同时支持 SenseVoice |
 | `providers.speaker` | 声纹模型和阈值 |
 | `command_lexicon` | 完整产品词库（116 条源数据/81 个路由组/155 条标准词句/1550 条受控扩展/19 组核心子集）开关和目录路径 |
 | `providers.intent_*` | Model Intent 优先、三轴兼容规则回退 |

@@ -254,6 +254,7 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `log_level` / `log_file` | string | 实际日志级别和本进程日志文件路径。 |
 | `audio_topic` / `enrollment_topic` / `service` | string | 实际发布 Topic 和 VoiceTask Service 名称。 |
 | `idle_timeout_sec` | number | 最后一次有效语音后回到待机的超时秒数。 |
+| `audio_debug` | object | VAD → ASR 调试开关、输出目录、三份 WAV 保存项、pre-roll A/B 和同模型对照状态。 |
 | `providers` | object | 每个 Provider 的 `class/available`；正式测试要求真实 Provider 可用且没有意外 Mock。 |
 | `command_lexicon` | object | 词库实际加载状态和统计。正式与 Pipeline Mock 应为 `ready=true/command_count=81/core_command_count=19/phrase_count=155/expansion_enabled=true/variants_per_phrase=10/expanded_phrase_count=1550/total_match_phrase_count=1705/expansion_profile_count=5/reference_phrase_count=138/source_row_count=116/covered_source_row_count=116`；`phrase_count` 只统计标准词/句，`total_match_phrase_count` 才是运行时总入口。 |
 | `object_target_routing` | object | 目标物目录加载状态。应为 `enabled=true/ready=true/target_count=18`，并记录 `catalog/version/alias_count`。不可用时所有找物模型结果均不得生成具体 FETCH。 |
@@ -276,6 +277,12 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 补充判定规则：
 
 - `audio_duration_ms` 是交给 ASR/声纹的结果音频长度，不是 VAD 阶段耗时。
+- 开启 `audio_debug.enabled` 后，同一句必须在输出目录下生成
+  `01_raw_capture.wav/02_vad_segment.wav/03_asr_input.wav`。结合
+  `audio_debug` 元数据、`vad_boundary`、`asr_boundary` 和 `vad_join` 判断损失发生在
+  原始采集、VAD 边界、额外 pre-roll 或最终 buffer；不得只凭 ASR 文本调阈值。
+- `03_asr_input.wav` 在当前 ASR recognizer `accept_waveform()` 前保存，要求
+  `sample_rate=16000/dtype=float32/channels=1/out_of_range_count=0`。
 - `intent_source` 常见值为 `command_lexicon/kws/rkllm/`
   `rule_rkllm_compatible/invalid_protocol_fallback`。其中
   `command_lexicon` 和 `kws` 都是模型外的确定性来源。
