@@ -50,8 +50,8 @@ def _tag_to_intent_event(
         intent=tag_parts["INTENT"],
         control=tag_parts["CONTROL"],
         asr_text=asr_text,
-        source="rkllm_model_k",
-        # Model K currently returns labels, not a calibrated confidence.
+        source="rkllm",
+        # Model Intent currently returns labels, not a calibrated confidence.
         confidence=0.0,
     )
 

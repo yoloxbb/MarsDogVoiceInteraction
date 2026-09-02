@@ -36,17 +36,17 @@ language                                    str            语言标签：zh / e
 speaker_id                                  str            `owner`、`family_member_1`～`family_member_4`；`unknown` 表示未匹配
 speaker_confidence                          float          声纹匹配置信度
 
-social                                      str            Model K SOCIAL 标签
-intent                                      str            Model K INTENT 标签
+social                                      str            Model Intent SOCIAL 标签
+intent                                      str            Model Intent INTENT 标签
 control                                     str            控制标签（见意图协议）
 emotion                                     str            兼容字段，当前镜像 social
 action                                      str            兼容字段；模型事件镜像 intent，具体指令保留 command_key
 
 command_id                                  str            指令 ID（如 CMD_SIT、CMD_COME_HERE）
 intent_category                             str            意图类别：command / cancel / clarify / praise / blame / emotion / none
-intent_source                               str            决策来源：command_lexicon / rule_model_k_compatible / rkllm_model_k / kws
+intent_source                               str            决策来源：command_lexicon / rule_rkllm_compatible / rkllm / kws
 intent_confidence                           float          意图分类置信度
-nlu_protocol                                str            当前为 model_k_social_intent_control_v1
+nlu_protocol                                str            当前为 rkllm_social_intent_control_v1
 raw_nlu_tag                                 str            经严格校验的 SOCIAL|INTENT|CONTROL 原始三元组
 specific_event_type                         str            KNOWN 摘要对应的具体指令事件；非摘要可为空
 dispatch_role                               str            recognition_summary / specific_command / semantic_classification / diagnostic
@@ -132,11 +132,11 @@ latency_ms                                  float          处理延迟（ms）
 - 核心词库识别摘要：`dispatch_role=recognition_summary`，携带
   `specific_event_type`，且 `is_executable=false`、
   `should_trigger_behavior_tree=false`；它不能再次触发动作。
-- Model K 命令摘要：`dispatch_role=semantic_classification`，不可执行；命中开发侧
+- Model Intent 命令摘要：`dispatch_role=semantic_classification`，不可执行；命中开发侧
   显式动作白名单时，会在摘要之前额外发布
   `dispatch_role=specific_command` 的具体事件，只有该具体事件可执行。
 
-#### Model K 意图分类业务事件
+#### Model Intent 意图分类业务事件
 | event_type | 触发条件 |
 |---|---|
 | `EVT_VOICE_CALL_NAME` | `social=CALL` |
@@ -149,7 +149,7 @@ latency_ms                                  float          处理延迟（ms）
 | `EVT_VOICE_STATUS_CARE` | 任一非空 `intent` 且 `control=QUERY` |
 | `EVT_VOICE_COMMAND_KNOWN` | 其余非空 `intent` 且 `control in {DO,STOP}` |
 | `EVT_VOICE_NEUTRAL` | `NONE|NONE|NONE`；不可执行 |
-| `EVT_VOICE_COMMAND_UNKNOWN` | Model K 无有效协议输出且兼容规则也无结果，仅作诊断 |
+| `EVT_VOICE_COMMAND_UNKNOWN` | Model Intent 无有效协议输出且兼容规则也无结果，仅作诊断 |
 
 同一三轴结果可以产生多个事件。`PRAISE|SIT|DO` 命中动作白名单，依次发布
 `EVT_VOICE_PRAISE`、可执行的 `EVT_VOICE_COMMAND_SIT`，以及不可执行的
@@ -163,7 +163,7 @@ ASR 原文区分：站立保持语义映射 `EVT_VOICE_COMMAND_STAND_STILL`，�
 映射 `EVT_VOICE_COMMAND_HOLD_POSITION`。无法可靠区分时只保留不可执行的
 `EVT_VOICE_COMMAND_KNOWN`，禁止猜测具体动作。
 
-#### Model K 找物/捡取目标物门控
+#### Model Intent 找物/捡取目标物门控
 
 `intent in {FETCH,FIND_TOY}` 时，节点在模型分类后使用 ASR 原文查询
 `config/object_targets.yaml`。`object_name` 只能是该目录中的 18 个规范视觉类别；
@@ -223,12 +223,12 @@ ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短
   `recognition_arbitration` 在 KWS 与 ASR 链路中选择唯一结果来源；被选中的核心命令
   仍按顺序发布 KNOWN 摘要和具体事件。
 
-词库未命中时才进入下面的 Model K 意图协议。当前完整路由组、核心子集和所有等价短语以
+词库未命中时才进入下面的 Model Intent 意图协议。当前完整路由组、核心子集和所有等价短语以
 `command_catalog.yaml` 为唯一权威清单；
 [COMMAND_CATALOG_TEST_MATRIX.md](COMMAND_CATALOG_TEST_MATRIX.md) 是供测试使用的逐条
 可读快照，两者不一致时以 YAML 为准。
 
-### Model K 意图协议：SOCIAL|INTENT|CONTROL
+### Model Intent 意图协议：SOCIAL|INTENT|CONTROL
 
 模型必须只输出 `SOCIAL|INTENT|CONTROL`，推理系统提示词固定为：
 
@@ -249,7 +249,7 @@ DOG_PREFERENCE / DOG_CAPABILITY
 
 组合约束：`intent=NONE` 时只能是 `control=NONE`；三个 `DOG_*` 查询标签只能配
 `QUERY`；`OWNER_LEAVE/OWNER_RETURN` 只能配 `DO`。模型输出包含多余文本、字段数
-错误、未知枚举或非法组合时均拒绝。Model K 的大类事件和 `COMMAND_KNOWN` 摘要均为
+错误、未知枚举或非法组合时均拒绝。Model Intent 的大类事件和 `COMMAND_KNOWN` 摘要均为
 `should_trigger_behavior_tree=false`；只有显式动作白名单生成的具体命令事件为
 `true`。词库具体指令仍由确定性目录直接授权，不依赖模型标签。
 
@@ -277,7 +277,7 @@ DOG_PREFERENCE / DOG_CAPABILITY
 │   │  ③ command_lexicon 精确匹配                        ││
 │   │     ├─ 核心命中 → COMMAND_KNOWN + COMMAND_*       ││
 │   │     ├─ 其他命中 → 目录指定事件，跳过意图模型       ││
-│   │     └─ 未命中 → Model K/兼容规则 → 大类/白名单动作/摘要││
+│   │     └─ 未命中 → Model Intent/兼容规则 → 大类/白名单动作/摘要││
 │   │                                                    ││
 │   │  ①-③ 共享同一个 utterance_id                       ││
 │   └────────────────────────────────────────────────────┘│

@@ -94,6 +94,7 @@ def test_wake_angle_contract_uses_raw_microphone_array_frame() -> None:
 
 
 def test_intent_protocol_and_event_mapping() -> None:
+    assert NLU_PROTOCOL == "rkllm_social_intent_control_v1"
     assert parse_intent_tag("NONE|SIT|DO") == ("NONE", "SIT", "DO")
     assert (
         classification_to_voice_event("NONE", "SIT", "DO")
@@ -104,13 +105,13 @@ def test_intent_protocol_and_event_mapping() -> None:
     assert parse_intent_tag("NONE|NONE|DO") is None
 
 
-def test_model_k_multi_axis_routes_specific_command_before_summary() -> None:
+def test_model_intent_multi_axis_routes_specific_command_before_summary() -> None:
     events = route_classification_events(
         "PRAISE",
         "SIT",
         "DO",
         asr_text="真乖坐下",
-        source="rkllm_model_k",
+        source="rkllm",
     )
 
     assert [event["event_type"] for event in events] == [
@@ -163,7 +164,7 @@ def test_model_k_multi_axis_routes_specific_command_before_summary() -> None:
         ("SLEEP", "DO", "SLEEP", "EVT_VOICE_COMMAND_SLEEP"),
     ],
 )
-def test_model_k_explicit_command_allowlist(
+def test_model_intent_explicit_command_allowlist(
     intent: str,
     control: str,
     command_key: str,
@@ -174,7 +175,7 @@ def test_model_k_explicit_command_allowlist(
         intent,
         control,
         asr_text="model route",
-        source="rkllm_model_k",
+        source="rkllm",
     )
 
     assert [event["event_type"] for event in events] == [
@@ -195,7 +196,7 @@ def test_model_k_explicit_command_allowlist(
         ("FIND_PERSON", "DO"),
     ],
 )
-def test_model_k_ambiguous_commands_remain_summary_only(
+def test_model_intent_ambiguous_commands_remain_summary_only(
     intent: str,
     control: str,
 ) -> None:
@@ -204,7 +205,7 @@ def test_model_k_ambiguous_commands_remain_summary_only(
         intent,
         control,
         asr_text="ambiguous model route",
-        source="rkllm_model_k",
+        source="rkllm",
     )
 
     assert [event["event_type"] for event in events] == [
@@ -238,7 +239,7 @@ def test_model_k_ambiguous_commands_remain_summary_only(
         ),
     ],
 )
-def test_model_k_stay_uses_asr_text_to_resolve_specific_command(
+def test_model_intent_stay_uses_asr_text_to_resolve_specific_command(
     asr_text: str,
     command_key: str,
     event_type: str,
@@ -248,7 +249,7 @@ def test_model_k_stay_uses_asr_text_to_resolve_specific_command(
         "STAY",
         "DO",
         asr_text=asr_text,
-        source="rkllm_model_k",
+        source="rkllm",
     )
 
     assert [event["event_type"] for event in events] == [
@@ -260,7 +261,7 @@ def test_model_k_stay_uses_asr_text_to_resolve_specific_command(
     assert not events[1]["should_trigger_behavior_tree"]
 
 
-def test_model_k_find_query_requires_supported_object_for_specific_event() -> None:
+def test_model_intent_find_query_requires_supported_object_for_specific_event() -> None:
     matched_slots = [
         {"key": "object_name", "value": "dog toy ball"},
         {"key": "object_mention", "value": "球"},
@@ -271,7 +272,7 @@ def test_model_k_find_query_requires_supported_object_for_specific_event() -> No
         "FIND_TOY",
         "QUERY",
         asr_text="看看那个球在哪里",
-        source="rkllm_model_k",
+        source="rkllm",
         extra_slots=matched_slots,
     )
     unsupported = route_classification_events(
@@ -279,7 +280,7 @@ def test_model_k_find_query_requires_supported_object_for_specific_event() -> No
         "FIND_TOY",
         "QUERY",
         asr_text="看看那个布偶娃娃在哪里",
-        source="rkllm_model_k",
+        source="rkllm",
         extra_slots=[
             {"key": "object_name", "value": "NONE"},
             {"key": "object_mention", "value": "布偶娃娃"},
@@ -304,13 +305,13 @@ def test_model_k_find_query_requires_supported_object_for_specific_event() -> No
     ] == "NONE"
 
 
-def test_model_k_fetch_do_with_supported_object_routes_specific_then_known() -> None:
+def test_model_intent_fetch_do_with_supported_object_routes_specific_then_known() -> None:
     events = route_classification_events(
         "NONE",
         "FETCH",
         "DO",
         asr_text="把球捡回来",
-        source="rkllm_model_k",
+        source="rkllm",
         extra_slots=[
             {"key": "object_name", "value": "dog toy ball"},
             {"key": "object_mention", "value": "球"},
@@ -326,20 +327,20 @@ def test_model_k_fetch_do_with_supported_object_routes_specific_then_known() -> 
     assert not events[1]["should_trigger_behavior_tree"]
 
 
-def test_model_k_play_route_is_deduplicated_and_none_routes_neutral() -> None:
+def test_model_intent_play_route_is_deduplicated_and_none_routes_neutral() -> None:
     playful = route_classification_events(
         "PLAYFUL",
         "PLAY",
         "DO",
         asr_text="来玩呀",
-        source="rkllm_model_k",
+        source="rkllm",
     )
     oos = route_classification_events(
         "NONE",
         "NONE",
         "NONE",
         asr_text="读一下消息",
-        source="rkllm_model_k",
+        source="rkllm",
     )
 
     assert [event["event_type"] for event in playful] == [

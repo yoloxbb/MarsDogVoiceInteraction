@@ -163,7 +163,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 | `providers.asr` | Paraformer ASR |
 | `providers.speaker` | 声纹模型和阈值 |
 | `command_lexicon` | 完整产品词库（116 条源数据/81 个路由组/155 条标准词句/1550 条受控扩展/19 组核心子集）开关和目录路径 |
-| `providers.intent_*` | Model K 优先、三轴兼容规则回退 |
+| `providers.intent_*` | Model Intent 优先、三轴兼容规则回退 |
 
 配置文件中的文件和目录均使用相对于 YAML 所在目录的路径：模型默认通过
 `../../models` 指向项目同级的 `models/`，注册数据通过 `../data` 指向本项目
@@ -185,7 +185,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 - FOLLOW 事件只发布一次有效指令，且会话结束必有 idle 状态事件。
 - 19 组核心目录指令按顺序发布不可执行的 `EVT_VOICE_COMMAND_KNOWN` 摘要和可执行的
   具体事件；行为树只能用具体事件触发动作，不能把摘要再次当动作候选。
-- Model K `SOCIAL|INTENT|CONTROL` 先路由业务大类；命中显式动作白名单时按“社交
+- Model Intent `SOCIAL|INTENT|CONTROL` 先路由业务大类；命中显式动作白名单时按“社交
   大类 → 可执行具体动作 → `EVT_VOICE_COMMAND_KNOWN` 摘要”发布。只有具体动作事件
   可执行；大类和摘要不可执行。`NONE|NONE|NONE` 发布不可执行的
   `EVT_VOICE_NEUTRAL`。

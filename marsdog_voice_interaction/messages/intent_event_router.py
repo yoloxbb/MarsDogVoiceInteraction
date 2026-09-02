@@ -1,4 +1,4 @@
-"""Route Model K classifications to downstream business events.
+"""Route Model Intent classifications to downstream business events.
 
 Every valid classification produces one or more coarse semantic events.  A
 small explicit allowlist may additionally authorize an unambiguous concrete
@@ -271,7 +271,7 @@ def route_classification_events(
     language: str = "zh",
     extra_slots: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build ordered business events for one validated Model K result."""
+    """Build ordered business events for one validated Model Intent result."""
 
     base = classification_to_event(
         social,

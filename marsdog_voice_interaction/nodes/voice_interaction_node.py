@@ -84,7 +84,7 @@ _UNKNOWN_INTENT = {
     "raw_nlu_tag": "",
     "dispatch_role": "diagnostic",
     "slots": [
-        {"key": "reason", "value": "no_valid_model_k_result"},
+        {"key": "reason", "value": "no_valid_rkllm_result"},
     ],
     "is_executable": False,
     "should_trigger_behavior_tree": False,
@@ -1476,7 +1476,7 @@ class VoiceInteractionNode(Node):
                 str(parsed_intent.get("control", "NONE")),
                 asr_text=text,
                 source=str(
-                    parsed_intent.get("intent_source", "rkllm_model_k")
+                    parsed_intent.get("intent_source", "rkllm")
                 ),
                 confidence=float(
                     parsed_intent.get("intent_confidence", 0.0)

@@ -1,6 +1,6 @@
-"""Model K ``SOCIAL|INTENT|CONTROL`` protocol helpers.
+"""Model Intent ``SOCIAL|INTENT|CONTROL`` protocol helpers.
 
-The Model K output is a semantic classification.  It is deliberately kept
+The Model Intent output is a semantic classification.  It is deliberately kept
 separate from the deterministic command catalog: a model label only authorizes
 a concrete robot action when the downstream router contains an explicit,
 unambiguous allowlist entry.
@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 
-NLU_PROTOCOL = "model_k_social_intent_control_v1"
+NLU_PROTOCOL = "rkllm_social_intent_control_v1"
 
 SOCIAL_LABELS = frozenset(
     {
@@ -129,7 +129,7 @@ def validate_intent_combination(
 
 
 def parse_intent_tag(value: Any) -> tuple[str, str, str] | None:
-    """Strictly parse a Model K response; surrounding prose is rejected."""
+    """Strictly parse a Model Intent response; surrounding prose is rejected."""
 
     if not isinstance(value, str):
         return None

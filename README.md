@@ -9,7 +9,7 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
                           ├→ Paraformer ASR ───────┼→ 唯一来源仲裁
                           │                        ├→ KWS 结果组
                           │                        └→ ASR → 完整产品词库
-                          │                                  └→ 未命中 → Model K / 兼容规则
+                          │                                  └→ 未命中 → Model Intent / 兼容规则
                           └→ 3D-Speaker 声纹识别 → 身份事件
                                                 ↓
                                   /perception/audio_event
@@ -32,7 +32,7 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
   中文词/句；每条另有 10 个受控扩展，共 1705 个精确匹配入口。19 组核心指令命中后先发布不可执行的
   `EVT_VOICE_COMMAND_KNOWN` 识别摘要，再发布目录指定的可执行
   `EVT_VOICE_COMMAND_*`；其他目录项仍按各自事件发布。所有目录命中均跳过意图模型。
-- 目录外文本使用新 Model K `SOCIAL|INTENT|CONTROL` 三轴协议。模型结果先发布业务
+- 目录外文本使用 Model Intent `SOCIAL|INTENT|CONTROL` 三轴协议。模型结果先发布业务
   大类事件；命中显式、无歧义的动作白名单时，再按“社交事件 → 可执行具体动作 →
   `EVT_VOICE_COMMAND_KNOWN` 摘要”发布，未进入白名单的命令仍不可执行。
   `NONE|NONE|NONE` 固定发布不可执行的 `EVT_VOICE_NEUTRAL`。
@@ -93,9 +93,9 @@ uv sync --extra dev
 | KWS | `wakeup/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/` |
 | ASR | `asr/sherpa-onnx-paraformer-zh-2024-03-09/` |
 | Speaker | `speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` |
-| RKLLM Model K | `llm/qwen2_5_5b_rk3588_260829_w8a8.rkllm` |
+| RKLLM Model Intent | `llm/qwen2_5_5b_rk3588_260829_w8a8.rkllm` |
 
-当前 Model K 文件 SHA-256 为
+当前 Model Intent 文件 SHA-256 为
 `3c316cede8dcc40c6f019f7a2403f56c2d567eeacc29f410b656eb02981ca0b1`；测试和部署
 应同时核对文件名与校验值，避免板子仍加载旧模型。
 

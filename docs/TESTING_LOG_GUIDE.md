@@ -48,7 +48,7 @@ Voice 日志不能证明动作已经执行。
 - 19 组核心训练指令是完整词库的子集。当前行为树已有 11 个核心动作映射；
   `EVT_VOICE_CALL_NAME` 已有路由，`PRAISE/SCOLD` 进入情绪链路。按当前源码可确认
   81 个路由组中 14 个有现成下游入口，其余 67 个仍需 Tree/Action 补齐映射。
-- 目录外文本使用 Model K `SOCIAL|INTENT|CONTROL` 三轴协议，模型文件为
+- 目录外文本使用 Model Intent `SOCIAL|INTENT|CONTROL` 三轴协议，模型文件为
   `qwen2_5_5b_rk3588_260829_w8a8.rkllm`。模型先产生不可执行的业务大类；19 个
   无歧义白名单组合会额外产生一个可执行具体动作及不可执行 KNOWN 摘要。不能用模型
   INTENT 数量替代词库覆盖率。
@@ -90,7 +90,7 @@ Voice 日志不能证明动作已经执行。
 | 6 | 对已有中英文 KWS 逐条执行，并对完整中文 ASR 标准词/句与扩展分层执行；两类覆盖率分开报告。 | KWS 先看 `stage=kws result=candidate`，再看 `recognition_arbitration selected_source/reason` 及最终事件来源；目录看 `intent_source=command_lexicon` 和 `match_strategy`。 | KWS 按 26 条配置逐条验收，不将“26 条关键词”误写成 26 组。短指令可选择 KWS；长句含关键词必须选择 ASR；两条链路不得同时发布业务结果。目录按 155 条标准入口及 1550 条自动扩展验收。138 条英文参考项当前不做确定性直发验收。 |
 | 7 | 在一个会话内连续播放 3 条指令，每条之间保留正常句尾静音；既测试三条不同指令，也测试同一指令连续 3 次。 | 一个 `interaction_id` 下出现 3 个不同 `utterance_id`；逐句检查 `recognition_arbitration`、`utterance_complete`、目录匹配和最终事件。 | 三句均正确；每句只允许 KWS 或 ASR 链路中的一个来源发布业务结果。核心命令允许 KNOWN 摘要加具体事件，两者属于同一个结果组。 |
 | 8 | 使用相似音、否定反转和未配置的前后缀探索拒识，例如“官过来”“你要不要过来”“不要坐下”。 | 记录 KWS、ASR、`command_lexicon matched/no_match`、`match_strategy`、意图阶段和任何可执行事件。 | 目录只能命中标准词/句或配置明确生成的扩展，不能因子串命中；“请你坐下”应命中，但“不要坐下”“请你不要坐下”不得命中 SIT。流式 KWS 的相似音拒识仍属 `KNOWN-GAP`。 |
-| 9 | 播放陌生词，并在最后一次有效 ASR 文本后等待至少 10 秒。 | 先看到 `command_lexicon result=no_match`，再看 Model K 三轴及 `event_types`，最后出现同会话 idle 和 `interaction_end`。 | 合法 OOS `NONE|NONE|NONE` 发布不可执行的 `EVT_VOICE_NEUTRAL`；只有模型与规则均无有效协议结果才发非执行 UNKNOWN 诊断。不发布可执行动作、不崩溃，约 10 秒后待机。 |
+| 9 | 播放陌生词，并在最后一次有效 ASR 文本后等待至少 10 秒。 | 先看到 `command_lexicon result=no_match`，再看 Model Intent 三轴及 `event_types`，最后出现同会话 idle 和 `interaction_end`。 | 合法 OOS `NONE|NONE|NONE` 发布不可执行的 `EVT_VOICE_NEUTRAL`；只有模型与规则均无有效协议结果才发非执行 UNKNOWN 诊断。不发布可执行动作、不崩溃，约 10 秒后待机。 |
 
 ### ASR 同音误识别由 KWS 正确路由时如何记分
 
@@ -154,7 +154,7 @@ VOICE_TRACE {"record":"interaction_end"...}
 `command_lexicon result=matched`，最终 `command_id/event_type` 符合目录，并且期间
 没有发布错误的可执行动作。核心目录必须有 KNOWN 摘要，且摘要
 `should_trigger_behavior_tree=false`。ASR 目录被选中后不应再出现该句 `stage=intent`；
-KWS 被选中时不应再发布 `command_lexicon` 或 Model K 的业务事件。只有
+KWS 被选中时不应再发布 `command_lexicon` 或 Model Intent 的业务事件。只有
 `speech.asr_text` 正确但目录未命中或事件错误，仍记为失败。各组必须分别达到门限。
 目录外文本使用 `social/intent/control` 意图判定表。
 
@@ -271,13 +271,13 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `command_lexicon` | `matched/no_match/unavailable` | `command_key/event_type/catalog_version/catalog_phrase/matched_phrase/match_strategy/expansion_profile/expansion_rule/social/intent/control/action_name/source_rows/core/emit_known_event` | 一次规范化及精确哈希查找的总耗时，`latency_ms` 保留三位小数以记录微秒级查找；原词为 `catalog_exact`，受控扩展为 `rule_expansion`；核心匹配要求 `emit_known_event=true`；`matched` 后跳过意图模型，`no_match` 后才进入 `intent`。 |
 | `recognition_arbitration` | `kws_selected/asr_selected/none_selected` | `selected_source/reason/asr_text/asr_text_length/asr_is_short/kws_candidate_count/kws_candidate_keys/kws_candidate_event_types/catalog_event_type` | 纯规则仲裁函数的耗时。常见 `reason` 为 `no_kws_candidate/short_asr_catalog_agrees/short_asr_kws_preferred/long_asr_text/asr_catalog_conflicts_with_kws/empty_asr_single_candidate/multiple_kws_candidates`。 |
 | `object_target` | `matched/unsupported/unavailable` | `object_name/object_mention/object_matched_alias/object_catalog_version` | 只在 `FETCH/FIND_TOY` 出现。对 ASR 原文进行最长别名优先匹配；只有 `matched` 允许生成可执行 FETCH。 |
-| `intent` | `parsed/fallback_unknown` | `event_types/social/intent/control/intent_source` | `_parse_intent()` 与事件路由总耗时；可能是 Model K，或模型无有效输出后兼容规则的累计时间。`NONE|NONE|NONE` 的 `event_types` 应为 `["EVT_VOICE_NEUTRAL"]`。 |
+| `intent` | `parsed/fallback_unknown` | `event_types/social/intent/control/intent_source` | `_parse_intent()` 与事件路由总耗时；可能是 Model Intent，或模型无有效输出后兼容规则的累计时间。`NONE|NONE|NONE` 的 `event_types` 应为 `["EVT_VOICE_NEUTRAL"]`。 |
 
 补充判定规则：
 
 - `audio_duration_ms` 是交给 ASR/声纹的结果音频长度，不是 VAD 阶段耗时。
-- `intent_source` 常见值为 `command_lexicon/kws/rkllm_model_k/`
-  `rule_model_k_compatible/invalid_protocol_fallback`。其中
+- `intent_source` 常见值为 `command_lexicon/kws/rkllm/`
+  `rule_rkllm_compatible/invalid_protocol_fallback`。其中
   `command_lexicon` 和 `kws` 都是模型外的确定性来源。
 - 当前 `speaker_confidence` **不是真实余弦相似度**：匹配成功通常为配置阈值加
   `0.3`，未匹配为 `0.0`。它只能辅助判断 `matched/unknown`，不能用于声纹阈值标定、
@@ -296,16 +296,16 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `wake_confidence` / `wake_score_raw` | number | 归一化唤醒置信度和硬件原始分数；原始分数只在完整 `payload` 中保证可见。 |
 | `asr_text` / `language` | string | 清洗后的 ASR 文本和语言标识。 |
 | `speaker_id` / `speaker_confidence` | string / number | 固定身份 `owner`、`family_member_1`～`family_member_4` 或 `unknown`，以及当前实现的匹配指示值。 |
-| `social` / `intent` / `control` | string | Model K 正式三轴；目录核心指令也携带规范三轴，例如 QUIET 为 `NONE|BARK|STOP`。 |
+| `social` / `intent` / `control` | string | Model Intent 正式三轴；目录核心指令也携带规范三轴，例如 QUIET 为 `NONE|BARK|STOP`。 |
 | `emotion` / `action` | string | 兼容字段；模型事件分别镜像 `social/intent`，具体目录事件的 `action` 保留 `command_key`。新测试不得把它们当正式三轴。 |
 | `command_id` / `intent_category` / `intent_source` | string | 命令标识、分类类别及决策来源；目录事件要求 `command_id` 等于目录声明值、`intent_source=command_lexicon`。 |
 | `intent_confidence` | number | 意图 Provider 给出的置信度；不能与声纹或唤醒置信度混用。 |
-| `nlu_protocol` / `raw_nlu_tag` | string | 协议版本及严格校验后的完整三轴文本。Model K 当前不提供校准置信度，不能用 `intent_confidence=0.0` 判失败。 |
+| `nlu_protocol` / `raw_nlu_tag` | string | 协议版本及严格校验后的完整三轴文本。Model Intent 当前不提供校准置信度，不能用 `intent_confidence=0.0` 判失败。 |
 | `specific_event_type` / `dispatch_role` | string | KNOWN 摘要指向的具体事件，以及该事件是摘要、具体指令、语义分类还是诊断。 |
 | `slots` | array | `[{"key":"...","value":"..."}]`；找物目标使用规范视觉类别 `object_name`。未命中为 `NONE`，同时检查 `object_mention/object_match_source`。 |
 | `is_executable` | bool | 当前事件是否表示可执行意图；完整值在 `payload` 中。 |
 | `should_trigger_behavior_tree` | bool | 可执行指令为 `true`；`PRAISE/SCOLD` 为 `false` 并进入情绪链路。Voice 发布成功不等于动作已经完成。 |
-| `latency_ms` | number | 事件对应的决策阶段耗时：KWS 选中事件为 VAD 返回后到最终仲裁发布，目录事件为词库查找，Model K 事件为意图解析和路由；身份/状态等无独立决策计时的事件可为 0。KWS 首次候选耗时见 slot `kws_candidate_latency_ms` 或 `stage=kws`。它不代表完整端到端耗时。 |
+| `latency_ms` | number | 事件对应的决策阶段耗时：KWS 选中事件为 VAD 返回后到最终仲裁发布，目录事件为词库查找，Model Intent 事件为意图解析和路由；身份/状态等无独立决策计时的事件可为 0。KWS 首次候选耗时见 slot `kws_candidate_latency_ms` 或 `stage=kws`。它不代表完整端到端耗时。 |
 | `payload` | object | 实际发布到 ROS2 Topic 的完整 schema v2 JSON，是事件字段的权威日志副本。 |
 
 完整 `payload` 还包含 `schema_version`、`header`、`response_text`、`danger_type`、
@@ -328,7 +328,7 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 ### 4.6 总耗时的正确计算
 
 `event_publish.latency_ms` 是产生该事件的决策阶段耗时；ASR 目录摘要和具体事件应等于
-同句 `command_lexicon.latency_ms`，Model K 大类、白名单具体事件和 KNOWN 摘要应等于
+同句 `command_lexicon.latency_ms`，Model Intent 大类、白名单具体事件和 KNOWN 摘要应等于
 同句 `intent.latency_ms`。
 KWS 被选中时，事件的 `latency_ms` 是从 VAD 返回后进入处理到最终仲裁发布的耗时；
 首次 KWS 候选耗时看事件 slot `kws_candidate_latency_ms` 或同句 `stage=kws`。
@@ -453,7 +453,7 @@ ros2 service type /perception/voice/task
 模式、配置路径、Provider 或 API 状态不符合预期时，应停止测试并记为环境/启动失败，
 不能继续出具功能 PASS。出现多个 `/voice_interaction` 节点时也必须先清理重复进程。
 
-正式链路还要核对 Model K 文件：
+正式链路还要核对 Model Intent 文件：
 
 ```bash
 sha256sum /path/to/models/llm/qwen2_5_5b_rk3588_260829_w8a8.rkllm

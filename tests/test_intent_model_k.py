@@ -14,7 +14,7 @@ from marsdog_voice_interaction.utils.config_loader import load_config
 ROOT = Path(__file__).parents[1]
 
 
-def test_model_k_prompt_matches_fine_tuning_messages() -> None:
+def test_model_intent_prompt_matches_fine_tuning_messages() -> None:
     assert DEFAULT_SYSTEM_PROMPT == (
         "Classify the owner's MasDog utterance. "
         "Return exactly one label in SOCIAL|INTENT|CONTROL format and nothing else."
@@ -30,7 +30,7 @@ def test_model_k_prompt_matches_fine_tuning_messages() -> None:
     )
 
 
-def test_model_k_output_parser_rejects_prose_and_illegal_combinations() -> None:
+def test_model_intent_output_parser_rejects_prose_and_illegal_combinations() -> None:
     assert parse_classification_output("NONE|STAND|DO\n") == (
         "NONE|STAND|DO"
     )
@@ -48,7 +48,7 @@ def test_model_k_output_parser_rejects_prose_and_illegal_combinations() -> None:
         parse_classification_output("NONE|DOG_STATUS|DO")
 
 
-def test_production_config_selects_the_new_model_k_artifact() -> None:
+def test_production_config_selects_the_rkllm_artifact() -> None:
     config = load_config(ROOT / "config" / "voice.yaml")
     intent_config = config["providers"]["intent_llm"]["config"]
 

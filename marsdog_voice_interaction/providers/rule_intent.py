@@ -1,4 +1,4 @@
-"""Rule fallback for the Model K SOCIAL|INTENT|CONTROL protocol."""
+"""Rule fallback for the RKLLM SOCIAL|INTENT|CONTROL protocol."""
 
 from __future__ import annotations
 
@@ -200,7 +200,7 @@ class RuleIntentProvider(BaseProvider):
                     intent=intent,
                     control=control,
                     asr_text=text,
-                    source="rule_model_k_compatible",
+                    source="rule_rkllm_compatible",
                     confidence=0.95,
                     extra_slots=slots_fn(match),
                 )

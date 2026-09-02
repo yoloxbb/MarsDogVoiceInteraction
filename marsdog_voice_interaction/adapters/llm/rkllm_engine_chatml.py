@@ -407,7 +407,7 @@ def parse_classification_output(text: str) -> str:
     """校验完整三轴输出；不从解释性文本中截取标签。"""
     parsed = parse_intent_tag(text)
     if parsed is None:
-        raise ValueError(f"invalid Model K classification: {text!r}")
+        raise ValueError(f"invalid Model Intent classification: {text!r}")
     social, intent, control = parsed
     return f"{social}|{intent}|{control}"
 

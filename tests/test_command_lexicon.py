@@ -396,7 +396,7 @@ class _KwsRouteHarness:
             "NONE",
             "NONE",
             asr_text=text,
-            source="rkllm_model_k",
+            source="rkllm",
         )
 
 
@@ -757,11 +757,11 @@ class _ModelRouteHarness(_DirectRouteHarness):
             intent,
             control,
             asr_text=text,
-            source="rkllm_model_k",
+            source="rkllm",
         )
 
 
-def test_catalog_miss_routes_model_k_to_social_specific_and_summary() -> None:
+def test_catalog_miss_routes_model_intent_to_social_specific_and_summary() -> None:
     node = _ModelRouteHarness("真乖请坐好", ("PRAISE", "SIT", "DO"))
 
     assert node._process_speech(
@@ -771,7 +771,7 @@ def test_catalog_miss_routes_model_k_to_social_specific_and_summary() -> None:
 
     model_events = [
         event for event in node.published
-        if event.get("intent_source") == "rkllm_model_k"
+        if event.get("intent_source") == "rkllm"
     ]
     assert node.intent_called
     assert [event["event_type"] for event in model_events] == [
@@ -798,7 +798,7 @@ def test_catalog_miss_with_all_none_publishes_neutral_event() -> None:
 
     model_events = [
         event for event in node.published
-        if event.get("intent_source") == "rkllm_model_k"
+        if event.get("intent_source") == "rkllm"
     ]
     assert [event["event_type"] for event in model_events] == [
         "EVT_VOICE_NEUTRAL"
@@ -832,11 +832,11 @@ def test_model_find_query_routes_only_supported_detector_target() -> None:
 
     supported_events = [
         event for event in supported.published
-        if event.get("intent_source") == "rkllm_model_k"
+        if event.get("intent_source") == "rkllm"
     ]
     unsupported_events = [
         event for event in unsupported.published
-        if event.get("intent_source") == "rkllm_model_k"
+        if event.get("intent_source") == "rkllm"
     ]
     assert [event["event_type"] for event in supported_events] == [
         "EVT_VOICE_COMMAND_FETCH",

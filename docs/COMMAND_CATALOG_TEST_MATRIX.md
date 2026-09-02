@@ -21,6 +21,67 @@
   `recognition_arbitration` 选择 KWS 或 ASR 目录作为唯一结果来源；核心命令被选中后
   才发布这两条事件。
 
+### 1.1 测试日志字段速查与路径判定
+
+测试时不能只看 `event_type`。词库、KWS 和 Model Intent 都可能发布同名的
+`EVT_VOICE_COMMAND_*`，必须先用同一个 `utterance_id` 关联本句话的全部日志，再联合
+检查以下字段：
+
+| 日志位置 | 重点字段 | 用途 |
+|---|---|---|
+| 所有 `VOICE_TRACE` | `record/interaction_id/utterance_id` | `utterance_id` 是单句主键；不得把相邻两句话的阶段或事件拼在一起。 |
+| `stage_complete stage=command_lexicon` | `result/command_key/event_type/match_strategy/catalog_phrase/matched_phrase/core/emit_known_event/source_rows` | 判断是否命中确定性词库、命中标准词还是受控扩展，以及是否应附带 KNOWN 摘要。 |
+| `stage_complete stage=kws` | `result/command_key/event_type/candidate_count/published_event_types` | `result=candidate` 只表示缓存候选；此时 `published_event_types=[]`，不能据此判定业务事件已发布。 |
+| `stage_complete stage=recognition_arbitration` | `result/selected_source/reason/kws_candidate_count/catalog_event_type` | 判断本句最终由 KWS 还是 ASR 链路取得业务结果；这是区分“候选”和“最终来源”的依据。 |
+| `stage_complete stage=intent` | `result/event_types/social/intent/control/intent_source` | 只有词库未命中并选择 ASR 链路后才应出现；用于判定 Model Intent 或兼容规则路径。 |
+| `event_publish` | `event_type/intent_source/dispatch_role/specific_event_type/command_id/raw_nlu_tag/is_executable/should_trigger_behavior_tree/slots` | 判断最终实际发布了什么、来源是什么、属于摘要还是具体事件、是否允许进入行为树。 |
+| `utterance_complete` | `result/published_event_types/event_types/selected_source` | 核对本句最终事件组的数量、顺序和结束类型，防止漏发或重复发布。 |
+
+其中最关键的四个字段是：
+
+- `intent_source`：最终决策来源，常见为 `command_lexicon`、`kws`、
+  `rkllm`、`rule_rkllm_compatible`、`invalid_protocol_fallback`；
+- `dispatch_role`：事件职责，`recognition_summary` 是词库/KWS 的 KNOWN 识别摘要，
+  `specific_command` 是具体命令，`semantic_classification` 是 Model Intent 语义分类，
+  `diagnostic` 是无有效协议结果时的诊断事件；
+- `specific_event_type`：摘要所指向的具体事件；比较 KNOWN 与具体事件时，两者应指向
+  同一个 `EVT_VOICE_COMMAND_*`；
+- `should_trigger_behavior_tree`：是否允许进入行为树。KNOWN 摘要必须为 `false`；即使
+  事件名正确，也不能仅凭 `event_type` 推断它可执行。
+
+#### 三条识别路径如何区分
+
+| 路径 | 必须看到的阶段证据 | 最终事件证据 | 不应出现 |
+|---|---|---|---|
+| ASR 确定性词库 | `command_lexicon result=matched`；`recognition_arbitration result=asr_selected selected_source=asr_pipeline` | `event_publish.intent_source=command_lexicon`；`event_publish.slots.match_strategy=catalog_exact` 或 `rule_expansion` | 同一句 `stage=intent` |
+| KWS 最终胜出 | `kws result=candidate`；`recognition_arbitration result=kws_selected selected_source=kws` | 最终业务事件全部为 `intent_source=kws`；`utterance_complete result=published_kws_selected` | ASR/词库或 Model Intent 再发布第二组业务结果 |
+| Model Intent / 兼容规则意图 | `command_lexicon result=no_match`；`recognition_arbitration result=asr_selected selected_source=asr_pipeline`；随后 `stage=intent` | `intent_source=rkllm` 或 `rule_rkllm_compatible`，并按 `social/intent/control/raw_nlu_tag/event_types` 验收 | 把模型事件记成词库命中 |
+
+`EVT_VOICE_COMMAND_UNKNOWN` 不是正常词库事件。只有 `stage=intent result=fallback_unknown`、
+`intent_source=invalid_protocol_fallback`、`dispatch_role=diagnostic` 且
+`should_trigger_behavior_tree=false` 时，才是合法的非执行诊断结果。
+
+注意：`command_lexicon result=matched` 本身仍不足以证明最终走词库。例如短指令同时
+命中 KWS 和词库时，仲裁可能选择 KWS；最终归属必须以
+`recognition_arbitration.selected_source` 和 `event_publish.intent_source` 为准。
+
+#### 哪些结果会同时发布 `EVT_VOICE_COMMAND_KNOWN`
+
+这里的“同时携带”是指同一个 `utterance_id` 下额外发布一条独立的
+`EVT_VOICE_COMMAND_KNOWN`，不是在具体事件内部增加一个同名字段。
+
+| 场景 | 事件顺序 | KNOWN 的关键字段 | 具体事件的关键字段 |
+|---|---|---|---|
+| 核心词库：`core=true/emit_known_event=true` | `KNOWN → 目录具体事件` | `intent_source=command_lexicon`、`dispatch_role=recognition_summary`、`specific_event_type=目录事件`、不可执行 | `intent_source=command_lexicon`、`dispatch_role=specific_command`；是否执行以 `should_trigger_behavior_tree` 为准 |
+| 核心命令由 KWS 选中，且对应目录项 `emit_known_event=true` | `KNOWN → KWS 具体事件` | `intent_source=kws`、`dispatch_role=recognition_summary`、不可执行 | `intent_source=kws`、`dispatch_role=specific_command`；`utterance_complete result=published_kws_selected` |
+| Model Intent 命中显式动作白名单 | 可选社交大类事件 `→ 具体事件 → KNOWN` | `intent_source=rkllm` 或兼容规则来源、`dispatch_role=semantic_classification`、不可执行 | `dispatch_role=specific_command`、`should_trigger_behavior_tree=true` |
+| Model Intent 得到有命令语义但无法安全落到具体动作 | 仅 `KNOWN`，或社交大类事件 `→ KNOWN` | `dispatch_role=semantic_classification`、不可执行；`specific_event_type` 可为空 | 不应伪造可执行具体事件 |
+
+以下情况通常不附带 KNOWN：`core=false/emit_known_event=false` 的普通词库事件，以及纯
+社交、QUERY、`NONE|NONE|NONE` 等 Model Intent 结果。后者分别按对应业务大类、
+`EVT_VOICE_STATUS_CARE` 或 `EVT_VOICE_NEUTRAL` 判定。最终仍应以本句
+`utterance_complete.published_event_types/event_types` 为准，不按事件名称猜测。
+
 ## 2. 单条用例判定
 
 每条用例至少满足：
@@ -51,7 +112,7 @@
    `reason=short_asr_kws_preferred`；
 4. 最终先发布一条不可执行的 `EVT_VOICE_COMMAND_KNOWN`，再发布一条可执行的
    `EVT_VOICE_COMMAND_HIGH_FIVE`，两条事件均属于 KWS 选中的同一结果组，不得重复，
-   且该句不得再进入 Model K 产生另一组业务事件。
+   且该句不得再进入 Model Intent 产生另一组业务事件。
 
 该结果只证明“击掌命令被正确路由”，不能把 `speech.asr_text=机长` 计为 ASR 正确，
 也不能计为 `CAT-029` 的 `catalog_exact` 命中。测试报告应分别记录：ASR 转写单项
@@ -67,14 +128,14 @@
 
 扩展命中时必须同时满足：
 
-1. `command_key/event_type` 与对应标准词/句完全相同，并跳过 Model K。
+1. `command_key/event_type` 与对应标准词/句完全相同，并跳过 Model Intent。
 2. `stage_complete(stage=command_lexicon)` 输出
    `match_strategy=rule_expansion/catalog_phrase/matched_phrase/expansion_profile/expansion_rule`。
 3. KNOWN 摘要和具体事件的 `slots` 保留同样的规则取证字段；原词命中则为
    `match_strategy=catalog_exact`，且没有 `expansion_profile/expansion_rule`。
 4. 自动覆盖测试必须验证 `155 × 10 = 1550` 条扩展全部可加载且无路由冲突；人工
    验收至少从每个 profile 抽取样本，并覆盖 19 组核心指令。
-5. 未在规则中生成的句子继续走 Model K。例如“不要坐下”“请你不要坐下”不得命中
+5. 未在规则中生成的句子继续走 Model Intent。例如“不要坐下”“请你不要坐下”不得命中
    `SIT`；“请你坐下”应按 `command/polite_please_you` 命中 `SIT`。
 
 典型对齐样例：
@@ -127,7 +188,7 @@ stage_complete stage=intent result=parsed
 ```
 
 如果原句或受控扩展已命中目录，则应按第 4 节的具体目录事件判定，不能拿目录结果
-冒充 Model K 准确率。Model K 的正式输出是 `SOCIAL|INTENT|CONTROL`；随后由开发侧
+冒充 Model Intent 准确率。Model Intent 的正式输出是 `SOCIAL|INTENT|CONTROL`；随后由开发侧
 固定规则映射成下表事件。业务大类和 `EVT_VOICE_COMMAND_KNOWN` 摘要均为
 `dispatch_role=semantic_classification`、`should_trigger_behavior_tree=false`。只有命中
 第 3.2 节显式动作白名单时，才额外发布
@@ -233,7 +294,7 @@ object_catalog_version=<目录版本>
 
 ### 3.4 意图识别事件组示例表
 
-下表集中给出 Model K 三轴标签经过开发侧固定路由后的最终事件。`BT` 一列与“发布
+下表集中给出 Model Intent 三轴标签经过开发侧固定路由后的最终事件。`BT` 一列与“发布
 事件（按顺序）”逐项对应：`是` 表示该事件允许进入行为树，`否` 表示只传递语义或
 状态。一个事件组内的所有事件必须共用同一 `interaction_id/utterance_id` 和
 `raw_nlu_tag`。
@@ -264,7 +325,7 @@ object_catalog_version=<目录版本>
 
 ### 3.5 产品示例的相似句测试表
 
-下列“测试相似句”均已确认不在当前 1705 个确定性匹配入口中，适合直接验证 Model K。
+下列“测试相似句”均已确认不在当前 1705 个确定性匹配入口中，适合直接验证 Model Intent。
 测试团队还应围绕每行自行补充同义改写，但期望标签必须遵守训练标注协议，不能仅凭
 最终事件反推模型标签。日志必须同时核对 `raw_nlu_tag` 和按序发布的 `event_types`。
 
@@ -326,13 +387,13 @@ object_catalog_version=<目录版本>
 
 ### 3.6 结果判定要求
 
-每条 Model K 用例必须同时满足：
+每条 Model Intent 用例必须同时满足：
 
 1. `stage=intent result=parsed`，且 `social/intent/control` 与期望标签逐轴一致；
 2. `event_publish.raw_nlu_tag` 与期望完整三轴一致，不能只检查某一个轴；
 3. `event_types` 的数量和顺序与表格一致，同一大类事件必须去重；
-4. 所有模型事件均为 `intent_source=rkllm_model_k`（模型不可用并明确测试规则回退时才
-   允许 `rule_model_k_compatible`）；只有白名单具体事件允许
+4. 所有模型事件均为 `intent_source=rkllm`（模型不可用并明确测试规则回退时才
+   允许 `rule_rkllm_compatible`）；只有白名单具体事件允许
    `should_trigger_behavior_tree=true`，业务大类和 KNOWN 摘要必须为 `false`；
 5. 合法 `NONE|NONE|NONE` 应发布一条不可执行的 `EVT_VOICE_NEUTRAL`；只有模型和规则均
    没有有效协议结果时才允许非执行诊断事件 `EVT_VOICE_COMMAND_UNKNOWN`。
