@@ -11,6 +11,20 @@ zh uàn q uān @SPIN
 h uí l ái @COME
 t ǔ d iào @DROP
 zh uāng s ǐ @PLAY_DEAD
+z ǒu @WALK
+l ái @COME
+z uò @SIT
+h uí j iā @GO_HOME
+t uì h òu @BACK_UP
+k ào j ìn d iǎn @APPROACH
+q ǐ l ái @STAND_UP
+d ūn x ià @SIT
+t ǎng x ià @LIE_DOWN
+zh àn h ǎo @STAND_STILL
+b ié d òng @HOLD_POSITION
+ān j ìng @QUIET
+f àng x ià @DROP
+zh āng z uǐ @DROP
 K AH1 M HH IY1 R @COME
 SH EY1 K HH AE1 N D Z @SHAKE_HAND
 HH AY1 F AY1 V @HIGH_FIVE

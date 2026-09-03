@@ -812,29 +812,53 @@ class SpeakerEnrollmentManager:
         path = _SPEAKERS_DIR / normalized / "centroid.npy"
         return np.load(path) if path.exists() else None
 
-    def sync_to_provider(self, provider: Any) -> int:
-        manager = getattr(provider, "_manager", None)
-        if manager is None:
-            mock_store = getattr(provider, "_enrolled", None)
-            if isinstance(mock_store, dict):
-                stored_names = set(self.list_enrolled_speakers())
-                for name in set(mock_store) - stored_names:
-                    mock_store.pop(name, None)
-                for name in stored_names:
-                    mock_store[name] = {"migrated": True}
-                return len(mock_store)
-            return 0
-        count = 0
-        stored_names = set(self.list_enrolled_speakers())
-        existing_names = set(getattr(manager, "all_speakers", []))
-        for name in existing_names - stored_names:
-            manager.remove(name=name)
-        for name in stored_names:
-            centroid = self.get_speaker_centroid(name)
-            if centroid is None:
+    def get_speaker_templates(self, name: str) -> list[np.ndarray]:
+        """Return every per-sample embedding for a speaker (multi-template)."""
+        try:
+            normalized = validate_speaker_identity(name)
+        except ValueError:
+            return []
+        directory = _SPEAKERS_DIR / normalized
+        if not directory.exists():
+            return []
+        values: list[np.ndarray] = []
+        for sample_id in _speaker_sample_ids(directory):
+            path = directory / f"{sample_id:03d}.npy"
+            if not path.exists():
                 continue
-            if name in set(getattr(manager, "all_speakers", [])):
-                manager.remove(name=name)
-            if manager.add(name=name, v=centroid.tolist()):
-                count += 1
-        return count
+            try:
+                values.append(np.asarray(np.load(path), dtype=np.float32))
+            except (OSError, ValueError):
+                continue
+        if not values:
+            centroid = self.get_speaker_centroid(normalized)
+            if centroid is not None:
+                return [np.asarray(centroid, dtype=np.float32)]
+        return values
+
+    def sync_to_provider(self, provider: Any) -> int:
+        """Push every enrolled template into the runtime speaker provider.
+
+        Prefers the multi-template ``set_templates`` interface (real sherpa
+        provider); falls back to the in-memory mock store for test/demo runs.
+        Returns the number of speakers registered.
+        """
+        set_templates = getattr(provider, "set_templates", None)
+        if callable(set_templates):
+            templates: dict[str, list[np.ndarray]] = {}
+            for name in self.list_enrolled_speakers():
+                values = self.get_speaker_templates(name)
+                if values:
+                    templates[name] = values
+            set_templates(templates)
+            return len(templates)
+
+        mock_store = getattr(provider, "_enrolled", None)
+        if isinstance(mock_store, dict):
+            stored_names = set(self.list_enrolled_speakers())
+            for name in set(mock_store) - stored_names:
+                mock_store.pop(name, None)
+            for name in stored_names:
+                mock_store[name] = {"migrated": True}
+            return len(mock_store)
+        return 0

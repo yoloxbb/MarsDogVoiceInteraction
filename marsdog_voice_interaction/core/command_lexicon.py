@@ -35,6 +35,26 @@ def normalize_command_phrase(value: str) -> str:
     return _TRAILING_AND_INLINE_PUNCTUATION.sub("", value).strip().lower()
 
 
+def _pinyin_syllables(text: str) -> tuple[str, ...]:
+    """Return the tone-less pinyin syllables of ``text``.
+
+    Used for homophone-tolerant matching. Degrades to an empty tuple when
+    ``pypinyin`` is unavailable so exact matching still works.
+    """
+    if not text:
+        return ()
+    try:
+        from pypinyin import Style, lazy_pinyin
+    except ImportError:
+        return ()
+    syllables = lazy_pinyin(text, style=Style.NORMAL)
+    return tuple(
+        str(syllable).strip().lower()
+        for syllable in syllables
+        if syllable and str(syllable).strip()
+    )
+
+
 @dataclass(frozen=True)
 class DirectCommandMatch:
     """One exact command-catalog match."""
@@ -227,7 +247,11 @@ class DirectCommandMatch:
 
 
 class CommandLexicon:
-    """Load and exactly match a versioned direct-command catalog."""
+    """Load and match a versioned direct-command catalog.
+
+    ``match`` performs exact hash lookup; ``match_fuzzy`` adds a
+    homophone-tolerant fallback for common ASR homophone/typo errors.
+    """
 
     def __init__(self, catalog_path: str | Path) -> None:
         self.catalog_path = Path(catalog_path).expanduser().resolve()
@@ -280,6 +304,12 @@ class CommandLexicon:
                 )
         self._load_expansions(raw.get("expansion"))
 
+        self._homophones: dict[tuple[str, ...], list[str]] = {}
+        for normalized in self._phrases:
+            syllables = _pinyin_syllables(normalized)
+            if syllables:
+                self._homophones.setdefault(syllables, []).append(normalized)
+
     @property
     def phrase_count(self) -> int:
         """Number of authoritative phrases declared under ``commands``."""
@@ -303,6 +333,33 @@ class CommandLexicon:
             return None
         return replace(template, matched_phrase=text)
 
+    def match_fuzzy(self, text: str) -> DirectCommandMatch | None:
+        """Match exactly, then fall back to homophone matching.
+
+        The fallback returns a catalog phrase whose tone-less pinyin equals
+        the input's pinyin but whose characters differ — this rescues common
+        ASR homophone/typo errors (e.g. ``坐虾`` → ``坐下``) while rejecting
+        prefix/suffix edits such as ``不要坐下`` or ``你想不想吃``.
+        """
+        exact = self.match(text)
+        if exact is not None:
+            return exact
+        normalized = normalize_command_phrase(text)
+        if not normalized:
+            return None
+        syllables = _pinyin_syllables(normalized)
+        if not syllables:
+            return None
+        candidates = self._homophones.get(syllables)
+        if not candidates or len(candidates) != 1:
+            return None
+        template = self._phrases[candidates[0]]
+        return replace(
+            template,
+            matched_phrase=text,
+            match_strategy="fuzzy_homophone",
+        )
+
     def get_command(self, command_key: str) -> DirectCommandMatch | None:
         """Return immutable catalog metadata for one canonical command key."""
 
@@ -314,7 +371,9 @@ class CommandLexicon:
         event_type = str(item.get("event_type", "")).strip().upper()
         control = str(item.get("control", "DO")).strip().upper()
         core = bool(item.get("core", False))
-        emit_known_event = bool(item.get("emit_known_event", core))
+        # Catalog/KWS hits are already concrete special-command events, so the
+        # lexicon never adds the generic COMMAND_KNOWN summary.
+        emit_known_event = False
         emotion = str(item.get("emotion", "NONE")).strip().upper()
         action_name = str(item.get("action_name", "")).strip().upper()
         behavior = str(item.get("behavior", "")).strip()

@@ -76,7 +76,7 @@ def test_catalog_covers_all_19_core_command_groups(
     assert match.command_key == command_key
     assert match.event_type == event_type
     assert match.core
-    assert match.emit_known_event
+    assert not match.emit_known_event
     assert match.nlu_social == "NONE"
     assert match.nlu_intent != ""
     assert match.nlu_control in {"DO", "STOP"}
@@ -89,6 +89,26 @@ def test_catalog_uses_exact_normalized_match_and_preserves_negation() -> None:
     assert lexicon.match("你想不想吃") is None
     assert lexicon.match("不要坐下") is None
     assert lexicon.match("请你不要坐下") is None
+
+
+def test_match_fuzzy_rescues_homophone_but_rejects_prefix_edits() -> None:
+    lexicon = CommandLexicon(CATALOG_PATH)
+
+    # Exact matches are preserved and tagged as exact/expansion.
+    exact = lexicon.match_fuzzy("坐下")
+    assert exact is not None and exact.command_key == "SIT"
+    assert exact.match_strategy in {"catalog_exact", "rule_expansion"}
+
+    # A same-length, same-pinyin typo/homophone is rescued.
+    homophone = lexicon.match_fuzzy("坐虾")
+    assert homophone is not None and homophone.command_key == "SIT"
+    assert homophone.match_strategy == "fuzzy_homophone"
+
+    # Prefix/suffix edits and non-Chinese input must not fuzzy-match.
+    assert lexicon.match_fuzzy("不要坐下") is None
+    assert lexicon.match_fuzzy("你想不想吃") is None
+    assert lexicon.match_fuzzy("请你不要坐下") is None
+    assert lexicon.match_fuzzy("Good dog") is None
 
 
 def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
@@ -255,13 +275,20 @@ def test_expanded_event_carries_rule_audit_metadata() -> None:
 
 
 def test_catalog_exposes_core_metadata_by_command_key() -> None:
-    command = CommandLexicon(CATALOG_PATH).get_command("high_five")
+    lexicon = CommandLexicon(CATALOG_PATH)
+    command = lexicon.get_command("high_five")
 
     assert command is not None
     assert command.command_key == "HIGH_FIVE"
     assert command.command_id == "CMD_FIVE"
     assert command.event_type == "EVT_VOICE_COMMAND_HIGH_FIVE"
-    assert command.emit_known_event
+    assert not command.emit_known_event
+
+    raw = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
+    assert all(
+        not lexicon.get_command(item["command_key"]).emit_known_event
+        for item in raw["commands"]
+    )
 
 
 class _FakeASR:
@@ -431,7 +458,7 @@ def test_asr_homophone_does_not_remove_or_repeat_core_kws_events() -> None:
     )
 
     event_types = [event["event_type"] for event in node.published]
-    assert event_types.count("EVT_VOICE_COMMAND_KNOWN") == 1
+    assert event_types.count("EVT_VOICE_COMMAND_KNOWN") == 0
     assert event_types.count("EVT_VOICE_COMMAND_HIGH_FIVE") == 1
     assert not node.intent_called
     assert any(
@@ -468,13 +495,9 @@ def test_direct_catalog_match_publishes_event_and_skips_intent_model() -> None:
         if event.get("intent_source") == "command_lexicon"
     ]
     assert [event["event_type"] for event in catalog_events] == [
-        "EVT_VOICE_COMMAND_KNOWN",
         "EVT_VOICE_COMMAND_SIT",
     ]
-    summary, direct = catalog_events
-    assert summary["dispatch_role"] == "recognition_summary"
-    assert summary["specific_event_type"] == "EVT_VOICE_COMMAND_SIT"
-    assert not summary["should_trigger_behavior_tree"]
+    direct = catalog_events[0]
     assert direct["event_type"] == "EVT_VOICE_COMMAND_SIT"
     assert direct["dispatch_role"] == "specific_command"
     assert direct["intent_source"] == "command_lexicon"
@@ -490,9 +513,8 @@ def test_direct_catalog_match_publishes_event_and_skips_intent_model() -> None:
     )
     assert any(
         record == "utterance_complete"
-        and fields.get("result") == "published_known_and_specific"
+        and fields.get("result") == "published_direct_command"
         and fields.get("published_event_types") == [
-            "EVT_VOICE_COMMAND_KNOWN",
             "EVT_VOICE_COMMAND_SIT",
         ]
         for record, fields in node.traces
@@ -524,7 +546,6 @@ def test_expanded_catalog_match_publishes_event_and_skips_intent_model() -> None
         if event.get("intent_source") == "command_lexicon"
     ]
     assert [event["event_type"] for event in catalog_events] == [
-        "EVT_VOICE_COMMAND_KNOWN",
         "EVT_VOICE_COMMAND_SIT",
     ]
     for event in catalog_events:
@@ -590,7 +611,6 @@ def test_short_asr_catalog_agreement_selects_kws_result_group() -> None:
         if event.get("intent_source") in {"kws", "command_lexicon"}
     ]
     assert [event["event_type"] for event in business_events] == [
-        "EVT_VOICE_COMMAND_KNOWN",
         "EVT_VOICE_COMMAND_SIT",
     ]
     assert all(event["intent_source"] == "kws" for event in business_events)
@@ -617,7 +637,6 @@ def test_long_asr_text_containing_keyword_selects_asr_catalog() -> None:
         if event.get("intent_source") in {"kws", "command_lexicon"}
     ]
     assert [event["event_type"] for event in business_events] == [
-        "EVT_VOICE_COMMAND_KNOWN",
         "EVT_VOICE_COMMAND_SIT",
     ]
     assert all(
@@ -634,7 +653,7 @@ def test_long_asr_text_containing_keyword_selects_asr_catalog() -> None:
     )
 
 
-def test_short_conflicting_asr_catalog_result_wins_over_kws() -> None:
+def test_short_conflicting_kws_candidate_overrides_asr_catalog() -> None:
     node = _KwsRouteHarness(command_key="STAND_UP", asr_text="坐下")
     node._poll_kws_events()
 
@@ -648,18 +667,15 @@ def test_short_conflicting_asr_catalog_result_wins_over_kws() -> None:
         if event.get("intent_source") in {"kws", "command_lexicon"}
     ]
     assert [event["event_type"] for event in business_events] == [
-        "EVT_VOICE_COMMAND_KNOWN",
-        "EVT_VOICE_COMMAND_SIT",
+        "EVT_VOICE_COMMAND_STAND_UP",
     ]
-    assert all(
-        event["intent_source"] == "command_lexicon"
-        for event in business_events
-    )
+    assert all(event["intent_source"] == "kws" for event in business_events)
+    assert not node.intent_called
     assert any(
         record == "stage_complete"
         and fields.get("stage") == "recognition_arbitration"
-        and fields.get("result") == "asr_selected"
-        and fields.get("reason") == "asr_catalog_conflicts_with_kws"
+        and fields.get("result") == "kws_selected"
+        and fields.get("reason") == "short_kws_overrides_asr_conflict"
         for record, fields in node.traces
     )
 
@@ -699,7 +715,6 @@ def test_empty_asr_uses_single_kws_candidate_as_fallback() -> None:
         event for event in node.published if event.get("intent_source") == "kws"
     ]
     assert [event["event_type"] for event in business_events] == [
-        "EVT_VOICE_COMMAND_KNOWN",
         "EVT_VOICE_COMMAND_SIT",
     ]
     assert not any(event["event_type"] == "speech" for event in node.published)

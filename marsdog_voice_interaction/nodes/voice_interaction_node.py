@@ -962,7 +962,12 @@ class VoiceInteractionNode(Node):
         language: str,
         direct_match: Any = None,
     ) -> tuple[dict[str, Any] | None, str]:
-        """Select one deferred KWS result or explain why ASR owns the turn."""
+        """Select one deferred KWS result or explain why ASR owns the turn.
+
+        Division of labor: long ASR text owns the turn; a short utterance
+        with a single KWS candidate lets KWS win, overriding a conflicting
+        catalog match.
+        """
 
         candidates = [
             dict(event) for event in self._command_tracker.kws_candidates
@@ -980,15 +985,16 @@ class VoiceInteractionNode(Node):
 
         candidate_event_type = str(candidate.get("event_type", ""))
         if (
-            direct_match is not None
-            and direct_match.event_type != candidate_event_type
-        ):
-            return None, "asr_catalog_conflicts_with_kws"
-        if (
             policy["asr_long_text_wins"]
             and not self._is_short_asr_text(raw_text, language)
         ):
             return None, "long_asr_text"
+        # 短命令走 KWS：即使 ASR 词库命中与 KWS 冲突，也以 KWS 为准。
+        if (
+            direct_match is not None
+            and direct_match.event_type != candidate_event_type
+        ):
+            return candidate, "short_kws_overrides_asr_conflict"
         if direct_match is not None:
             return candidate, "short_asr_catalog_agrees"
         return candidate, "short_asr_kws_preferred"

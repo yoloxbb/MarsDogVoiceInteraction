@@ -82,13 +82,13 @@ Voice 日志不能证明动作已经执行。
 
 | 编号 | 当前测试口径 | 日志与接口证据 | 判定标准 |
 |---:|---|---|---|
-| 1 | 以 `command_catalog.yaml` 中 `core=true` 的 19 组为核心清单，每组代表短语播放 20 次，并补测全部别名。 | 同一句依次出现 ASR、`command_lexicon`、`recognition_arbitration`、不可执行 KNOWN 摘要和预期具体事件；检查两者的 `dispatch_role/specific_event_type/raw_nlu_tag`。 | 每组代表短语至少 17/20，且 19/19 均有结果。KNOWN 摘要不得触发行为树，只有具体事件用于动作；同一句只能有一个识别来源的业务结果。只有现成 Tree/Action 映射的组可判端到端 PASS。 |
+| 1 | 以 `command_catalog.yaml` 中 `core=true` 的 19 组为核心清单，每组代表短语播放 20 次，并补测全部别名。 | 同一句依次出现 ASR、`command_lexicon`、`recognition_arbitration` 和预期具体事件；检查 `dispatch_role/specific_event_type/raw_nlu_tag`，并确认无 KNOWN 摘要。 | 每组代表短语至少 17/20，且 19/19 均有结果。每句只发布具体特殊事件且只有一个识别来源；出现 `EVT_VOICE_COMMAND_KNOWN` 即失败。只有现成 Tree/Action 映射的组可判端到端 PASS。 |
 | 2 | 以产品表 116 条数据、155 条标准中文词/句和每条 10 个受控扩展执行覆盖测试。不再要求测试方另外提供“117 组”清单。 | 记录 `command_lexicon` 的 `matched/command_key/event_type/match_strategy/catalog_phrase/matched_phrase/expansion_profile/expansion_rule`，并复核事件 slots；只有未命中时才记录模型来源。 | 标准词/句每条测试 10 次时，85% 门限至少 **9/10**；扩展规则自动验收 `1550/1550`，人工按五个 profile 和 19 组核心抽样。同时报告源数据 `116/116`、路由组 `81/81`、标准词/句 `155/155`、总入口 `1705`；下游未映射项不得判端到端 PASS。 |
 | 3 | 使用唤醒词启动正式会话，并分别播放一条目录内指令和一条目录外语义文本。 | 两条都应有 ASR；目录内指令随后 `command_lexicon result=matched` 且不出现该句 `stage=intent`；目录外文本 `result=no_match` 后才出现 `stage=intent`。 | 同一 `interaction_id` 内两条链路各自完整且无 ERROR。仅有唤醒事件不能证明后续模块已工作。 |
 | 4 | 机播已知文本，对照 `speech` 事件中的 `asr_text` 和完整 `payload`。 | `stage_complete stage=asr result=ok`；`event_publish event_type=speech`；完整 ROS2 原文。 | `asr_text` 与期望文本一致或符合用例允许的等价转写；JSON 字段符合当前 ROS2 契约。测试表里的 `action/target` 不作为格式标准。 |
-| 5 | 对编号 4 的同一 `utterance_id` 检查最终路由结果。 | 目录命中看 `stage=command_lexicon`；目录未命中才看 `stage=intent` 的 `social/intent/control/event_types`。 | 核心目录命中必须得到 KNOWN 摘要及指定具体事件；模型结果必须符合三轴组合约束。白名单命令按“大类 → 具体动作 → KNOWN 摘要”发布，只有具体动作可执行。 |
+| 5 | 对编号 4 的同一 `utterance_id` 检查最终路由结果。 | 目录命中看 `stage=command_lexicon`；目录未命中才看 `stage=intent` 的 `social/intent/control/event_types`。 | 目录命中必须只得到指定具体事件且无 KNOWN 摘要；模型结果必须符合三轴组合约束。模型白名单命令按“大类 → 具体动作 → KNOWN 摘要”发布，只有具体动作可执行。 |
 | 6 | 对已有中英文 KWS 逐条执行，并对完整中文 ASR 标准词/句与扩展分层执行；两类覆盖率分开报告。 | KWS 先看 `stage=kws result=candidate`，再看 `recognition_arbitration selected_source/reason` 及最终事件来源；目录看 `intent_source=command_lexicon` 和 `match_strategy`。 | KWS 按 26 条配置逐条验收，不将“26 条关键词”误写成 26 组。短指令可选择 KWS；长句含关键词必须选择 ASR；两条链路不得同时发布业务结果。目录按 155 条标准入口及 1550 条自动扩展验收。138 条英文参考项当前不做确定性直发验收。 |
-| 7 | 在一个会话内连续播放 3 条指令，每条之间保留正常句尾静音；既测试三条不同指令，也测试同一指令连续 3 次。 | 一个 `interaction_id` 下出现 3 个不同 `utterance_id`；逐句检查 `recognition_arbitration`、`utterance_complete`、目录匹配和最终事件。 | 三句均正确；每句只允许 KWS 或 ASR 链路中的一个来源发布业务结果。核心命令允许 KNOWN 摘要加具体事件，两者属于同一个结果组。 |
+| 7 | 在一个会话内连续播放 3 条指令，每条之间保留正常句尾静音；既测试三条不同指令，也测试同一指令连续 3 次。 | 一个 `interaction_id` 下出现 3 个不同 `utterance_id`；逐句检查 `recognition_arbitration`、`utterance_complete`、目录匹配和最终事件。 | 三句均正确；每句只允许 KWS 或 ASR 链路中的一个来源发布一个具体业务事件，不得附带 KNOWN 摘要。 |
 | 8 | 使用相似音、否定反转和未配置的前后缀探索拒识，例如“官过来”“你要不要过来”“不要坐下”。 | 记录 KWS、ASR、`command_lexicon matched/no_match`、`match_strategy`、意图阶段和任何可执行事件。 | 目录只能命中标准词/句或配置明确生成的扩展，不能因子串命中；“请你坐下”应命中，但“不要坐下”“请你不要坐下”不得命中 SIT。流式 KWS 的相似音拒识仍属 `KNOWN-GAP`。 |
 | 9 | 播放陌生词，并在最后一次有效 ASR 文本后等待至少 10 秒。 | 先看到 `command_lexicon result=no_match`，再看 Model Intent 三轴及 `event_types`，最后出现同会话 idle 和 `interaction_end`。 | 合法 OOS `NONE|NONE|NONE` 发布不可执行的 `EVT_VOICE_NEUTRAL`；只有模型与规则均无有效协议结果才发非执行 UNKNOWN 诊断。不发布可执行动作、不崩溃，约 10 秒后待机。 |
 
@@ -152,8 +152,8 @@ VOICE_TRACE {"record":"interaction_end"...}
 
 一次“确定性指令识别成功”必须满足：同一个 `utterance_id` 得到
 `command_lexicon result=matched`，最终 `command_id/event_type` 符合目录，并且期间
-没有发布错误的可执行动作。核心目录必须有 KNOWN 摘要，且摘要
-`should_trigger_behavior_tree=false`。ASR 目录被选中后不应再出现该句 `stage=intent`；
+没有发布错误的可执行动作。核心目录也只允许具体特殊事件，不得出现
+`EVT_VOICE_COMMAND_KNOWN`。ASR 目录被选中后不应再出现该句 `stage=intent`；
 KWS 被选中时不应再发布 `command_lexicon` 或 Model Intent 的业务事件。只有
 `speech.asr_text` 正确但目录未命中或事件错误，仍记为失败。各组必须分别达到门限。
 目录外文本使用 `social/intent/control` 意图判定表。
@@ -269,7 +269,7 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `kws` | `candidate/rejected_catalog_mismatch` | `event_type/command_key/candidate_count/published_event_types` | 从本句开始收音到 KWS 候选首次命中并取出；不是单个 KWS 模型调用耗时。`candidate` 时 `published_event_types=[]`，表示只缓存、尚未发布业务事件。未命中时没有该记录。 |
 | `asr` | `ok/empty/error` | `language/text_length` | 一次 `transcribe()` 调用的总耗时。`ok` 仅表示得到非空文本，不表示文本一定正确。 |
 | `speaker` | `matched/unknown/error` | `speaker_id/speaker_confidence` | 声纹 embedding 提取、已注册人员检索和阈值判定的总耗时。 |
-| `command_lexicon` | `matched/no_match/unavailable` | `command_key/event_type/catalog_version/catalog_phrase/matched_phrase/match_strategy/expansion_profile/expansion_rule/social/intent/control/action_name/source_rows/core/emit_known_event` | 一次规范化及精确哈希查找的总耗时，`latency_ms` 保留三位小数以记录微秒级查找；原词为 `catalog_exact`，受控扩展为 `rule_expansion`；核心匹配要求 `emit_known_event=true`；`matched` 后跳过意图模型，`no_match` 后才进入 `intent`。 |
+| `command_lexicon` | `matched/no_match/unavailable` | `command_key/event_type/catalog_version/catalog_phrase/matched_phrase/match_strategy/expansion_profile/expansion_rule/social/intent/control/action_name/source_rows/core/emit_known_event` | 一次规范化及精确哈希查找的总耗时，`latency_ms` 保留三位小数以记录微秒级查找；原词为 `catalog_exact`，受控扩展为 `rule_expansion`；当前所有词库项均要求 `emit_known_event=false`；`matched` 后跳过意图模型，`no_match` 后才进入 `intent`。 |
 | `recognition_arbitration` | `kws_selected/asr_selected/none_selected` | `selected_source/reason/asr_text/asr_text_length/asr_is_short/kws_candidate_count/kws_candidate_keys/kws_candidate_event_types/catalog_event_type` | 纯规则仲裁函数的耗时。常见 `reason` 为 `no_kws_candidate/short_asr_catalog_agrees/short_asr_kws_preferred/long_asr_text/asr_catalog_conflicts_with_kws/empty_asr_single_candidate/multiple_kws_candidates`。 |
 | `object_target` | `matched/unsupported/unavailable` | `object_name/object_mention/object_matched_alias/object_catalog_version` | 只在 `FETCH/FIND_TOY` 出现。对 ASR 原文进行最长别名优先匹配；只有 `matched` 允许生成可执行 FETCH。 |
 | `intent` | `parsed/fallback_unknown` | `event_types/social/intent/control/intent_source` | `_parse_intent()` 与事件路由总耗时；可能是 Model Intent，或模型无有效输出后兼容规则的累计时间。`NONE|NONE|NONE` 的 `event_types` 应为 `["EVT_VOICE_NEUTRAL"]`。 |
@@ -334,7 +334,7 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 
 ### 4.6 总耗时的正确计算
 
-`event_publish.latency_ms` 是产生该事件的决策阶段耗时；ASR 目录摘要和具体事件应等于
+`event_publish.latency_ms` 是产生该事件的决策阶段耗时；ASR 目录具体事件应等于
 同句 `command_lexicon.latency_ms`，Model Intent 大类、白名单具体事件和 KNOWN 摘要应等于
 同句 `intent.latency_ms`。
 KWS 被选中时，事件的 `latency_ms` 是从 VAD 返回后进入处理到最终仲裁发布的耗时；
@@ -618,7 +618,7 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 | KWS 候选 | 命中时只缓存、不发布业务事件；最终选中 KWS 后才发布结果组 | `stage_complete stage=kws result=candidate latency_ms/candidate_count` |
 | ASR | 发布 `speech`，`asr_text` 与实说内容对照 | `stage_complete stage=asr latency_ms` |
 | 声纹识别 | `owner` 发布 MASTER，`family_member_*` 发布 FOLK，未匹配/历史名称发布 UNMASTER | `stage_complete stage=speaker latency_ms/speaker_id/speaker_confidence`；当前 confidence 仅为匹配指示值 |
-| 完整确定性词库 | 核心项发布不可执行 KNOWN 摘要及目录具体事件，其他项发布目录事件；该句不执行 Intent | `command_lexicon matched/latency_ms`，核心另查两个 `dispatch_role` 和 `specific_event_type` |
+| 完整确定性词库 | 所有项只发布目录具体特殊事件，不附带 KNOWN 摘要；该句不执行 Intent | `command_lexicon matched/latency_ms`，并检查唯一 `dispatch_role=specific_command` 和 `specific_event_type` |
 | 目录外意图 | 三轴及事件顺序符合契约；仅白名单具体动作可执行 | `command_lexicon no_match` 后检查 `stage=intent social/intent/control/event_types/latency_ms`；找物类还要检查 `stage=object_target` |
 | KWS/ASR 仲裁 | 短指令可选 KWS；例如“击掌”被 ASR 转写为“机长”但唯一 HIGH_FIVE 候选胜出时，ASR 单项失败、命令路由通过；长句、多个 KWS 候选或目录冲突选择 ASR；只发布一个来源的业务结果 | `stage_complete stage=recognition_arbitration result/selected_source/reason/kws_candidate_count` |
 | 静默结束 | 发布匹配 ID 的 `EVT_STATE_CHANGED state=idle` | `interaction_end reason=interaction_timeout`，约 10 秒 |

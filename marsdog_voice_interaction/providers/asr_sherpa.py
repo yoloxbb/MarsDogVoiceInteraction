@@ -99,6 +99,12 @@ class ASRSherpaProvider(BaseProvider):
                     **common,
                 )
 
+            if self._model_type == "paraformer" and self._use_itn:
+                logger.info(
+                    "ASR paraformer ignores use_itn; inverse text "
+                    "normalization requires rule_fsts/rule_fars"
+                )
+
             self.available = True
             logger.info(
                 "ASRSherpaProvider started — type=%s model=%s threads=%d",
@@ -130,20 +136,27 @@ class ASRSherpaProvider(BaseProvider):
                 If None or has_voice=False, returns empty result.
 
         Returns:
-            Dict with asr_text, language, confidence, and latency_ms.
+            Dict with asr_text, language, latency_ms, a ``reason`` describing
+            the outcome, and ``confidence``. paraformer/sense_voice do not
+            expose per-utterance confidence, so ``confidence`` is ``None`` on
+            success and ``0.0`` on empty/error outcomes.
         """
         if not self.available or self._recognizer is None:
-            return {"asr_text": "", "language": self._language, "confidence": 0.0}
+            return {"asr_text": "", "language": self._language,
+                    "confidence": 0.0, "reason": "unavailable"}
 
         if audio_data is None:
-            return {"asr_text": "", "language": self._language, "confidence": 0.0}
+            return {"asr_text": "", "language": self._language,
+                    "confidence": 0.0, "reason": "no_audio"}
 
         samples = audio_data.get("audio_samples")
         if samples is None or (hasattr(samples, "__len__") and len(samples) == 0):
-            return {"asr_text": "", "language": self._language, "confidence": 0.0}
+            return {"asr_text": "", "language": self._language,
+                    "confidence": 0.0, "reason": "empty_audio"}
 
         if not audio_data.get("has_voice", True):
-            return {"asr_text": "", "language": self._language, "confidence": 0.0}
+            return {"asr_text": "", "language": self._language,
+                    "confidence": 0.0, "reason": "no_voice"}
 
         try:
             import time
@@ -205,7 +218,8 @@ class ASRSherpaProvider(BaseProvider):
             response = {
                 "asr_text": asr_text,
                 "language": language,
-                "confidence": 0.90,
+                "confidence": None,
+                "reason": "ok",
                 "latency_ms": round(latency_ms, 2),
             }
             if (
@@ -220,7 +234,8 @@ class ASRSherpaProvider(BaseProvider):
 
         except Exception as exc:
             logger.error("ASR transcription error: %s", exc, exc_info=True)
-            return {"asr_text": "", "language": self._language, "confidence": 0.0}
+            return {"asr_text": "", "language": self._language,
+                    "confidence": 0.0, "reason": "error"}
 
     def _decode_waveform(
         self,

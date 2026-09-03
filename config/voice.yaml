@@ -87,6 +87,8 @@ providers:
       num_trailing_blanks: 1
       event_confidence: 0.9
       # KWS 仅生成候选；VAD 结束后与完整 ASR 文本仲裁，只发布一个结果来源。
+      # 明确分工：长句走 ASR（asr_long_text_wins），短命令（<= short_max_chars_zh 字）
+      # 走 KWS，即使 ASR 词库命中与 KWS 冲突也以 KWS 为准。
       publish_mode: deferred
       arbitration_mode: exclusive
       asr_long_text_wins: true
@@ -102,7 +104,7 @@ providers:
       tokens: ../../models/asr/sherpa-onnx-paraformer-zh-2024-03-09/tokens.txt
       sample_rate: 16000
       language: zh
-      use_itn: true
+      # use_itn 仅 SenseVoice 生效；paraformer 需 rule_fsts/rule_fars 才能做 ITN。
       num_threads: 4
   speaker:
     type: sherpa
@@ -110,6 +112,8 @@ providers:
     config:
       speaker_model: ../../models/speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
       match_threshold: 0.5
+      # 最短有效语音长度（16k 采样点），低于该值无法产生可靠声纹，直接判定 audio_too_short。
+      min_samples: 8000
       num_threads: 2
   intent_rule:
     type: rule

@@ -15,11 +15,10 @@
 - 英文 `reference_phrases_en` 当前只是参考元数据，不参与确定性词库匹配，因此不列入本表验收。
 - `BT=是` 只表示 Voice 应设置 `should_trigger_behavior_tree=true`，不代表下游已经完成事件映射或动作执行。
 - `action_name=—` 表示产品目录没有给出独立 `ACT_*`，但仍必须发布表中的 `event_type`。
-- 所有“核心=是”的行都产生两条目录事件：先发不可执行
-  `EVT_VOICE_COMMAND_KNOWN`（`dispatch_role=recognition_summary`），再发本表
-  `event_type`（`dispatch_role=specific_command`）。KWS 只缓存候选，最终由
-  `recognition_arbitration` 选择 KWS 或 ASR 目录作为唯一结果来源；核心命令被选中后
-  才发布这两条事件。
+- 所有词库行（包括“核心=是”）都只产生本表 `event_type`
+  （`dispatch_role=specific_command`），不附带 `EVT_VOICE_COMMAND_KNOWN`。
+  KWS 只缓存候选，最终由 `recognition_arbitration` 选择 KWS 或 ASR 目录作为唯一
+  结果来源，并只发布选中来源的具体特殊事件。
 
 ### 1.1 测试日志字段速查与路径判定
 
@@ -30,7 +29,7 @@
 | 日志位置 | 重点字段 | 用途 |
 |---|---|---|
 | 所有 `VOICE_TRACE` | `record/interaction_id/utterance_id` | `utterance_id` 是单句主键；不得把相邻两句话的阶段或事件拼在一起。 |
-| `stage_complete stage=command_lexicon` | `result/command_key/event_type/match_strategy/catalog_phrase/matched_phrase/core/emit_known_event/source_rows` | 判断是否命中确定性词库、命中标准词还是受控扩展，以及是否应附带 KNOWN 摘要。 |
+| `stage_complete stage=command_lexicon` | `result/command_key/event_type/match_strategy/catalog_phrase/matched_phrase/core/emit_known_event/source_rows` | 判断是否命中确定性词库、命中标准词还是受控扩展；当前所有词库项的 `emit_known_event` 均为 `false`。 |
 | `stage_complete stage=kws` | `result/command_key/event_type/candidate_count/published_event_types` | `result=candidate` 只表示缓存候选；此时 `published_event_types=[]`，不能据此判定业务事件已发布。 |
 | `stage_complete stage=recognition_arbitration` | `result/selected_source/reason/kws_candidate_count/catalog_event_type` | 判断本句最终由 KWS 还是 ASR 链路取得业务结果；这是区分“候选”和“最终来源”的依据。 |
 | `stage_complete stage=intent` | `result/event_types/social/intent/control/intent_source` | 只有词库未命中并选择 ASR 链路后才应出现；用于判定 Model Intent 或兼容规则路径。 |
@@ -41,8 +40,8 @@
 
 - `intent_source`：最终决策来源，常见为 `command_lexicon`、`kws`、
   `rkllm`、`rule_rkllm_compatible`、`invalid_protocol_fallback`；
-- `dispatch_role`：事件职责，`recognition_summary` 是词库/KWS 的 KNOWN 识别摘要，
-  `specific_command` 是具体命令，`semantic_classification` 是 Model Intent 语义分类，
+- `dispatch_role`：事件职责，`specific_command` 是词库/KWS 的具体命令，
+  `semantic_classification` 是 Model Intent 语义分类，
   `diagnostic` 是无有效协议结果时的诊断事件；
 - `specific_event_type`：摘要所指向的具体事件；比较 KNOWN 与具体事件时，两者应指向
   同一个 `EVT_VOICE_COMMAND_*`；
@@ -72,13 +71,11 @@
 
 | 场景 | 事件顺序 | KNOWN 的关键字段 | 具体事件的关键字段 |
 |---|---|---|---|
-| 核心词库：`core=true/emit_known_event=true` | `KNOWN → 目录具体事件` | `intent_source=command_lexicon`、`dispatch_role=recognition_summary`、`specific_event_type=目录事件`、不可执行 | `intent_source=command_lexicon`、`dispatch_role=specific_command`；是否执行以 `should_trigger_behavior_tree` 为准 |
-| 核心命令由 KWS 选中，且对应目录项 `emit_known_event=true` | `KNOWN → KWS 具体事件` | `intent_source=kws`、`dispatch_role=recognition_summary`、不可执行 | `intent_source=kws`、`dispatch_role=specific_command`；`utterance_complete result=published_kws_selected` |
 | Model Intent 命中显式动作白名单 | 可选社交大类事件 `→ 具体事件 → KNOWN` | `intent_source=rkllm` 或兼容规则来源、`dispatch_role=semantic_classification`、不可执行 | `dispatch_role=specific_command`、`should_trigger_behavior_tree=true` |
 | Model Intent 得到有命令语义但无法安全落到具体动作 | 仅 `KNOWN`，或社交大类事件 `→ KNOWN` | `dispatch_role=semantic_classification`、不可执行；`specific_event_type` 可为空 | 不应伪造可执行具体事件 |
 
-以下情况通常不附带 KNOWN：`core=false/emit_known_event=false` 的普通词库事件，以及纯
-社交、QUERY、`NONE|NONE|NONE` 等 Model Intent 结果。后者分别按对应业务大类、
+词库和 KWS 事件一律不附带 KNOWN。纯社交、QUERY、`NONE|NONE|NONE` 等 Model Intent
+结果也不附带；后者分别按对应业务大类、
 `EVT_VOICE_STATUS_CARE` 或 `EVT_VOICE_NEUTRAL` 判定。最终仍应以本句
 `utterance_complete.published_event_types/event_types` 为准，不按事件名称猜测。
 
@@ -97,7 +94,7 @@
 4. ASR 目录被选中时，最终 `event_publish.intent_source=command_lexicon`，且不再进入
    `stage=intent`；短句由 KWS 选中时来源为 `kws`。
 5. 同一句必须有 `stage_complete stage=recognition_arbitration`，且只允许一个识别来源
-   发布业务结果。核心命令的 KNOWN 摘要和具体事件属于同一个结果组。
+   发布一个具体业务事件；不得因词库或 KWS 命中再附带 KNOWN 摘要。
 
 ### KWS 修正 ASR 同音转写的判定
 
@@ -131,7 +128,7 @@
 1. `command_key/event_type` 与对应标准词/句完全相同，并跳过 Model Intent。
 2. `stage_complete(stage=command_lexicon)` 输出
    `match_strategy=rule_expansion/catalog_phrase/matched_phrase/expansion_profile/expansion_rule`。
-3. KNOWN 摘要和具体事件的 `slots` 保留同样的规则取证字段；原词命中则为
+3. 具体事件的 `slots` 保留完整规则取证字段；原词命中则为
    `match_strategy=catalog_exact`，且没有 `expansion_profile/expansion_rule`。
 4. 自动覆盖测试必须验证 `155 × 10 = 1550` 条扩展全部可加载且无路由冲突；人工
    验收至少从每个 profile 抽取样本，并覆盖 19 组核心指令。

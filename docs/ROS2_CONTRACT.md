@@ -127,14 +127,12 @@ latency_ms                                  float          处理延迟（ms）
 `EVT_VOICE_CALL_NAME/PRAISE/SCOLD` 或 `EVT_VOICE_COMMAND_TOILET/CLEAN/SLEEP/PLAY`。
 完整的短语、事件和动作名对应以 `config/command_catalog.yaml` 为权威源。
 
-`EVT_VOICE_COMMAND_KNOWN` 有两种受字段约束的用法：
+`EVT_VOICE_COMMAND_KNOWN` 只用于 Model Intent 命令摘要：
 
-- 核心词库识别摘要：`dispatch_role=recognition_summary`，携带
-  `specific_event_type`，且 `is_executable=false`、
-  `should_trigger_behavior_tree=false`；它不能再次触发动作。
-- Model Intent 命令摘要：`dispatch_role=semantic_classification`，不可执行；命中开发侧
+- `dispatch_role=semantic_classification`，不可执行；命中开发侧
   显式动作白名单时，会在摘要之前额外发布
   `dispatch_role=specific_command` 的具体事件，只有该具体事件可执行。
+- 确定性词库和 KWS 命中的是具体特殊事件，不发布此摘要。
 
 #### Model Intent 意图分类业务事件
 | event_type | 触发条件 |
@@ -203,10 +201,10 @@ ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短
 参考短语只作元数据，当前不进入直接匹配，避免跨分类重复表达产生错误事件。
 匹配成功时：
 
-- 19 组 `core: true` 的条目先发布 `EVT_VOICE_COMMAND_KNOWN` 摘要，再发布目录中的
-  具体 `EVT_VOICE_COMMAND_*`；其他目录条目只发布自身事件；
-- KNOWN 摘要不可执行，具体事件是否可执行由目录条目决定；两者均为
-  `intent_source=command_lexicon`，用 `dispatch_role` 区分；
+- 所有目录条目只发布自身的具体特殊事件，不额外发布
+  `EVT_VOICE_COMMAND_KNOWN`；
+- 具体事件是否可执行由目录条目决定，来源为
+  `intent_source=command_lexicon`，`dispatch_role=specific_command`；
 - 可执行性以 `should_trigger_behavior_tree=true` 为准；核心指令的 `control` 使用
   新三轴语义（例如 QUIET 为 `BARK|STOP`）。呼名事件仍进入
   行为树。`PRAISE/SCOLD` 是非执行社交事件，分别使用
@@ -220,8 +218,8 @@ ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短
   扩展命中；扩展仍是启动时预生成、运行时整句哈希查找，不做子串或模糊匹配；
 - 同一句跳过规则和 RKLLM，不产生 `stage_complete stage=intent`；
 - 流式 KWS 只缓存候选，不在 VAD 结束前发布业务事件。ASR 完成后通过
-  `recognition_arbitration` 在 KWS 与 ASR 链路中选择唯一结果来源；被选中的核心命令
-  仍按顺序发布 KNOWN 摘要和具体事件。
+  `recognition_arbitration` 在 KWS 与 ASR 链路中选择唯一结果来源；被选中的命令只
+  发布具体特殊事件，不附带 KNOWN 摘要。
 
 词库未命中时才进入下面的 Model Intent 意图协议。当前完整路由组、核心子集和所有等价短语以
 `command_catalog.yaml` 为唯一权威清单；
@@ -275,8 +273,8 @@ DOG_PREFERENCE / DOG_CAPABILITY
 │   │     ← asr_text / language / latency_ms             ││
 │   │                                                    ││
 │   │  ③ command_lexicon 精确匹配                        ││
-│   │     ├─ 核心命中 → COMMAND_KNOWN + COMMAND_*       ││
-│   │     ├─ 其他命中 → 目录指定事件，跳过意图模型       ││
+│   │     ├─ 核心命中 → 目录指定特殊事件                 ││
+│   │     ├─ 其他命中 → 目录指定特殊事件                 ││
 │   │     └─ 未命中 → Model Intent/兼容规则 → 大类/白名单动作/摘要││
 │   │                                                    ││
 │   │  ①-③ 共享同一个 utterance_id                       ││
@@ -302,8 +300,7 @@ ASR 和声纹，再通过 `stage_complete stage=recognition_arbitration` 选择�
 - ASR 精确目录结果与 KWS 候选冲突时选择 ASR 目录结果；
 - 长文本选择 ASR 链路，即使其中包含 KWS 关键词；
 - ASR 为空且只有一个 KWS 候选时，可用 KWS 回退；
-- 只有被选来源发布业务结果。核心命令的 KNOWN 摘要和具体事件属于同一个结果组，
-  不视为两个识别来源；
+- 只有被选来源发布一个具体业务事件；词库/KWS 不附带 KNOWN 摘要；
 - 声纹身份事件与 `speech` 是链路证据，不参与业务结果互斥。ASR 为空时没有
   `speech`，但仍可按上述规则使用单一 KWS 候选。
 

@@ -84,26 +84,15 @@ class _Extractor:
         return [float(np.mean(np.abs(stream.waveform))), 1.0]
 
 
-class _EmbeddingManager:
-    def __init__(self) -> None:
-        self.values: dict[str, list[float]] = {"张_三": [0.0, 0.0]}
-
-    @property
-    def all_speakers(self) -> list[str]:
-        return list(self.values)
-
-    def remove(self, name: str) -> bool:
-        self.values.pop(name, None)
-        return True
-
-    def add(self, name: str, v: list[float]) -> bool:
-        self.values[name] = v
-        return True
-
-
 class _SpeakerProvider:
     def __init__(self) -> None:
-        self._manager = _EmbeddingManager()
+        self.templates: dict[str, list[np.ndarray]] = {}
+
+    def set_templates(self, templates: dict[str, list[np.ndarray]]) -> None:
+        self.templates = {
+            name: [np.asarray(value) for value in values]
+            for name, values in templates.items()
+        }
 
 
 @pytest.fixture
@@ -255,7 +244,8 @@ def test_upload_appends_audio_and_embedding_under_fixed_identity(
 
     provider = _SpeakerProvider()
     assert manager.sync_to_provider(provider) == 1
-    assert provider._manager.values["owner"] != [0.0, 0.0]
+    assert "owner" in provider.templates
+    assert len(provider.templates["owner"]) == 2
 
 
 def test_storage_exposes_exactly_five_identity_slots_and_sample_delete_releases_one(
@@ -331,7 +321,7 @@ def test_legacy_identity_data_is_not_loaded_or_exposed(
     assert listing["count"] == 0
     assert listing["speakers"] == []
     assert manager.sync_to_provider(provider) == 0
-    assert provider._manager.values == {}
+    assert provider.templates == {}
 
 
 def test_each_speaker_accepts_at_most_five_uploaded_samples(
@@ -462,7 +452,7 @@ def test_deleting_last_sample_releases_identity_and_runtime_index(
     manager.enroll_speaker_from_audio("owner", _wav(), vad=_vad())
     provider = _SpeakerProvider()
     manager.sync_to_provider(provider)
-    assert "owner" in provider._manager.values
+    assert "owner" in provider.templates
 
     deleted = manager.delete_speaker_sample("owner", 1)
     synced = manager.sync_to_provider(provider)
@@ -470,7 +460,7 @@ def test_deleting_last_sample_releases_identity_and_runtime_index(
     assert deleted["speaker_removed"] is True
     assert deleted["shots"] == 0
     assert synced == 0
-    assert "owner" not in provider._manager.values
+    assert "owner" not in provider.templates
     assert not (isolated_speaker_storage / "speakers" / "owner").exists()
     assert manager.list_speaker_records()["count"] == 0
 

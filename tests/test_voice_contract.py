@@ -452,8 +452,8 @@ def test_documented_qa_command_inventory_matches_current_code() -> None:
         for line in keyword_lines
     }
 
-    assert len(ACTION_TO_VOICE_EVENT) == 16
+    assert len(ACTION_TO_VOICE_EVENT) == 23
     assert len(_RULES) == 30
-    assert len(keyword_lines) == 26
-    assert len(keyword_actions) == 12
+    assert len(keyword_lines) == 40
+    assert len(keyword_actions) == 19
     assert {"BRING", "FETCH", "STOP"}.isdisjoint(keyword_actions)

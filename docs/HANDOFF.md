@@ -114,8 +114,8 @@ ASR 得到文本后，节点先使用 `config/command_catalog.yaml` 做规范化
 KWS 在 VAD 结束前只缓存候选，不发布业务事件。ASR 完成后由 Voice 在 KWS 和 ASR
 链路之间选择唯一结果来源：短指令可选择唯一 KWS 候选，长句选择 ASR；ASR 目录结果
 与 KWS 冲突时选择 ASR，ASR 为空且只有一个候选时允许 KWS 回退。仲裁记录为
-`stage_complete stage=recognition_arbitration`。核心指令无论由哪一来源选中，都可能
-按契约发布 KNOWN 摘要和一个具体事件；这两条属于同一结果组。下游仍应按
+`stage_complete stage=recognition_arbitration`。词库或 KWS 指令无论由哪一来源选中，
+都只发布目录指定的具体特殊事件，不附带 KNOWN 摘要。下游仍应按
 `interaction_id + utterance_id + event_type` 做幂等保护。
 
 ## 4. 启动与验证
@@ -183,8 +183,8 @@ Provider，不能只按模式名称判断真机或 Mock。
 - `wake_confidence` 始终在 `[0,1]`；硬件原始分数保存在 `wake_score_raw`。
 - 同一会话 ID 不在中途变化。
 - FOLLOW 事件只发布一次有效指令，且会话结束必有 idle 状态事件。
-- 19 组核心目录指令按顺序发布不可执行的 `EVT_VOICE_COMMAND_KNOWN` 摘要和可执行的
-  具体事件；行为树只能用具体事件触发动作，不能把摘要再次当动作候选。
+- 19 组核心目录指令和其他词库/KWS 指令都只发布各自的具体特殊事件，不得额外发布
+  `EVT_VOICE_COMMAND_KNOWN`。
 - Model Intent `SOCIAL|INTENT|CONTROL` 先路由业务大类；命中显式动作白名单时按“社交
   大类 → 可执行具体动作 → `EVT_VOICE_COMMAND_KNOWN` 摘要”发布。只有具体动作事件
   可执行；大类和摘要不可执行。`NONE|NONE|NONE` 发布不可执行的
