@@ -89,13 +89,13 @@ STAND_STILL / HOLD_POSITION / QUIET
 
 状态结束原因当前为：
 
-- `interaction_timeout`：最后一次有效语音后默认 10 秒无新语音。
+- `interaction_timeout`：生产配置在最后一次 VAD 确认说话后 30 秒无新语音。
 - `stop_listening`：Service 主动结束。
 
 行为树进行唤醒转向、视觉锁定或靠近期间，可调用 VoiceTask 的
 `hold_interaction` 暂停空闲终止。请求必须精确携带当前 `interaction_id`、稳定
 `hold_token` 和有限 `lease_sec`；同 token 重复调用会续租。到达并准备继续对话
-时调用 `release_interaction_hold(reset_idle_timer=true)`，从释放时重新等待 10 秒。
+时调用 `release_interaction_hold(reset_idle_timer=true)`，从释放时重新等待配置的超时时间。
 租约不会屏蔽录音、流式 KWS、STOP 或 `stop_listening`，会话终止时全部租约自动
 清除。可用 `get_interaction_state` 查询当前 ID 和有效租约。
 
@@ -153,7 +153,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 
 | 配置项 | 当前值/含义 |
 |---|---|
-| `interaction.idle_timeout_sec` | 10 秒，从最后一次有效语音开始计算 |
+| `interaction.idle_timeout_sec` | 生产配置为 30 秒，从最后一次 VAD 确认说话开始计算 |
 | `interaction.hold_max_lease_sec` | 单次会话保持租约上限 30 秒，调用方需定期续租 |
 | `topics.*` | 对外 Topic/Service 名称 |
 | `speaker_api.*` | 当前为 `0.0.0.0:8091`，无身份验证，仅限可信开发局域网 |

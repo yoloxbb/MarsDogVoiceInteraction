@@ -90,7 +90,7 @@ Voice 日志不能证明动作已经执行。
 | 6 | 对已有中英文 KWS 逐条执行，并对完整中文 ASR 标准词/句与扩展分层执行；两类覆盖率分开报告。 | KWS 先看 `stage=kws result=candidate`，再看 `recognition_arbitration selected_source/reason` 及最终事件来源；目录看 `intent_source=command_lexicon` 和 `match_strategy`。 | KWS 按 26 条配置逐条验收，不将“26 条关键词”误写成 26 组。短指令可选择 KWS；长句含关键词必须选择 ASR；两条链路不得同时发布业务结果。目录按 155 条标准入口及 1550 条自动扩展验收。138 条英文参考项当前不做确定性直发验收。 |
 | 7 | 在一个会话内连续播放 3 条指令，每条之间保留正常句尾静音；既测试三条不同指令，也测试同一指令连续 3 次。 | 一个 `interaction_id` 下出现 3 个不同 `utterance_id`；逐句检查 `recognition_arbitration`、`utterance_complete`、目录匹配和最终事件。 | 三句均正确；每句只允许 KWS 或 ASR 链路中的一个来源发布一个具体业务事件，不得附带 KNOWN 摘要。 |
 | 8 | 使用相似音、否定反转和未配置的前后缀探索拒识，例如“官过来”“你要不要过来”“不要坐下”。 | 记录 KWS、ASR、`command_lexicon matched/no_match`、`match_strategy`、意图阶段和任何可执行事件。 | 目录只能命中标准词/句或配置明确生成的扩展，不能因子串命中；“请你坐下”应命中，但“不要坐下”“请你不要坐下”不得命中 SIT。流式 KWS 的相似音拒识仍属 `KNOWN-GAP`。 |
-| 9 | 播放陌生词，并在最后一次有效 ASR 文本后等待至少 10 秒。 | 先看到 `command_lexicon result=no_match`，再看 Model Intent 三轴及 `event_types`，最后出现同会话 idle 和 `interaction_end`。 | 合法 OOS `NONE|NONE|NONE` 发布不可执行的 `EVT_VOICE_NEUTRAL`；只有模型与规则均无有效协议结果才发非执行 UNKNOWN 诊断。不发布可执行动作、不崩溃，约 10 秒后待机。 |
+| 9 | 播放陌生词，并在最后一次 VAD 确认说话后按当前 `idle_timeout_sec` 等待（生产配置至少 30 秒）。 | 先看到 `command_lexicon result=no_match`，再看 Model Intent 三轴及 `event_types`，最后出现同会话 idle 和 `interaction_end`。 | 合法 OOS `NONE|NONE|NONE` 发布不可执行的 `EVT_VOICE_NEUTRAL`；只有模型与规则均无有效协议结果才发非执行 UNKNOWN 诊断。不发布可执行动作、不崩溃，并在配置的静默时间后待机。 |
 
 ### ASR 同音误识别由 KWS 正确路由时如何记分
 
@@ -253,7 +253,7 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `config_path` | string | 本次节点实际读取的配置文件参数。 |
 | `log_level` / `log_file` | string | 实际日志级别和本进程日志文件路径。 |
 | `audio_topic` / `enrollment_topic` / `service` | string | 实际发布 Topic 和 VoiceTask Service 名称。 |
-| `idle_timeout_sec` | number | 最后一次有效语音后回到待机的超时秒数。 |
+| `idle_timeout_sec` | number | 最后一次 VAD 确认说话后回到待机的超时秒数；生产配置为 30 秒。 |
 | `audio_debug` | object | VAD → ASR 调试开关、输出目录、三份 WAV 保存项、pre-roll A/B 和同模型对照状态。 |
 | `providers` | object | 每个 Provider 的 `class/available`；正式测试要求真实 Provider 可用且没有意外 Mock。 |
 | `command_lexicon` | object | 词库实际加载状态和统计。正式与 Pipeline Mock 应为 `ready=true/command_count=81/core_command_count=19/phrase_count=155/expansion_enabled=true/variants_per_phrase=10/expanded_phrase_count=1550/total_match_phrase_count=1705/expansion_profile_count=5/reference_phrase_count=138/source_row_count=116/covered_source_row_count=116`；`phrase_count` 只统计标准词/句，`total_match_phrase_count` 才是运行时总入口。 |
@@ -324,13 +324,13 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `record` | 字段 | 含义和判定方法 |
 |---|---|---|
 | `interaction_start` | `source/state` | 会话来源和进入的状态；`source` 常见为 `wakeup/service`。 |
-| `utterance_complete` | `result/event_type/event_types/published_event_types/selected_source/latency_ms` | KWS 被选中为 `published_kws_selected`；ASR 目录核心双发布为 `published_known_and_specific`；合法 OOS 发布 NEUTRAL 后为 `published`。 |
+| `utterance_complete` | `result/event_type/event_types/published_event_types/selected_source/latency_ms` | KWS 被选中为 `published_kws_selected`；ASR 目录可执行事件为 `published_direct_command`；合法 OOS 发布 NEUTRAL 后为 `published`。 |
 | `service_complete` | `service/task_id/task_type/task_result/error/latency_ms` | 一次 VoiceTask 回调总耗时和完整返回对象。`result=success/failure`。 |
 | `interaction_hold` | `operation/hold_token/reason/lease_sec/idle_timer_reset` | `operation=acquire/renew/release/expire`；不同操作只输出适用字段。 |
 | `enrollment_publish` | `topic/speaker_id/payload/latency_ms` | 一次录音注册样本的 embedding、进度处理和发布耗时；最终样本还包含落盘及运行时同步。`result=progress/complete`。 |
 | `speaker_api_upload` | `speaker_name/shots/sample_id/sample_key/source_duration_ms/speech_duration_ms/segment_count/audio_valid/has_effective_speech/error/latency_ms` | FastAPI 已读完文件后，业务 Handler 内的 WAV 内容解析、VAD、embedding、落盘和运行时同步总耗时；不包含 multipart 解析、网络上传、文件读取、HTTP 响应序列化。当前没有各子步骤的独立耗时。 |
 | `speaker_management` | `operation/speaker_name/sample_id/sample_ids/shots/speaker_removed/speaker_count/error/latency_ms` | `operation=list/sample_list/sample_get/sample_replace/sample_delete`；字段随操作变化。变更成功时同步调用已经完成，但运行时识别结果仍需实际验证；查询不触发同步。 |
-| `interaction_end` | `reason/state` | 会话结束原因和最终状态；`reason` 常见为 `interaction_timeout/stop_listening`。 |
+| `interaction_end` | `reason/state/idle_elapsed_sec/idle_timeout_sec/last_activity_reason` | 会话结束原因、单调时钟计算的静默时长及最后活动来源；`reason` 常见为 `interaction_timeout/stop_listening`。 |
 
 ### 4.6 总耗时的正确计算
 
@@ -621,7 +621,7 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 | 完整确定性词库 | 所有项只发布目录具体特殊事件，不附带 KNOWN 摘要；该句不执行 Intent | `command_lexicon matched/latency_ms`，并检查唯一 `dispatch_role=specific_command` 和 `specific_event_type` |
 | 目录外意图 | 三轴及事件顺序符合契约；仅白名单具体动作可执行 | `command_lexicon no_match` 后检查 `stage=intent social/intent/control/event_types/latency_ms`；找物类还要检查 `stage=object_target` |
 | KWS/ASR 仲裁 | 短指令可选 KWS；例如“击掌”被 ASR 转写为“机长”但唯一 HIGH_FIVE 候选胜出时，ASR 单项失败、命令路由通过；长句、多个 KWS 候选或目录冲突选择 ASR；只发布一个来源的业务结果 | `stage_complete stage=recognition_arbitration result/selected_source/reason/kws_candidate_count` |
-| 静默结束 | 发布匹配 ID 的 `EVT_STATE_CHANGED state=idle` | `interaction_end reason=interaction_timeout`，约 10 秒 |
+| 静默结束 | 发布匹配 ID 的 `EVT_STATE_CHANGED state=idle` | `interaction_end reason=interaction_timeout`；生产配置约 30 秒，Mock 以各自配置为准 |
 | 手动监听 | VoiceTask 返回成功并带当前 ID | `service_complete latency_ms/task_result` |
 | 会话保持 | hold 后不超时；release/租约到期后恢复超时 | Service 结果、`interaction_hold`、结束时间 |
 | 声纹注册 | 注册 Topic 连续进度，最终 `done=true` | `enrollment_publish result=complete/latency_ms` |

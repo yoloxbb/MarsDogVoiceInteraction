@@ -168,7 +168,7 @@ uv run marsdog-voice-interaction \
 | `command_lexicon` | 完整产品词库、19 组核心子集及每标准词/句 10 个受控精确匹配扩展 |
 | `speaker_api` | 声纹上传 API 的开关、监听地址、端口和大小限制 |
 | `topics` | ROS2 Topic 和 Service 名称 |
-| `interaction.idle_timeout_sec` | 最后一次有效语音后等待多久结束会话 |
+| `interaction.idle_timeout_sec` | 最后一次 VAD 确认说话后等待多久结束会话 |
 | `interaction.hold_max_lease_sec` | 外部会话保持租约的单次最长秒数 |
 | `providers.wakeup` | 讯飞串口和唤醒事件类型 |
 | `providers.audio` | 麦克风、VAD 阈值、语音时长和预录缓存 |
@@ -524,7 +524,9 @@ MarsDogVoiceInteraction/
   `interaction_id`。
 - 每句话创建新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享
   该 ID。
-- 只有非空 ASR 或最终选中的有效 KWS 结果才刷新会话的最后有效语音时间；缓存候选不刷新。
+- VAD 确认 `has_voice=true` 即刷新会话活动时间；即使 ASR 为空且 KWS 未命中，也从
+  该次说话结束后重新计算静默超时。纯静音和缓存中的 KWS 候选不刷新。
+- 会话静默时长使用单调时钟计算，不受 NTP、RTC 或人工调整系统时间影响。
 - 活跃 VAD 采集不能被会话静默超时截断。
 - 新增确定性命令时应同步修改 `command_catalog.yaml`、事件类型、测试、ROS2 契约
   以及下游行为树和 Action 行为映射；Voice 不直接调用动作系统。

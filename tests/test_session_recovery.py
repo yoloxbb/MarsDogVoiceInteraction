@@ -145,6 +145,7 @@ class _NodeHarness:
         self._interaction_active = True
         self._interaction_id = "interaction-test"
         self._last_interaction_time = 100.0
+        self._last_interaction_activity_reason = "interaction_start"
         self._interaction_holds: dict[str, dict[str, Any]] = {}
         self._idle_timeout = 10.0
         self._hold_max_lease_sec = 30.0
@@ -171,7 +172,7 @@ def test_silence_does_not_refresh_idle_timer_and_wakeup_recovers(
     wakeup = _FakeWakeup()
     node = _NodeHarness(audio, wakeup)
     clock = [108.0]
-    monkeypatch.setattr(node_module.time, "time", lambda: clock[0])
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: clock[0])
 
     node._poll()
 
@@ -214,28 +215,33 @@ def test_latest_voice_result_refreshes_timeout_before_expiry_check(
         return True
 
     node._process_speech = process_valid  # type: ignore[method-assign]
-    monkeypatch.setattr(node_module.time, "time", lambda: 111.0)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 111.0)
 
     node._poll()
 
     assert processed == [{"has_voice": True, "audio_samples": [0.1]}]
     assert node._last_interaction_time == 111.0
+    assert node._last_interaction_activity_reason == "vad_voice"
     assert node._interaction_active
     assert not node.published
     assert audio.start_count == 1
 
 
-def test_empty_asr_does_not_refresh_idle_timeout(monkeypatch: Any) -> None:
+def test_empty_asr_refreshes_idle_timeout_after_vad_voice(
+    monkeypatch: Any,
+) -> None:
     audio = _FakeAudio({"has_voice": True, "audio_samples": [0.1]})
     node = _NodeHarness(audio, _FakeWakeup())
     node._process_speech = lambda *_args: False  # type: ignore[method-assign]
-    monkeypatch.setattr(node_module.time, "time", lambda: 111.0)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 111.0)
 
     node._poll()
 
-    assert node._last_interaction_time == 100.0
-    assert not node._interaction_active
-    assert node.published[-1]["state_reason"] == "interaction_timeout"
+    assert node._last_interaction_time == 111.0
+    assert node._last_interaction_activity_reason == "vad_voice"
+    assert node._interaction_active
+    assert not node.published
+    assert audio.start_count == 1
 
 
 def test_active_speech_is_not_cut_off_by_idle_timeout(monkeypatch: Any) -> None:
@@ -243,7 +249,7 @@ def test_active_speech_is_not_cut_off_by_idle_timeout(monkeypatch: Any) -> None:
     audio.capturing = True
     audio.speech_active = True
     node = _NodeHarness(audio, _FakeWakeup())
-    monkeypatch.setattr(node_module.time, "time", lambda: 111.0)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 111.0)
 
     node._poll()
 
@@ -329,9 +335,7 @@ def test_interaction_hold_renewal_is_idempotent(monkeypatch: Any) -> None:
 
 def test_expired_hold_restores_normal_timeout(monkeypatch: Any) -> None:
     node = _NodeHarness(_FakeAudio(), _FakeWakeup())
-    wall_clock = [111.0]
-    monotonic_clock = [50.0]
-    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+    monotonic_clock = [111.0]
     monkeypatch.setattr(
         node_module.time,
         "monotonic",
@@ -343,7 +347,7 @@ def test_expired_hold_restores_normal_timeout(monkeypatch: Any) -> None:
         "lease_sec": 1.0,
     })
 
-    monotonic_clock[0] = 52.0
+    monotonic_clock[0] = 113.0
     node._poll()
 
     assert not node._interaction_active
@@ -373,9 +377,7 @@ def test_hold_rejects_wrong_session_and_oversized_lease() -> None:
 
 def test_release_hold_can_restart_idle_timer(monkeypatch: Any) -> None:
     node = _NodeHarness(_FakeAudio(), _FakeWakeup())
-    wall_clock = [111.0]
-    monotonic_clock = [50.0]
-    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+    monotonic_clock = [111.0]
     monkeypatch.setattr(
         node_module.time,
         "monotonic",
@@ -388,28 +390,32 @@ def test_release_hold_can_restart_idle_timer(monkeypatch: Any) -> None:
     }
     node._run_task("hold_interaction", params)
 
-    wall_clock[0] = 200.0
+    monotonic_clock[0] = 115.0
     released = node._run_task("release_interaction_hold", {
         "interaction_id": "interaction-test",
         "hold_token": "token",
         "reset_idle_timer": True,
     })
-    wall_clock[0] = 209.0
+    monotonic_clock[0] = 124.0
     node._poll()
 
     assert released["released"]
     assert released["idle_timer_reset"]
     assert node._interaction_active
 
-    wall_clock[0] = 211.0
+    monotonic_clock[0] = 126.0
     node._poll()
     assert not node._interaction_active
 
 
 def test_duplicate_release_does_not_reset_idle_timer(monkeypatch: Any) -> None:
     node = _NodeHarness(_FakeAudio(), _FakeWakeup())
-    wall_clock = [200.0]
-    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+    monotonic_clock = [200.0]
+    monkeypatch.setattr(
+        node_module.time,
+        "monotonic",
+        lambda: monotonic_clock[0],
+    )
     node._run_task("hold_interaction", {
         "interaction_id": "interaction-test",
         "hold_token": "token",
@@ -421,7 +427,7 @@ def test_duplicate_release_does_not_reset_idle_timer(monkeypatch: Any) -> None:
         "hold_token": "token",
         "reset_idle_timer": True,
     })
-    wall_clock[0] = 205.0
+    monotonic_clock[0] = 205.0
     duplicate = node._run_task("release_interaction_hold", {
         "interaction_id": "interaction-test",
         "hold_token": "token",
@@ -432,6 +438,32 @@ def test_duplicate_release_does_not_reset_idle_timer(monkeypatch: Any) -> None:
     assert not duplicate["released"]
     assert not duplicate["idle_timer_reset"]
     assert node._last_interaction_time == 200.0
+
+
+def test_wall_clock_jump_does_not_trigger_idle_timeout(
+    monkeypatch: Any,
+) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    monotonic_clock = [105.0]
+    wall_clock = [10_000.0]
+    monkeypatch.setattr(
+        node_module.time,
+        "monotonic",
+        lambda: monotonic_clock[0],
+    )
+    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+
+    node._poll()
+
+    assert node._interaction_active
+    assert not node.published
+
+    wall_clock[0] = 100_000.0
+    monotonic_clock[0] = 111.0
+    node._poll()
+
+    assert not node._interaction_active
+    assert node.published[-1]["state_reason"] == "interaction_timeout"
 
 
 def test_release_rejects_wrong_session_without_removing_hold() -> None:
@@ -523,8 +555,12 @@ def test_direct_mock_uses_one_id_until_idle_timeout(monkeypatch: Any) -> None:
     node._interaction_active = False
     node._interaction_id = ""
     node._state_machine = VoiceInteractionStateMachine()
-    wall_clock = [100.0]
-    monkeypatch.setattr(node_module.time, "time", lambda: wall_clock[0])
+    monotonic_clock = [100.0]
+    monkeypatch.setattr(
+        node_module.time,
+        "monotonic",
+        lambda: monotonic_clock[0],
+    )
 
     provider._next = 0.0
     node._poll()
@@ -537,14 +573,14 @@ def test_direct_mock_uses_one_id_until_idle_timeout(monkeypatch: Any) -> None:
     assert node.published[0]["interaction_id"] == interaction_id
     assert node.published[1]["interaction_id"] == interaction_id
 
-    wall_clock[0] = 111.0
+    monotonic_clock[0] = 111.0
     node._poll()
 
     assert node.published[-1]["event_type"] == "EVT_STATE_CHANGED"
     assert node.published[-1]["interaction_id"] == interaction_id
     assert not node._interaction_active
 
-    wall_clock[0] = 112.0
+    monotonic_clock[0] = 112.0
     provider._next = 0.0
     node._poll()
     second_interaction_id = node._interaction_id

@@ -189,7 +189,7 @@ ASR 原文区分：站立保持语义映射 `EVT_VOICE_COMMAND_STAND_STILL`，�
 
 | 值 | 说明 |
 |---|---|
-| `interaction_timeout` | 最后一次有效语音后超过 `idle_timeout_sec` 无新语音 |
+| `interaction_timeout` | 最后一次 VAD 确认说话后超过 `idle_timeout_sec` 无新语音；ASR 为空也会刷新 |
 | `stop_listening` | 外部通过 `/perception/voice/task` 主动停止 |
 
 ### 完整确定性产品词库
@@ -446,7 +446,8 @@ ID 对应会话已经结束，返回失败且不得复活旧会话。
 #### `get_interaction_state` — 查询会话及租约
 
 无参数。返回 `interaction_active/listening`、`interaction_id`、`state`、
-`idle_timeout_sec`、`idle_elapsed_sec`、`hold_active` 和 `holds[]`。租约条目包含
+`idle_timeout_sec`、`idle_elapsed_sec`、`last_activity_reason`、`hold_active` 和
+`holds[]`。静默时长使用单调时钟计算；租约条目包含
 `hold_token`、`reason` 和当前 `expires_in_sec`。
 
 ---

@@ -59,6 +59,9 @@ from marsdog_voice_interaction.utils.logging_utils import (
     log_trace,
     setup_logging,
 )
+from marsdog_voice_interaction.utils.text_normalization import (
+    normalize_chinese_numbers,
+)
 
 
 logger = get_logger(__name__, module="voice")
@@ -154,6 +157,7 @@ class VoiceInteractionNode(Node):
         self._interaction_active = False
         self._interaction_id = ""
         self._last_interaction_time = 0.0
+        self._last_interaction_activity_reason = ""
         self._interaction_holds: dict[str, dict[str, Any]] = {}
         self._latest_audio: dict[str, Any] | None = None
         self._command_tracker = UtteranceCommandTracker()
@@ -717,7 +721,8 @@ class VoiceInteractionNode(Node):
             self._interaction_id = interaction_id or uuid.uuid4().hex
             self._interaction_active = True
             self._interaction_holds.clear()
-            self._last_interaction_time = time.time()
+            self._last_interaction_time = time.monotonic()
+            self._last_interaction_activity_reason = "interaction_start"
             self._state_machine.trigger(Trigger.WAKEUP)
             started_id = self._interaction_id
         self._trace(
@@ -729,10 +734,18 @@ class VoiceInteractionNode(Node):
         )
         return started_id
 
-    def _refresh_interaction_activity(self, now: float | None = None) -> None:
+    def _refresh_interaction_activity(
+        self,
+        now: float | None = None,
+        *,
+        reason: str = "activity",
+    ) -> None:
         with self._interaction_lock:
             if self._interaction_active:
-                self._last_interaction_time = time.time() if now is None else now
+                self._last_interaction_time = (
+                    time.monotonic() if now is None else now
+                )
+                self._last_interaction_activity_reason = reason
 
     def _is_interaction_active(self) -> bool:
         with self._interaction_lock:
@@ -760,7 +773,7 @@ class VoiceInteractionNode(Node):
         with self._interaction_lock:
             if not self._interaction_active:
                 return ""
-            self._prune_interaction_holds_locked(time.monotonic())
+            self._prune_interaction_holds_locked(now)
             if self._interaction_holds:
                 return ""
             if now - self._last_interaction_time <= self._idle_timeout:
@@ -797,10 +810,10 @@ class VoiceInteractionNode(Node):
                     self._state_machine.previous_state.value
                 )
                 event.setdefault("utterance_id", uuid.uuid4().hex)
-                self._refresh_interaction_activity()
+                self._refresh_interaction_activity(reason="mock_event")
                 self._publish(event)
 
-        timed_out_id = self._timeout_interaction_id(time.time())
+        timed_out_id = self._timeout_interaction_id(time.monotonic())
         if timed_out_id:
             self._end_interaction(
                 "interaction_timeout",
@@ -813,7 +826,6 @@ class VoiceInteractionNode(Node):
             self._poll_direct_mock(direct_mock)
             return
 
-        now = time.time()
         audio = self._providers.get("audio")
         if audio is not None and hasattr(audio, "poll_result"):
             if audio.is_capturing():  # type: ignore[attr-defined]
@@ -861,21 +873,24 @@ class VoiceInteractionNode(Node):
                         if enrollment_active:
                             self._process_enrollment_audio(result)
                         elif has_voice:
-                            valid_speech = self._process_speech(
+                            # VAD-confirmed speech is user activity even when
+                            # ASR returns empty and KWS has no candidate.
+                            self._refresh_interaction_activity(
+                                reason="vad_voice"
+                            )
+                            self._process_speech(
                                 result,
                                 self._command_tracker.utterance_id or None,
                             )
-                            if valid_speech:
-                                # Only a finalized ASR/KWS result extends the
-                                # conversation; cached KWS candidates do not.
-                                self._refresh_interaction_activity()
                         else:
                             logger.debug(
                                 "VAD silence result; idle timer remains at %.3f",
                                 self._last_interaction_time,
                             )
                         self._command_tracker.finish()
-                        timed_out_id = self._timeout_interaction_id(now)
+                        timed_out_id = self._timeout_interaction_id(
+                            time.monotonic()
+                        )
                         if timed_out_id:
                             self._end_interaction(
                                 "interaction_timeout",
@@ -892,7 +907,7 @@ class VoiceInteractionNode(Node):
                 audio.start_capture()  # type: ignore[attr-defined]
                 return
 
-        timed_out_id = self._timeout_interaction_id(now)
+        timed_out_id = self._timeout_interaction_id(time.monotonic())
         if timed_out_id and not self._audio_speech_active(audio):
             self._end_interaction(
                 "interaction_timeout",
@@ -1133,7 +1148,6 @@ class VoiceInteractionNode(Node):
             self._state_machine.trigger(Trigger.INTENT_PARSED)
         else:
             self._state_machine.trigger(Trigger.SPEECH_END)
-        self._refresh_interaction_activity()
         self._publish(event)
         published_event_types.append(event_type)
         self._trace(
@@ -1622,6 +1636,15 @@ class VoiceInteractionNode(Node):
                 self._interaction_holds.clear()
                 return False
             interaction_id = self._interaction_id
+            idle_elapsed_sec = max(
+                0.0,
+                time.monotonic() - self._last_interaction_time,
+            )
+            last_activity_reason = getattr(
+                self,
+                "_last_interaction_activity_reason",
+                "",
+            )
             self._interaction_active = False
             self._interaction_holds.clear()
             self._cancel_audio_capture()
@@ -1649,6 +1672,9 @@ class VoiceInteractionNode(Node):
             interaction_id=interaction_id,
             reason=reason,
             state="idle",
+            idle_elapsed_sec=round(idle_elapsed_sec, 3),
+            idle_timeout_sec=self._idle_timeout,
+            last_activity_reason=last_activity_reason,
         )
         return True
 
@@ -1743,11 +1769,12 @@ class VoiceInteractionNode(Node):
 
     @staticmethod
     def _clean_text(text: str) -> str:
-        return re.sub(
+        cleaned = re.sub(
             r"""[，。！？、；：“”"'（）【】《》…—～,.!?;:()\[\]<>/\s]+""",
             "",
             text,
         ).strip()
+        return normalize_chinese_numbers(cleaned)
 
     def _publish(self, partial: dict[str, Any]) -> None:
         value = dict(partial)
@@ -1968,7 +1995,10 @@ class VoiceInteractionNode(Node):
                 return {"ok": False, "error": "interaction_id mismatch"}
             released = self._interaction_holds.pop(hold_token, None) is not None
             if released and reset_idle_timer:
-                self._last_interaction_time = time.time()
+                self._refresh_interaction_activity(
+                    now=now,
+                    reason="interaction_hold_release",
+                )
             self._trace(
                 "interaction_hold",
                 operation="release",
@@ -1988,7 +2018,6 @@ class VoiceInteractionNode(Node):
 
     def _interaction_state(self) -> dict[str, Any]:
         now_monotonic = time.monotonic()
-        now_wall = time.time()
         with self._interaction_lock:
             self._prune_interaction_holds_locked(now_monotonic)
             holds = [
@@ -2003,7 +2032,7 @@ class VoiceInteractionNode(Node):
                 for token, hold in sorted(self._interaction_holds.items())
             ]
             idle_elapsed = (
-                max(0.0, now_wall - self._last_interaction_time)
+                max(0.0, now_monotonic - self._last_interaction_time)
                 if self._interaction_active else 0.0
             )
             return {
@@ -2014,6 +2043,11 @@ class VoiceInteractionNode(Node):
                 "state": self._state_machine.state.value,
                 "idle_timeout_sec": self._idle_timeout,
                 "idle_elapsed_sec": idle_elapsed,
+                "last_activity_reason": getattr(
+                    self,
+                    "_last_interaction_activity_reason",
+                    "",
+                ),
                 "hold_active": bool(holds),
                 "holds": holds,
             }
@@ -2059,7 +2093,9 @@ class VoiceInteractionNode(Node):
                             "error": "expected_interaction_id mismatch",
                         }
                     interaction_id = self._interaction_id
-                    self._last_interaction_time = time.time()
+                    self._refresh_interaction_activity(
+                        reason="start_listening"
+                    )
                 else:
                     if expected_id:
                         return {

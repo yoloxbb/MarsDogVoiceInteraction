@@ -826,6 +826,29 @@ def test_catalog_miss_with_all_none_publishes_neutral_event() -> None:
     )
 
 
+def test_asr_number_text_is_normalized_before_publish_and_intent() -> None:
+    node = _ModelRouteHarness(
+        "编号三百二十一",
+        ("NONE", "NONE", "NONE"),
+    )
+
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000},
+        "utterance-1",
+    )
+
+    speech_event = next(
+        event for event in node.published
+        if event.get("event_type") == "speech"
+    )
+    model_event = next(
+        event for event in node.published
+        if event.get("intent_source") == "rkllm"
+    )
+    assert speech_event["asr_text"] == "编号321"
+    assert model_event["asr_text"] == "编号321"
+
+
 def test_model_find_query_routes_only_supported_detector_target() -> None:
     supported = _ModelRouteHarness(
         "看看那个球在哪里",

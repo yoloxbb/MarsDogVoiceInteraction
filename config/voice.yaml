@@ -123,7 +123,7 @@ providers:
     type: rkllm
     enabled: true
     config:
-      model: ../../models/llm/qwen2_5_5b_rk3588_260829_w8a8.rkllm
+      model: ../../models/llm/qwen2_5_5b_rk3588_260903_w8a8.rkllm
       lib_path: ../lib/librkllmrt.so
       platform: rk3588
       max_context_len: 512
