@@ -123,6 +123,26 @@
 `query`、`statement`、`social`、`vocative` 五种 profile。运行时启动时生成全部变体，
 随后仍通过哈希表进行规范化整句精确匹配，不使用子串、编辑距离或否定词删除。
 
+这里的“扩展”不是任意相似句或模糊匹配，而是把标准词/句代入固定模板。例如标准词
+“坐下”使用 `command` profile 后，会生成“请坐下”“请你坐下”“麻烦坐下”等恰好
+10 条新入口。profile 的选择顺序为：`phrase_profiles` 指定的单条短语优先，其次是
+`command_profiles` 指定的命令组，均未指定时使用 `default_profile: command`。
+
+当前五类 profile 的完整生成规则如下；表中的 `{phrase}` 代表原始标准词/句：
+
+| profile | 适用语义 | 10 条受控模板 |
+|---|---|---|
+| `command` | 默认动作命令 | `请{phrase}`；`请你{phrase}`；`麻烦{phrase}`；`麻烦你{phrase}`；`小狗，{phrase}`；`狗狗，{phrase}`；`宝贝，{phrase}`；`{phrase}一下`；`{phrase}吧`；`{phrase}呀` |
+| `query` | 问句 | `小狗，{phrase}`；`狗狗，{phrase}`；`宝贝，{phrase}`；`我想问，{phrase}`；`我想知道，{phrase}`；`跟我说说，{phrase}`；`{phrase}呢`；`{phrase}呀`；`{phrase}啊`；`{phrase}嘛` |
+| `statement` | 主人状态或陈述 | `小狗，{phrase}`；`狗狗，{phrase}`；`宝贝，{phrase}`；`跟你说，{phrase}`；`我想说，{phrase}`；`其实，{phrase}`；`{phrase}啊`；`{phrase}呀`；`{phrase}呢`；`{phrase}哦` |
+| `social` | 表扬、责备、安抚等社交表达 | `小狗，{phrase}`；`狗狗，{phrase}`；`宝贝，{phrase}`；`跟你说，{phrase}`；`听我说，{phrase}`；`{phrase}啊`；`{phrase}呀`；`{phrase}哦`；`{phrase}呢`；`{phrase}啦` |
+| `vocative` | 呼名 | `喂，{phrase}`；`嘿，{phrase}`；`{phrase}啊`；`{phrase}呀`；`{phrase}哦`；`{phrase}诶`；`{phrase}哎`；`{phrase}哟`；`{phrase}呐`；`{phrase}呢` |
+
+运行时节点当前调用 `CommandLexicon.match()`，因此只启用“标准词/句 + 上述固定扩展”
+的规范化精确匹配。代码中的 `match_fuzzy()` 拼音同音回退目前没有接入节点运行链路，
+不能把“坐虾 → 坐下”等测试当作线上词库应当命中。第 3.5 节的“相似句”同样不属于
+这 1705 个确定性入口，而是专门用于测试词库未命中后的 Model Intent。
+
 扩展命中时必须同时满足：
 
 1. `command_key/event_type` 与对应标准词/句完全相同，并跳过 Model Intent。
