@@ -117,7 +117,8 @@ def test_capture_debug_preserves_original_gap_and_final_asr_input(
         {"start": 2, "end": 4, "samples": raw[2:4]},
         {"start": 6, "end": 8, "samples": raw[6:8]},
     ]
-    final = np.array([0.0, 0.2, 0.3, 0.3, 0.4, 0.5, 0.6, 0.7])
+    final = provider._merge_speech_segments(segments, raw)
+    np.testing.assert_array_equal(final, raw[:8])
 
     provider._save_capture_debug("utterance-2", raw, segments, final)
 
@@ -130,7 +131,8 @@ def test_capture_debug_preserves_original_gap_and_final_asr_input(
     np.testing.assert_array_equal(asr_wav, final.astype(np.float32))
     assert "segment_count=2" in caplog.text
     assert "original_gap_ms=200.00" in caplog.text
-    assert "joined_gap_ms=300.00" in caplog.text
+    assert "joined_gap_ms=200.00" in caplog.text
+    assert "join_strategy=merge_source_intervals_with_pre_roll" in caplog.text
     assert "configured_pre_roll_ms=300.00" in caplog.text
 
 

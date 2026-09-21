@@ -10,6 +10,7 @@ Requires: sherpa-onnx, sounddevice (or pyaudio)
 from __future__ import annotations
 
 import logging
+import math
 import sys
 import threading
 import time
@@ -20,6 +21,9 @@ from typing import Any, Callable
 import numpy as np
 
 from marsdog_voice_interaction.providers.base import BaseProvider
+from marsdog_voice_interaction.providers.audio_capture import (
+    AudioCaptureGap, BufferedAudioCapture, read_pipe_chunk,
+)
 from marsdog_voice_interaction.utils.audio_debug import AudioDebugRecorder
 
 logger = logging.getLogger(__name__)
@@ -71,7 +75,7 @@ class AudioSherpaProvider(BaseProvider):
     Attributes:
         _vad: VoiceActivityDetector instance.
         _sample_rate: Audio sample rate (16000).
-        _max_duration_sec: Max total recording before timeout (no speech).
+        _max_duration_sec: Maximum wait before speech starts.
         _vad_threshold: VAD sensitivity (0.0-1.0).
         _min_silence_dur: Silence needed to finalize a segment.
         _min_speech_dur: Minimum speech to start a segment.
@@ -86,6 +90,16 @@ class AudioSherpaProvider(BaseProvider):
         self._model_path = config.get("vad_model", "")
         self._sample_rate = int(config.get("sample_rate", 16000))
         self._max_duration_sec = float(config.get("max_duration_sec", 8.0))
+        self._max_speech_duration_sec = float(config.get("max_speech_duration_sec", 8.0))
+        self._read_timeout_sec = float(config.get("read_timeout_sec", 2.0))
+        self._continuous_capture = bool(config.get("continuous_capture", False))
+        self._capture_buffer_sec = float(config.get("capture_buffer_sec", 6.0))
+        for value in (self._max_duration_sec, self._max_speech_duration_sec,
+                      self._read_timeout_sec, self._capture_buffer_sec):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("Audio capture durations must be finite and positive")
+        self._buffered_capture: BufferedAudioCapture | None = None
+        self._resync_required = False
         self._vad_threshold = float(config.get("vad_threshold", 0.6))
         self._min_silence_dur = float(config.get("min_silence_dur", 0.5))
         self._min_speech_dur = float(config.get("min_speech_dur", 0.4))
@@ -122,6 +136,8 @@ class AudioSherpaProvider(BaseProvider):
 
     def start(self) -> None:
         try:
+            if self._sample_rate != 16000:
+                raise ValueError("Live audio sample_rate must be 16000")
             from sherpa_onnx import SileroVadModelConfig, VadModelConfig, VoiceActivityDetector
 
             if not self._model_path:
@@ -135,7 +151,10 @@ class AudioSherpaProvider(BaseProvider):
             )
 
             self._vad = VoiceActivityDetector(
-                config=VadModelConfig(silero_vad=vad_config),
+                config=VadModelConfig(
+                    silero_vad=vad_config, sample_rate=self._sample_rate,
+                    num_threads=self._num_threads,
+                ),
                 buffer_size_in_seconds=60,
             )
 
@@ -160,6 +179,13 @@ class AudioSherpaProvider(BaseProvider):
                 self._pre_roll_sec,
                 self._max_duration_sec,
                 _CAPTURE_BACKEND or "none",
+            )
+            logger.info(
+                "VAD capture policy: continuous=%s buffer_sec=%.2f "
+                "wait_sec=%.2f speech_sec=%.2f read_timeout_sec=%.2f threads=%d",
+                self._continuous_capture, self._capture_buffer_sec,
+                self._max_duration_sec, self._max_speech_duration_sec,
+                self._read_timeout_sec, self._num_threads,
             )
 
         except FileNotFoundError as exc:
@@ -229,6 +255,13 @@ class AudioSherpaProvider(BaseProvider):
             previous worker still holds the device).
         """
         self._prune_dead_orphans()
+        if self._continuous_capture and self._orphan_workers:
+            logger.error("Capture refused: a cancelled worker still owns the VAD")
+            return False
+        if self._buffered_capture is not None and self._buffered_capture.stopping:
+            if not self._buffered_capture.close(timeout=0):
+                return False
+            self._buffered_capture = None
         if not self.available:
             return False
         if self._capturing:
@@ -358,6 +391,13 @@ class AudioSherpaProvider(BaseProvider):
                     _format_frame_chain(frame),
                 )
         self._prune_dead_orphans()
+        if self._buffered_capture is not None:
+            microphone_stopped = self._buffered_capture.close(timeout=timeout)
+            if microphone_stopped:
+                self._buffered_capture = None
+            worker_stopped = worker_stopped and microphone_stopped
+        if worker_stopped:
+            self._resync_required = False
         return worker_stopped
 
     @staticmethod
@@ -438,7 +478,9 @@ class AudioSherpaProvider(BaseProvider):
         while self._capturing and not cancel_event.is_set():
             available = int(stream.read_available)
             if available >= _CHUNK_SAMPLES:
-                chunk, _ = stream.read(_CHUNK_SAMPLES)
+                chunk, overflowed = stream.read(_CHUNK_SAMPLES)
+                if overflowed:
+                    raise AudioCaptureGap("sounddevice input overflow")
                 return chunk
             remaining = poll_deadline - time.monotonic()
             if remaining <= 0:
@@ -495,7 +537,7 @@ class AudioSherpaProvider(BaseProvider):
             if previous_end is not None:
                 original_gap = max(0, start - previous_end)
                 joined_gap = (
-                    min(start, int(self._pre_roll_sec * sample_rate))
+                    min(original_gap, int(self._pre_roll_sec * sample_rate))
                     if not self._debug_disable_extra_pre_roll else 0
                 )
                 logger.info(
@@ -508,7 +550,7 @@ class AudioSherpaProvider(BaseProvider):
                     original_gap / sample_rate * 1000.0,
                     joined_gap / sample_rate * 1000.0,
                     (
-                        "concatenate_with_extra_pre_roll"
+                        "merge_source_intervals_with_pre_roll"
                         if not self._debug_disable_extra_pre_roll
                         else "direct_segment_concatenation"
                     ),
@@ -587,6 +629,7 @@ class AudioSherpaProvider(BaseProvider):
                     "sample_rate": self._sample_rate,
                     "duration_ms": 0.0,
                     "has_voice": False,
+                    "capture_end_reason": "capture_error",
                 }
         finally:
             with self._capture_lock:
@@ -626,6 +669,8 @@ class AudioSherpaProvider(BaseProvider):
         Returns:
             Dict with audio_samples, sample_rate, duration_ms, has_voice.
         """
+        if self._continuous_capture:
+            return self._stream_vad_buffered(cancel_event)
         if not _HAS_AUDIO_CAPTURE:
             return self._stream_vad_arecord(cancel_event)
 
@@ -642,6 +687,7 @@ class AudioSherpaProvider(BaseProvider):
         before_read_logged = False
         first_read_logged = False
         first_vad_logged = False
+        speech_started: float | None = None
         with self._capture_lock:
             utterance_id = self._active_utterance_id
 
@@ -682,25 +728,23 @@ class AudioSherpaProvider(BaseProvider):
                     break
 
                 elapsed = time.perf_counter() - t_start
-                if elapsed > self._max_duration_sec:
+                if self._capture_deadline_reached(elapsed, speech_started):
                     # Flush any pending segments
                     self._set_capture_phase(cancel_event, "vad_flush")
                     self._vad.flush()
+                    flush_segments: list[dict[str, Any]] = []
                     while not self._vad.empty():
                         seg = self._vad.front
                         if self._audio_debug.enabled:
                             debug_segments.append(self._debug_segment(seg))
-                        s = self._segment_with_pre_roll(
-                            seg,
-                            np.asarray(all_audio, dtype=np.float32),
-                        )
-                        if len(s) > 0:
-                            speech_segment = (
-                                np.concatenate([speech_segment, s])
-                                if speech_segment is not None
-                                else s
-                            )
+                        # Drain once using merged source intervals below.
+                        flush_segments.append(self._debug_segment(seg))
                         self._vad.pop()
+
+                    speech_segment = self._merge_speech_segments(
+                        flush_segments,
+                        np.asarray(all_audio, dtype=np.float32),
+                    )
 
                     if speech_segment is not None and len(speech_segment) > 0:
                         duration_ms = (
@@ -776,6 +820,8 @@ class AudioSherpaProvider(BaseProvider):
                     logger.debug("before_vad utterance_id=%s", utterance_id)
                 self._vad.accept_waveform(chunk.tolist())
                 self._refresh_speech_active()
+                if speech_started is None and self.is_speech_active():
+                    speech_started = time.perf_counter() - t_start
                 if not first_vad_logged:
                     logger.debug("after_vad utterance_id=%s", utterance_id)
                     first_vad_logged = True
@@ -912,7 +958,6 @@ class AudioSherpaProvider(BaseProvider):
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
             )
             with self._capture_lock:
                 if (
@@ -924,6 +969,9 @@ class AudioSherpaProvider(BaseProvider):
                 raise RuntimeError("arecord stdout pipe was not created")
 
             started = time.perf_counter()
+            speech_started: float | None = None
+            last_read = started
+            pending = bytearray()
             chunk_bytes = _CHUNK_SAMPLES * 2
             while self._capturing and not cancel_event.is_set():
                 self._set_capture_phase(cancel_event, "arecord_read")
@@ -933,8 +981,16 @@ class AudioSherpaProvider(BaseProvider):
                         utterance_id,
                     )
                     before_read_logged = True
-                raw = process.stdout.read(chunk_bytes)
-                if not raw:
+                elapsed = time.perf_counter() - started
+                if self._capture_deadline_reached(elapsed, speech_started):
+                    exit_reason = "capture_deadline"
+                    break
+                raw = read_pipe_chunk(process.stdout, chunk_bytes)
+                if raw is None:
+                    if time.perf_counter() - last_read >= self._read_timeout_sec:
+                        raise TimeoutError("arecord produced no audio")
+                    continue
+                if raw == b"":
                     exit_reason = "arecord_eof"
                     break
                 if not first_read_logged:
@@ -948,8 +1004,11 @@ class AudioSherpaProvider(BaseProvider):
                 if cancel_event.is_set() or not self._capturing:
                     exit_reason = "stop_requested_after_read"
                     break
-                if len(raw) % 2:
-                    raw = raw[:-1]
+                last_read = time.perf_counter()
+                pending.extend(raw)
+                complete_bytes = len(pending) // 2 * 2
+                raw = bytes(pending[:complete_bytes])
+                del pending[:complete_bytes]
                 samples = (
                     np.frombuffer(raw, dtype="<i2").astype(np.float32)
                     / 32768.0
@@ -977,6 +1036,8 @@ class AudioSherpaProvider(BaseProvider):
                     logger.debug("before_vad utterance_id=%s", utterance_id)
                 self._vad.accept_waveform(samples.tolist())
                 self._refresh_speech_active()
+                if speech_started is None and self.is_speech_active():
+                    speech_started = time.perf_counter() - started
                 if not first_vad_logged:
                     logger.debug("after_vad utterance_id=%s", utterance_id)
                     first_vad_logged = True
@@ -994,13 +1055,13 @@ class AudioSherpaProvider(BaseProvider):
                         exit_reason = "vad_complete"
                         break
 
-                if time.perf_counter() - started > self._max_duration_sec:
+                if self._capture_deadline_reached(time.perf_counter() - started, speech_started):
                     exit_reason = "max_duration"
                     break
 
             if speech_segment is None and not cancel_event.is_set():
                 self._vad.flush()
-                speech_parts: list[np.ndarray] = []
+                speech_parts: list[dict[str, Any]] = []
                 while not self._vad.empty():
                     segment = self._vad.front
                     if self._audio_debug.enabled:
@@ -1010,15 +1071,10 @@ class AudioSherpaProvider(BaseProvider):
                         if all_audio
                         else np.array([], dtype=np.float32)
                     )
-                    samples = self._segment_with_pre_roll(
-                        segment,
-                        captured,
-                    )
-                    if samples.size:
-                        speech_parts.append(samples)
+                    speech_parts.append(self._debug_segment(segment))
                     self._vad.pop()
                 if speech_parts:
-                    speech_segment = np.concatenate(speech_parts)
+                    speech_segment = self._merge_speech_segments(speech_parts, captured)
 
         except FileNotFoundError:
             logger.error("arecord not found")
@@ -1088,6 +1144,124 @@ class AudioSherpaProvider(BaseProvider):
         if audio_data is not None:
             return audio_data.get("has_voice", False)
         return False
+
+    def _capture_deadline_reached(self, elapsed: float, speech_started: float | None) -> bool:
+        if speech_started is None:
+            return elapsed >= self._max_duration_sec
+        return elapsed - speech_started >= self._max_speech_duration_sec
+
+    def _merge_speech_segments(
+        self, segments: list[dict[str, Any]], captured: np.ndarray,
+    ) -> np.ndarray:
+        """Slice each source sample once, including overlapping pre-roll."""
+        pre = 0 if self._debug_disable_extra_pre_roll else int(self._pre_roll_sec * self._sample_rate)
+        ranges: list[tuple[int, int]] = []
+        for segment in sorted(segments, key=lambda item: item["start"]):
+            start = max(0, int(segment["start"]) - pre)
+            end = min(captured.size, int(segment["end"]))
+            if end <= start:
+                continue
+            if ranges and start <= ranges[-1][1]:
+                ranges[-1] = (ranges[-1][0], max(end, ranges[-1][1]))
+            else:
+                ranges.append((start, end))
+        if not ranges:
+            return np.array([], dtype=np.float32)
+        return np.concatenate([captured[start:end] for start, end in ranges])
+
+    def _stream_vad_buffered(self, cancel_event: threading.Event) -> dict[str, Any]:
+        """Consume one utterance while the microphone keeps buffering the next."""
+        if self._buffered_capture is None:
+            self._buffered_capture = BufferedAudioCapture(
+                self._sample_rate, self._device, sd if _HAS_AUDIO_CAPTURE else None,
+                self._capture_buffer_sec, self._read_timeout_sec,
+            )
+            self._buffered_capture.start()
+        capture = self._buffered_capture
+        self._vad.reset()
+        with self._capture_lock:
+            utterance_id = self._active_utterance_id
+        chunks: list[np.ndarray] = []
+        segments: list[dict[str, Any]] = []
+        sample_count = 0
+        resync_samples = 0
+        quiet_samples = 0
+        speech_started: float | None = None
+        last_read = time.monotonic()
+        exit_reason = "cancelled"
+        try:
+            while not cancel_event.is_set():
+                self._set_capture_phase(cancel_event, "buffered_read")
+                chunk = capture.read()
+                if chunk is None:
+                    # Allow the producer to try both backends, each with its
+                    # own no-data deadline; also bound a stuck device open.
+                    if time.monotonic() - last_read >= 2 * self._read_timeout_sec + 1.0:
+                        raise TimeoutError("microphone produced no audio")
+                    continue
+                last_read = time.monotonic()
+                if self._resync_required:
+                    # After lost audio, wait for a quiet boundary before KWS
+                    # or ASR can see anything. Never treat a suffix as a command.
+                    self._vad.accept_waveform(chunk.tolist())
+                    self._refresh_speech_active()
+                    resync_samples += chunk.size
+                    quiet_samples = 0 if self.is_speech_active() else quiet_samples + chunk.size
+                    while not self._vad.empty():
+                        self._vad.pop()
+                    if quiet_samples >= (self._min_silence_dur + self._min_speech_dur) * self._sample_rate:
+                        self._resync_required = False
+                        self._vad.reset()
+                        logger.info("VAD resynchronized after audio gap: %s", utterance_id)
+                    elif resync_samples / self._sample_rate >= self._max_duration_sec:
+                        exit_reason = "audio_resync_timeout"
+                        break
+                    continue
+                chunks.append(chunk)
+                sample_count += chunk.size
+                elapsed = sample_count / self._sample_rate
+                # KWS sees only this consumer's utterance, never queued future audio.
+                self._notify_chunk(chunk)
+                self._vad.accept_waveform(chunk.tolist())
+                self._refresh_speech_active()
+                if speech_started is None and self.is_speech_active():
+                    speech_started = elapsed
+                if not self._vad.empty():
+                    exit_reason = "vad_complete"
+                    break
+                if self._capture_deadline_reached(elapsed, speech_started):
+                    self._vad.flush()
+                    exit_reason = "speech_limit" if speech_started is not None else "wait_timeout"
+                    break
+            if not cancel_event.is_set():
+                while not self._vad.empty():
+                    segments.append(self._debug_segment(self._vad.front))
+                    self._vad.pop()
+        except AudioCaptureGap as exc:
+            # Discard the entire current utterance, not just the missing chunk.
+            exit_reason = "audio_gap"
+            self._resync_required = True
+            segments.clear()
+            logger.warning("Discarding discontinuous utterance %s: %s", utterance_id, exc)
+        except Exception:
+            self._resync_required = True
+            if capture.close():
+                self._buffered_capture = None
+            raise
+        captured = np.concatenate(chunks) if chunks else np.array([], dtype=np.float32)
+        speech = self._merge_speech_segments(segments, captured)
+        result = {
+            "audio_samples": speech, "sample_rate": self._sample_rate,
+            "duration_ms": speech.size / self._sample_rate * 1000.0,
+            "has_voice": bool(speech.size), "utterance_id": utterance_id,
+            "capture_end_reason": exit_reason,
+        }
+        if self._audio_debug.enabled and not cancel_event.is_set():
+            result["debug_audio_dir"] = self._save_capture_debug(
+                utterance_id, captured, segments, speech,
+            )
+        logger.debug("VAD capture ended: utterance_id=%s reason=%s", utterance_id, exit_reason)
+        return result
 
     def _segment_with_pre_roll(
         self,

@@ -106,6 +106,9 @@ class UploadedAudioVAD:
 
     def __init__(self, config: dict[str, Any], detector: Any | None = None) -> None:
         self._sample_rate = int(config.get("sample_rate", 16000))
+        if self._sample_rate != 16000:
+            raise ValueError("Uploaded VAD sample_rate must be 16000")
+        self._num_threads = int(config.get("num_threads", 2))
         self._model_path = str(config.get("vad_model", ""))
         self._threshold = float(config.get("vad_threshold", 0.5))
         self._min_silence_sec = float(config.get("min_silence_dur", 0.5))
@@ -151,7 +154,10 @@ class UploadedAudioVAD:
             min_speech_duration=self._min_speech_sec,
         )
         return VoiceActivityDetector(
-            config=VadModelConfig(silero_vad=silero),
+            config=VadModelConfig(
+                silero_vad=silero, sample_rate=self._sample_rate,
+                num_threads=self._num_threads,
+            ),
             buffer_size_in_seconds=max(60, int(self._max_duration_sec) + 5),
         )
 

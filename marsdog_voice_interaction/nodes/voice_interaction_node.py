@@ -196,10 +196,10 @@ class VoiceInteractionNode(Node):
                 "a non-empty ASR result. Production must keep it false."
             )
         if self._max_interaction_duration <= 0.0:
-            logger.warning(
-                "interaction.max_duration_sec is disabled (test mode): the "
-                "session has no absolute cap and may never end while speech "
-                "continues. Production must restore a positive value."
+            logger.info(
+                "Interaction absolute timeout disabled; idle_timeout_sec=%.1f "
+                "(<=0 disables idle timeout too). stop_listening remains available.",
+                self._idle_timeout,
             )
         self._init_providers()
         self._wire_speaker_enrollment()
@@ -956,6 +956,8 @@ class VoiceInteractionNode(Node):
             self._prune_interaction_holds_locked(now)
             if self._interaction_holds:
                 return ""
+            if self._idle_timeout <= 0.0:
+                return ""
             if now - self._last_interaction_time <= self._idle_timeout:
                 return ""
             return self._interaction_id
@@ -1056,6 +1058,7 @@ class VoiceInteractionNode(Node):
                             "stage_complete",
                             stage="vad_capture",
                             result="voice" if has_voice else "silence",
+                            capture_end_reason=str(result.get("capture_end_reason", "")),
                             interaction_id=self._interaction_id,
                             utterance_id=utterance_id,
                             latency_ms=round(capture_latency_ms, 2),
@@ -1095,6 +1098,9 @@ class VoiceInteractionNode(Node):
                             )
                         elif self._is_interaction_active():
                             self._start_interaction_capture(audio)
+                        elif not (self._enrollment.speaker_session is not None
+                                  and not self._enrollment.speaker_session.done):
+                            self._cancel_audio_capture(audio)
                         return
                     if enrollment_active:
                         return

@@ -100,9 +100,8 @@ Model Intent 沿用已交付下游的业务事件名；明确的姿态、移动�
 
 状态结束原因当前为：
 
-- `interaction_timeout`：生产配置在最后一次被接受的语义结果后 20 秒无新结果；纯
-  VAD、空 ASR、NEUTRAL/UNKNOWN 和仅 KNOWN 摘要不刷新会话。单次会话另有 120 秒
-  绝对上限，活动刷新和 hold 租约都不能突破。
+- `interaction_timeout`：仅在配置正数空闲/总时长阈值时触发。当前正式配置两项均为 0，
+  唤醒后持续监听，静音也不退出；非空 ASR 仍记录会话活动。
 - `stop_listening`：Service 主动结束。
 
 行为树进行唤醒转向、视觉锁定或靠近期间，可调用 VoiceTask 的
@@ -167,8 +166,8 @@ Provider，不能只按模式名称判断真机或 Mock。
 
 | 配置项 | 当前值/含义 |
 |---|---|
-| `interaction.idle_timeout_sec` | 生产配置为 20 秒，从最后一次被接受的业务语义结果开始计算；纯 VAD/空 ASR/拒识不续期 |
-| `interaction.max_duration_sec` | 生产配置为 120 秒；单次唤醒会话硬上限，不被活动或租约延长；`0` 或负数 = 不设上限（测试模式） |
+| `interaction.idle_timeout_sec` | 正式配置为 0，禁用空闲超时；正数时从最后一次非空 ASR 开始计算 |
+| `interaction.max_duration_sec` | 正式配置为 0，禁用总时长上限；正数时不被活动或租约延长 |
 | `interaction.refresh_on_any_speech` | 测试专用，生产为 `false` 时非空 ASR 文本即刷新，不要求语义接受；`true` 时仅 VAD 检测到语音也会刷新 |
 | `interaction.hold_max_lease_sec` | 单次会话保持租约上限 20 秒，调用方需定期续租 |
 | `topics.*` | 对外 Topic/Service 名称 |

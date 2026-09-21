@@ -326,9 +326,9 @@ object_catalog_version=<目录版本>
 |---|---|---|---|---|---|
 | 旺财看看我 | `CALL\|NONE\|NONE` | `EVT_VOICE_CALL_NAME` | `semantic_classification` | 否 | 只表达呼唤，不生成动作候选。 |
 | 你今天表现得特别优秀 | `PRAISE\|NONE\|NONE` | `EVT_VOICE_PRAISE` | `semantic_classification` | 否 | 单一社交事件。 |
-| 你表现很好现在坐稳 | `PRAISE\|SIT\|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `specific_command` → `semantic_classification` | 否 → 是 → 否 | 只有 SIT 是可执行事件；KNOWN 只是命令摘要。 |
+| 你表现很好现在坐好 | `PRAISE\|SIT\|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `specific_command` → `semantic_classification` | 否 → 是 → 否 | ASR 含“坐好”动作证据；只有 SIT 是可执行事件，KNOWN 只是命令摘要。 |
 | 往前走几步 | `NONE\|GO\|DO` | `EVT_VOICE_COMMAND_WALK` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | 模型标签使用 `GO`，具体事件按白名单映射为 WALK。 |
-| 站端正了 | `NONE\|STAND\|DO` | `EVT_VOICE_COMMAND_STAND_UP` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | `STAND` 是明确的起立动作。 |
+| 起立一下 | `NONE\|STAND\|DO` | `EVT_VOICE_COMMAND_STAND_UP` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | ASR 含“起立”动作证据；`STAND` 是明确的起立动作。 |
 | 保持站立姿势 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_STAND_STILL` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | `STAY` 结合 ASR 中的站立语义解析为 STAND_STILL。 |
 | 保持原地不要走 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_HOLD_POSITION` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | `STAY` 结合 ASR 中的原地/不要走语义解析为 HOLD_POSITION。 |
 | 不允许再碰这些吃的 | `SCOLD\|EAT\|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `semantic_classification` | 否 → 否 | `EAT\|STOP` 不在具体动作白名单，不能拼出具体命令事件。 |
@@ -361,10 +361,10 @@ object_catalog_version=<目录版本>
 | 回家 | 现在回到你的窝里 | `NONE\|GO_HOME\|DO` | `EVT_VOICE_COMMAND_GO_HOME` → `EVT_VOICE_COMMAND_KNOWN` |
 | 靠近点 | 再贴近我一些 | `NONE\|APPROACH\|DO` | `EVT_VOICE_COMMAND_APPROACH` → `EVT_VOICE_COMMAND_KNOWN` |
 | 退后 | 向后退两步 | `NONE\|BACK\|DO` | `EVT_VOICE_COMMAND_BACK_UP` → `EVT_VOICE_COMMAND_KNOWN` |
-| 坐 / 坐下 / 蹲下 | 把屁股坐稳 | `NONE\|SIT\|DO` | `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
+| 坐 / 坐下 / 蹲下 | 把屁股坐好 | `NONE\|SIT\|DO` | `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
 | 趴下 / 躺下 | 趴到垫子上 | `NONE\|LIE\|DO` | `EVT_VOICE_COMMAND_LIE_DOWN` → `EVT_VOICE_COMMAND_KNOWN` |
 | 装死 | 假装中枪倒下 | `NONE\|PLAY_DEAD\|DO` | `EVT_VOICE_COMMAND_PLAY_DEAD` → `EVT_VOICE_COMMAND_KNOWN` |
-| 起来 / 站起来 | 站端正了 | `NONE\|STAND\|DO` | `EVT_VOICE_COMMAND_STAND_UP` → `EVT_VOICE_COMMAND_KNOWN` |
+| 起来 / 站起来 | 起立一下 | `NONE\|STAND\|DO` | `EVT_VOICE_COMMAND_STAND_UP` → `EVT_VOICE_COMMAND_KNOWN` |
 | 站好 / 站着 | 保持站立姿势 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_STAND_STILL` → `EVT_VOICE_COMMAND_KNOWN` |
 | 别动 / 等着 / 不许动 | 保持原地不要走 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_HOLD_POSITION` → `EVT_VOICE_COMMAND_KNOWN` |
 | 握手 / 抬手 | 把爪子递给我 | `NONE\|SHAKE\|DO` | `EVT_VOICE_COMMAND_SHAKE_HAND` → `EVT_VOICE_COMMAND_KNOWN` |
@@ -375,7 +375,7 @@ object_catalog_version=<目录版本>
 | 安静 / 闭嘴 / 别叫 | 现在不要发出叫声 | `NONE\|BARK\|STOP` | `EVT_VOICE_COMMAND_QUIET` → `EVT_VOICE_COMMAND_KNOWN` |
 | 昵称：小狗 / 小宝贝等 | 旺财看看我 | `CALL\|NONE\|NONE` | `EVT_VOICE_CALL_NAME` |
 | 夸奖 / 鼓励 | 你今天表现得特别优秀 | `PRAISE\|NONE\|NONE` | `EVT_VOICE_PRAISE` |
-| 夸奖并要求坐下 | 你表现很好现在坐稳 | `PRAISE\|SIT\|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
+| 夸奖并要求坐下 | 你表现很好现在坐好 | `PRAISE\|SIT\|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
 | 一般责备 / 纠正 | 你这样做真的不听话 | `SCOLD\|NONE\|NONE` | `EVT_VOICE_SCOLD` |
 | 不准吃饭 | 不允许再碰这些吃的 | `SCOLD\|EAT\|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` |
 | 不怕不怕 / 没事没事 | 别紧张我就在这里 | `COMFORT\|NONE\|NONE` | `EVT_VOICE_COMFORT` |
@@ -383,8 +383,8 @@ object_catalog_version=<目录版本>
 | 摸摸头 / 抱抱 | 让我抱抱安慰你 | `COMFORT\|NONE\|NONE` | `EVT_VOICE_COMFORT` |
 | 吃饭 / 吃零食 / 吃罐罐 | 现在去吃点东西 | `NONE\|EAT\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
 | 肚子饿不饿 / 想不想吃 / 吃啥 | 现在是不是有点饿 | `NONE\|EAT\|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 去尿尿 / 去便便 | 该去解决一下大小便了 | `NONE\|TOILET\|DO` | `EVT_VOICE_COMMAND_TOILET` → `EVT_VOICE_COMMAND_KNOWN` |
-| 擦一擦手 / 脚 | 把爪子清理干净 | `NONE\|CLEAN\|DO` | `EVT_VOICE_COMMAND_CLEAN` → `EVT_VOICE_COMMAND_KNOWN` |
+| 去尿尿 / 去便便 | 该去尿尿了 | `NONE\|TOILET\|DO` | `EVT_VOICE_COMMAND_TOILET` → `EVT_VOICE_COMMAND_KNOWN` |
+| 擦一擦手 / 脚 | 把爪子洗干净 | `NONE\|CLEAN\|DO` | `EVT_VOICE_COMMAND_CLEAN` → `EVT_VOICE_COMMAND_KNOWN` |
 | 睡觉 / 睡吧 / 休息 | 回窝好好休息一会儿 | `NONE\|SLEEP\|DO` | `EVT_VOICE_COMMAND_SLEEP` → `EVT_VOICE_COMMAND_KNOWN` |
 | 来玩 / 一起玩 / 玩不玩 | 咱们一起做个游戏 | `PLAYFUL\|PLAY\|DO` | `EVT_VOICE_PLAY_INTERACTION`（去重后 1 条） |
 | 拔河比赛 | 和我进行一场拔河 | `PLAYFUL\|TUG\|DO` | `EVT_VOICE_PLAY_INTERACTION`（去重后 1 条） |

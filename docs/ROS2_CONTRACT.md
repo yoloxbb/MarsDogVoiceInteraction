@@ -213,7 +213,7 @@ Tree、Vision 或 Action，不能把 Voice 发布成功视为这些下游已经�
 
 | 值 | 说明 |
 |---|---|
-| `interaction_timeout` | 最后一次被接受的词库/KWS/模型语义结果后超过 `idle_timeout_sec`，或会话达到 `max_duration_sec` 绝对上限；纯 VAD、空 ASR、NEUTRAL/UNKNOWN 和仅 KNOWN 摘要不刷新。测试模式（`refresh_on_any_speech=true`）下任何 VAD 语音都算活动，且 `max_duration_sec=0` 表示不设绝对上限 |
+| `interaction_timeout` | 仅在对应阈值为正数时触发空闲/总时长超时；非空 ASR 刷新空闲计时。正式配置两项均为 0，禁用自动超时 |
 | `stop_listening` | 外部通过 `/perception/voice/task` 主动停止 |
 
 ### 完整确定性产品词库
@@ -469,8 +469,8 @@ float64 latency_ms     # 处理耗时
 会话空闲计时在 ASR 返回非空文本时立即刷新，发生在声纹和语义处理之前。
 不要求命中词库或触发行为，NEUTRAL、UNKNOWN、语义拒识文本同样续期；
 空字符串、纯空白、ASR 异常以及只有 KWS 候选的情况不刷新。
-正式配置空闲超时为 20 秒，会话总时长上限仍为 120 秒，ASR 续期不重置
-会话开始时间。日志中此次续期原因为 `last_activity_reason=asr_result`。
+正式配置 `idle_timeout_sec=0`、`max_duration_sec=0`，唤醒后永久监听，静音也不退出。
+可调用 `stop_listening` 主动结束。ASR 活动仍记录为 `last_activity_reason=asr_result`。
 
 跳过唤醒环节，直接开始录音。用于外部触发（如视觉模块联动）。
 
@@ -705,8 +705,8 @@ PUT、单文件新增与批量新增使用相同的 WAV/VAD/有效语音/16 kHz 
 
 设置 `mock.enabled: true`、`mock.mode: event` 可直接模拟下游语音事件，
 不加载硬件和模型。每轮按 `EVT_VOICE_WAKEUP → 一个同会话语音事件 →
-EVT_STATE_CHANGED(state=idle)` 运行，整轮保持同一个 `interaction_id`；空闲终止
-仍遵守 10 秒超时和会话保持租约。
+EVT_STATE_CHANGED(state=idle)` 运行，整轮保持同一个 `interaction_id`；正式配置下
+不会因空闲或总时长自动终止，必须由 `stop_listening`（或明确的结束流程）结束。
 
 ```bash
 uv run marsdog-voice-interaction \

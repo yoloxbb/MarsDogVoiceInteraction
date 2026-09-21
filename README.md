@@ -170,8 +170,8 @@ uv run marsdog-voice-interaction \
 | `command_lexicon` | 完整产品词库、19 组核心子集及每标准词/句 10 个受控精确匹配扩展 |
 | `speaker_api` | 声纹上传 API 的开关、监听地址、端口和大小限制 |
 | `topics` | ROS2 Topic 和 Service 名称 |
-| `interaction.idle_timeout_sec` | 最后一次 ASR 返回非空文本后等待多久结束会话；NEUTRAL/UNKNOWN 和语义拒识也续期，纯 VAD、空白/空 ASR 不续期 |
-| `interaction.max_duration_sec` | 单次唤醒会话绝对最长时间；不被语音活动或 hold 租约延长；`0` 或负数 = 不设上限（测试模式） |
+| `interaction.idle_timeout_sec` | 非空 ASR 后的空闲超时；`<=0` 禁用。正式配置为 `0`，唤醒后持续监听 |
+| `interaction.max_duration_sec` | 单次唤醒会话总时长上限；`<=0` 禁用。正式配置为 `0`，由 `stop_listening` 主动结束 |
 | `interaction.hold_max_lease_sec` | 外部会话保持租约的单次最长秒数 |
 | `interaction.refresh_on_any_speech` | 测试专用：`true` 时 VAD 检测到语音即刷新空闲计时器；生产为 `false` 时要求 ASR 返回非空文本，不要求语义接受。见 `docs/TESTING_LOG_GUIDE.md` 的「测试模式」小节 |
 | `providers.wakeup` | 讯飞串口和唤醒事件类型 |
@@ -196,7 +196,17 @@ ROS2 绝对名称。
 | `min_speech_dur` | `0.25` 秒 | 低于此时长的声音不作为有效语音 |
 | `min_silence_dur` | `0.5` 秒 | 句尾持续静音达到该时长后结束切分 |
 | `pre_roll_sec` | `0.3` 秒 | 补回 VAD 触发前的音频，防止漏掉句首 |
-| `max_duration_sec` | `8.0` 秒 | 单轮录音的最长等待/采集时间 |
+| `max_duration_sec` | `8.0` 秒 | 尚未检测到语音时的最长等待时长 |
+| `max_speech_duration_sec` | `8.0` 秒 | 检测到语音后独立计时的最长时长 |
+| `read_timeout_sec` | `2.0` 秒 | 单个录音后端连续无音频数据的超时 |
+| `continuous_capture` | `true` | 会话内保持麦克风打开，ASR/声纹/语义处理期间继续缓存音频 |
+| `capture_buffer_sec` | `6.0` 秒 | 待处理音频缓存容量及最大保留时间；超限丢弃受影响的句子 |
+
+持续采集的缓冲区只存音频，KWS 在逐句消费时运行，因此下一句不会污染当前句的
+候选。会话结束或取消时关闭设备并清空缓存。缓存溢出、录音丢帧或缓存过期时，
+丢弃当前句并等待静音边界后恢复，不把缺失前缀的残句当成新命令。
+VAD 检测灵敏度参数保持原值；采样率限定为 16 kHz，`num_threads` 显式传给
+实时和上传 VAD。`continuous_capture: false` 可恢复逐句开关设备的兼容路径。
 
 调节 VAD 阈值前，应先检查系统麦克风输入设备和硬件增益。阈值过低会把风扇、
 碰撞声等环境噪声误判为语音。
@@ -402,7 +412,7 @@ ros2 service call /perception/voice/task \
 
 同一 `hold_token` 重复申请是幂等续租。租约只暂停空闲终止，不暂停录音、KWS
 或 STOP；到达目标后用 `reset_idle_timer=true` 释放，会从释放时重新等待当前配置的
-`idle_timeout_sec`（生产配置为 20 秒）。
+`idle_timeout_sec`（正式配置为 0，空闲超时已禁用）。
 
 ## Mock 联调
 
@@ -583,11 +593,11 @@ MarsDogVoiceInteraction/
   `should_trigger_behavior_tree=true` 授权 Tree 生成一次性社交反应。
 - 每句话创建新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享
   该 ID。
-- 只有被接受的词库、KWS 或 Model Intent 业务语义刷新会话活动时间。纯 VAD、空 ASR、
-  NEUTRAL/UNKNOWN、仅 KNOWN 摘要、纯静音和缓存中的 KWS 候选均不刷新。
+- 非空 ASR 文本刷新会话活动时间，与是否接受语义无关；纯 VAD、空 ASR 和
+  缓存中的 KWS 候选不刷新。
 - 会话静默时长使用单调时钟计算，不受 NTP、RTC 或人工调整系统时间影响。
-- 单次唤醒会话受 `max_duration_sec` 绝对上限约束；生产配置为 120 秒，活动刷新和
-  hold 租约都不能突破该上限。
+- 正式配置的空闲超时和总时长上限均为 0，唤醒后永久监听直到 `stop_listening`
+  或节点关闭。若配置正数，总时长上限仍不能被活动或 hold 租约延长。
 - 活跃 VAD 采集不能被会话静默超时截断。
 - 新增确定性命令时应同步修改 `command_catalog.yaml`、事件类型、测试、ROS2 契约
   以及下游行为树和 Action 行为映射；Voice 不直接调用动作系统。

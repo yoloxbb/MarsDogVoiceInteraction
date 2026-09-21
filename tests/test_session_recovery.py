@@ -424,6 +424,28 @@ def test_zero_max_duration_never_triggers_absolute_timeout() -> None:
     assert node._timeout_interaction_id(500.0) == ""
 
 
+def test_permanent_session_does_not_timeout_during_long_silence(monkeypatch: Any) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._idle_timeout = 0.0
+    node._max_interaction_duration = 0.0
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 1000000.0)
+    node._poll()
+    assert node._interaction_active
+    assert not node.published
+    assert node._end_interaction("stop_listening")
+    assert not node._interaction_active
+    assert node.published[-1]["state_reason"] == "stop_listening"
+
+
+def test_disabling_idle_timeout_preserves_configured_absolute_cap() -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._idle_timeout = 0.0
+    node._max_interaction_duration = 120.0
+    node._interaction_started_time = 100.0
+    assert node._timeout_interaction_id(150.0) == ""
+    assert node._timeout_interaction_id(221.0) == node._interaction_id
+
+
 def test_max_duration_non_positive_disables_absolute_cap() -> None:
     resolve = VoiceInteractionNode._resolve_max_interaction_duration
 
@@ -1210,22 +1232,18 @@ def test_blocked_arecord_read_is_terminated_during_cancel(
     monkeypatch: Any,
 ) -> None:
     import subprocess
+    import os
     from marsdog_voice_interaction.providers import audio_sherpa as audio_module
 
     read_started = threading.Event()
     read_released = threading.Event()
 
-    class BlockingStdout:
-        def read(self, size: int) -> bytes:
-            read_started.set()
-            read_released.wait(5.0)
-            return b"\x00" * size
-
     class BlockingProcess:
         instances: list["BlockingProcess"] = []
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            self.stdout = BlockingStdout()
+            read_fd, self.write_fd = os.pipe()
+            self.stdout = os.fdopen(read_fd, "rb", buffering=0)
             self.running = True
             self.terminated = False
             self.__class__.instances.append(self)
@@ -1243,6 +1261,9 @@ def test_blocked_arecord_read_is_terminated_during_cancel(
             timeout: float | None = None,
         ) -> tuple[bytes, bytes]:
             del timeout
+            if not self.stdout.closed:
+                self.stdout.close()
+                os.close(self.write_fd)
             return b"", b""
 
         def kill(self) -> None:
@@ -1257,6 +1278,13 @@ def test_blocked_arecord_read_is_terminated_during_cancel(
             return True
 
     monkeypatch.setattr(audio_module, "_HAS_AUDIO_CAPTURE", False)
+    original_read = audio_module.read_pipe_chunk
+
+    def observed_read(*args, **kwargs):
+        read_started.set()
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(audio_module, "read_pipe_chunk", observed_read)
     monkeypatch.setattr(subprocess, "Popen", BlockingProcess)
     provider = AudioSherpaProvider({})
     provider._vad = FakeVad()

@@ -55,11 +55,11 @@ topics:
 
 interaction:
   # ASR 返回非空文本即刷新空闲计时，不要求命中命令或通过语义校验。
-  idle_timeout_sec: 20.0
+  # 0 = 不因空闲退出；唤醒后持续监听，直到显式 stop_listening 或节点关闭。
+  idle_timeout_sec: 0.0
   hold_max_lease_sec: 20.0
-  # 无论环境语音或下游租约如何续期，单次唤醒会话最多保留两分钟。
-  # 0 或负数 = 不设绝对上限（测试模式，见 docs/TESTING_LOG_GUIDE.md）。
-  max_duration_sec: 120.0
+  # 0 = 不设会话总时长上限。
+  max_duration_sec: 0.0
   # ⚠️ 测试专用：true 时 VAD 检测到任何语音即刷新空闲计时器，不再要求
   # 「ASR 返回非空文本」。仅 VAD 有声音、ASR 为空也会续期 —— 生产保持 false。
   # 开启方法：本项设 true，并把上面的 max_duration_sec 设为 0。
@@ -83,6 +83,12 @@ providers:
       vad_model: ../../models/vad/silero_vad.onnx
       sample_rate: 16000
       max_duration_sec: 8.0
+      # 等待语音和开始说话后的上限分别计时，避免接近等待上限时截断。
+      max_speech_duration_sec: 8.0
+      read_timeout_sec: 2.0
+      # 会话内持续录音，识别期间最多缓存 6 秒；溢出/过期丢弃，不执行残句。
+      continuous_capture: true
+      capture_buffer_sec: 6.0
       vad_threshold: 0.5
       min_silence_dur: 0.5
       min_speech_dur: 0.25
