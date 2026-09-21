@@ -19,6 +19,7 @@ class VadTrimResult:
 
     samples: np.ndarray
     sample_rate: int
+    source_sample_rate: int
     wav_bytes: bytes
     source_duration_ms: float
     speech_duration_ms: float
@@ -90,6 +91,16 @@ def _resample(
     return np.ascontiguousarray(result, dtype=np.float32)
 
 
+def normalize_pcm16_wav(
+    payload: bytes,
+    target_rate: int = 16000,
+) -> tuple[np.ndarray, int, bytes]:
+    """Decode a PCM16 WAV and return normalized mono PCM16 WAV data."""
+    samples, source_rate = decode_pcm16_wav(payload)
+    normalized = _resample(samples, source_rate, int(target_rate))
+    return normalized, int(target_rate), encode_pcm16_wav(normalized, target_rate)
+
+
 class UploadedAudioVAD:
     """Own a dedicated sherpa-onnx VAD for uploaded, already-recorded audio."""
 
@@ -155,6 +166,19 @@ class UploadedAudioVAD:
         ranges = self._detect_ranges(normalized)
         if not ranges:
             raise ValueError("VAD 未检测到有效语音")
+        speech_duration_sec = sum(end - start for start, end in ranges) / self._sample_rate
+        if speech_duration_sec < self._min_effective_sec:
+            raise ValueError(
+                "VAD 有效语音过短，至少需要 "
+                f"{self._min_effective_sec:g} 秒"
+            )
+        segment_count = len(ranges)
+        pre = int(self._pre_roll_sec * self._sample_rate)
+        post = int(self._post_roll_sec * self._sample_rate)
+        ranges = self._merge_ranges([
+            (max(0, start - pre), min(len(normalized), end + post))
+            for start, end in ranges
+        ])
 
         separator = np.zeros(
             int(self._join_silence_sec * self._sample_rate),
@@ -166,19 +190,14 @@ class UploadedAudioVAD:
                 pieces.append(separator)
             pieces.append(normalized[start:end])
         speech = np.ascontiguousarray(np.concatenate(pieces), dtype=np.float32)
-        speech_duration_sec = len(speech) / float(self._sample_rate)
-        if speech_duration_sec < self._min_effective_sec:
-            raise ValueError(
-                "VAD 有效语音过短，至少需要 "
-                f"{self._min_effective_sec:g} 秒"
-            )
         return VadTrimResult(
             samples=speech,
             sample_rate=self._sample_rate,
+            source_sample_rate=source_rate,
             wav_bytes=encode_pcm16_wav(speech, self._sample_rate),
             source_duration_ms=round(source_duration_sec * 1000.0, 2),
             speech_duration_ms=round(speech_duration_sec * 1000.0, 2),
-            segment_count=len(ranges),
+            segment_count=segment_count,
         )
 
     def _detect_ranges(self, samples: np.ndarray) -> list[tuple[int, int]]:
@@ -194,14 +213,12 @@ class UploadedAudioVAD:
             detector.flush()
             self._drain(detector, detected)
 
-        pre = int(self._pre_roll_sec * self._sample_rate)
-        post = int(self._post_roll_sec * self._sample_rate)
-        padded = [
-            (max(0, start - pre), min(len(samples), end + post))
+        bounded = [
+            (max(0, start), min(len(samples), end))
             for start, end in detected
-            if end > start
+            if min(len(samples), end) > max(0, start)
         ]
-        return self._merge_ranges(padded)
+        return self._merge_ranges(bounded)
 
     @staticmethod
     def _drain(detector: Any, target: list[tuple[int, int]]) -> None:

@@ -40,6 +40,27 @@ _CHUNK_SAMPLES = 320  # 20ms
 _CAPTURE_POLL_SEC = 0.02
 
 
+def _format_frame_chain(frame: Any, limit: int = 64) -> str:
+    """Render a live frame chain without reading source files.
+
+    ``traceback.format_stack`` resolves each frame's source line through
+    ``linecache``, which touches the filesystem from the calling thread.
+    On this target that stalls the caller for a second or more when the
+    storage is busy, so walk ``f_back`` and emit file/line/function only.
+    """
+    lines: list[str] = []
+    current = frame
+    while current is not None and len(lines) < limit:
+        code = current.f_code
+        lines.append(
+            f'  File "{code.co_filename}", '
+            f"line {current.f_lineno}, in {code.co_name}"
+        )
+        current = current.f_back
+    lines.reverse()
+    return "\n".join(lines)
+
+
 class AudioSherpaProvider(BaseProvider):
     """VAD provider with real-time sherpa-onnx Silero VAD.
 
@@ -90,6 +111,9 @@ class AudioSherpaProvider(BaseProvider):
         self._capture_started_monotonic = 0.0
         self._next_utterance_id = ""
         self._active_utterance_id = ""
+        # Workers that outlived their join budget.  They are detached from
+        # the capture state above so they cannot block the next capture.
+        self._orphan_workers: set[threading.Thread] = set()
         self._chunk_callback: (
             Callable[[np.ndarray, int], None] | None
         ) = None
@@ -147,11 +171,36 @@ class AudioSherpaProvider(BaseProvider):
 
     def stop(self) -> None:
         self.cancel_capture()
+        self._drain_orphan_workers()
         # Set _vad to None after capture cancellation so the worker cannot use
         # a released detector.
         self._vad = None
         self.available = False
         logger.info("AudioSherpaProvider stopped")
+
+    def _drain_orphan_workers(self, timeout: float = 0.1) -> None:
+        """Give detached workers a short chance to finish before shutdown."""
+        with self._capture_lock:
+            orphans = list(self._orphan_workers)
+            self._orphan_workers.clear()
+        for thread in orphans:
+            if thread.is_alive():
+                thread.join(timeout=timeout)
+
+    def _prune_dead_orphans(self) -> None:
+        """Forget detached workers that have since exited.
+
+        A worker is only registered as an orphan when it outlived its cancel
+        join budget, and on most runs it does exit a moment later. Without
+        this the set would grow for the whole process lifetime, since only
+        stop() drains it.
+        """
+        with self._capture_lock:
+            if not self._orphan_workers:
+                return
+            dead = {t for t in self._orphan_workers if not t.is_alive()}
+            if dead:
+                self._orphan_workers -= dead
 
     # ── Public API ─────────────────────────────────────────────
 
@@ -167,26 +216,33 @@ class AudioSherpaProvider(BaseProvider):
         with self._capture_lock:
             self._next_utterance_id = str(utterance_id).strip()
 
-    def start_capture(self) -> None:
+    def start_capture(self) -> bool:
         """Start background capture (non-blocking).
 
         Call this when wakeup is detected. The capture thread will
         stream audio to VAD until a speech segment is found or
         max_duration_sec elapses. Call poll_result() to check.
+
+        Returns:
+            True when a new capture worker was started, False when the
+            request was refused (unavailable, already capturing, or the
+            previous worker still holds the device).
         """
+        self._prune_dead_orphans()
         if not self.available:
-            return
+            return False
         if self._capturing:
-            return  # already capturing
+            return False  # already capturing
         if (
             self._capture_thread is not None
             and self._capture_thread.is_alive()
         ):
-            logger.warning(
+            logger.error(
                 "VAD capture start ignored because the previous worker "
-                "has not exited"
+                "has not exited (utterance_id=%s)",
+                self._active_utterance_id,
             )
-            return
+            return False
 
         cancel_event = threading.Event()
         with self._capture_lock:
@@ -213,6 +269,7 @@ class AudioSherpaProvider(BaseProvider):
             self._active_utterance_id,
             _CAPTURE_BACKEND or "none",
         )
+        return True
 
     def cancel_capture(self, timeout: float = 2.0) -> bool:
         """Cancel an active capture and discard any pending result.
@@ -266,6 +323,17 @@ class AudioSherpaProvider(BaseProvider):
                 self._capture_cancel_event = None
                 self._capture_phase = "idle"
                 self._capture_started_monotonic = 0.0
+            elif self._capture_thread is thread:
+                # The worker outlived its join budget.  Detach it so it can
+                # no longer refuse the next capture; its own finally block
+                # compares against a stale cancel_event and stays out of the
+                # way of whichever worker comes next.
+                self._capture_thread = None
+                self._capture_cancel_event = None
+                self._capture_phase = "idle"
+                self._capture_started_monotonic = 0.0
+                self._active_utterance_id = ""
+                self._orphan_workers.add(thread)
 
         if not worker_stopped:
             worker_age = max(0.0, time.monotonic() - started) if started else 0.0
@@ -287,8 +355,9 @@ class AudioSherpaProvider(BaseProvider):
                     "utterance_id=%s thread=%s:\n%s",
                     utterance_id,
                     thread.name,
-                    "".join(traceback.format_stack(frame)),
+                    _format_frame_chain(frame),
                 )
+        self._prune_dead_orphans()
         return worker_stopped
 
     @staticmethod
@@ -308,8 +377,9 @@ class AudioSherpaProvider(BaseProvider):
         """Non-blocking poll for capture result.
 
         Returns:
-            Dict with audio_samples, sample_rate, duration_ms, has_voice,
-            or None if capture is still in progress.
+            Dict with audio_samples, sample_rate, duration_ms, has_voice and
+            the utterance_id the worker actually captured, or None if capture
+            is still in progress.
         """
         with self._capture_lock:
             result = self._capture_result
@@ -522,6 +592,13 @@ class AudioSherpaProvider(BaseProvider):
             with self._capture_lock:
                 if self._capture_cancel_event is cancel_event:
                     if not cancel_event.is_set() and result is not None:
+                        # Stamp the worker's own ID before it is cleared
+                        # below. The node may have advanced to an utterance
+                        # this provider refused to start; the caller must
+                        # relabel nothing and must not adopt this audio under
+                        # the newer ID.
+                        if not result.get("utterance_id"):
+                            result["utterance_id"] = utterance_id
                         self._capture_result = result
                     self._capturing = False
                     self._speech_active = False
@@ -788,7 +865,7 @@ class AudioSherpaProvider(BaseProvider):
                 "duration_ms": (len(all_audio) / self._sample_rate) * 1000.0,
                 "has_voice": False,
             }
-        if self._audio_debug.enabled:
+        if self._audio_debug.enabled and not cancel_event.is_set():
             result["debug_audio_dir"] = self._save_capture_debug(
                 utterance_id,
                 np.asarray(all_audio, dtype=np.float32),
@@ -996,7 +1073,7 @@ class AudioSherpaProvider(BaseProvider):
                 "duration_ms": (captured.size / self._sample_rate) * 1000.0,
                 "has_voice": False,
             }
-        if self._audio_debug.enabled:
+        if self._audio_debug.enabled and not cancel_event.is_set():
             result["debug_audio_dir"] = self._save_capture_debug(
                 utterance_id,
                 captured,

@@ -68,10 +68,10 @@ def test_keyword_file_label_inventory_matches_expected() -> None:
         if line.strip()
     )
     assert labels == Counter({
-        "COME": 5,
+        "COME": 4,
         "SHAKE_HAND": 2,
         "HIGH_FIVE": 2,
-        "SIT": 4,
+        "SIT": 3,
         "LIE_DOWN": 3,
         "STAND_UP": 3,
         "WAIT": 2,
@@ -80,11 +80,25 @@ def test_keyword_file_label_inventory_matches_expected() -> None:
         "SPIN": 2,
         "DROP": 4,
         "PLAY_DEAD": 2,
-        "WALK": 1,
         "GO_HOME": 1,
         "BACK_UP": 1,
         "APPROACH": 1,
         "STAND_STILL": 1,
         "HOLD_POSITION": 1,
         "QUIET": 1,
+        "EAT_CANNED_FOOD": 1,
+        "GO_GET_IT": 1,
     })
+
+
+def test_keyword_file_excludes_single_character_chinese_actions() -> None:
+    keywords = (
+        Path(__file__).parents[1] / "config" / "kws_keywords_raw.txt"
+    ).read_text(encoding="utf-8").splitlines()
+    phrases = {
+        line.rsplit("@", 1)[0].strip()
+        for line in keywords
+        if line.strip()
+    }
+
+    assert {"走", "来", "坐"}.isdisjoint(phrases)

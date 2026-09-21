@@ -11,6 +11,10 @@ Usage::
 
     python scripts/generate_kws_keywords.py          # write kws_keywords.txt
     python scripts/generate_kws_keywords.py --check  # verify, write nothing
+
+``--check`` also validates that every generated token really exists in the
+model's ``tokens.txt``.  A keyword built from unknown tokens never fires, and
+that failure is silent at runtime, so it is worth catching here.
 """
 
 from __future__ import annotations
@@ -19,9 +23,56 @@ import argparse
 import sys
 from pathlib import Path
 
+import yaml
+
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 _RAW_PATH = _CONFIG_DIR / "kws_keywords_raw.txt"
 _OUT_PATH = _CONFIG_DIR / "kws_keywords.txt"
+_VOICE_CONFIG_PATH = _CONFIG_DIR / "voice.yaml"
+
+
+def _default_tokens_path() -> Path | None:
+    """Best-effort lookup of the KWS model's tokens.txt from voice.yaml."""
+
+    try:
+        voice = yaml.safe_load(_VOICE_CONFIG_PATH.read_text(encoding="utf-8"))
+        model_dir = (
+            voice["providers"]["kws"]["config"]["model_dir"]
+        )
+    except (OSError, KeyError, TypeError, yaml.YAMLError):
+        return None
+    model_dir = Path(str(model_dir)).expanduser()
+    if not model_dir.is_absolute():
+        # model_dir in voice.yaml is relative to this package's config dir.
+        model_dir = (_CONFIG_DIR / model_dir).resolve()
+    tokens = model_dir / "tokens.txt"
+    return tokens if tokens.is_file() else None
+
+
+def load_known_tokens(tokens_path: Path) -> set[str]:
+    """Return the token symbols declared in a sherpa-onnx ``tokens.txt``."""
+
+    known: set[str] = set()
+    for line in tokens_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if parts:
+            known.add(parts[0])
+    return known
+
+
+def validate_tokens(rendered: str, known: set[str]) -> list[tuple[str, str]]:
+    """Return ``(keyword_line, unknown_token)`` for every unknown token."""
+
+    unknown: list[tuple[str, str]] = []
+    for line in rendered.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        keyword, _, _label = stripped.rpartition("@")
+        for token in keyword.split():
+            if token not in known:
+                unknown.append((stripped, token))
+    return unknown
 
 
 # English keywords: plain phrase -> ARPABET phonemes (stress digits 0/1/2).
@@ -114,20 +165,53 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="verify generated content matches the current file, write nothing",
     )
+    parser.add_argument(
+        "--tokens",
+        default=None,
+        help=(
+            "path to the KWS model's tokens.txt for token validation; "
+            "defaults to the model_dir declared in config/voice.yaml"
+        ),
+    )
     args = parser.parse_args(argv)
 
     rendered = generate()
+    tokens_path = (
+        Path(args.tokens).expanduser()
+        if args.tokens else _default_tokens_path()
+    )
+
+    status = 0
     if args.check:
         current = _OUT_PATH.read_text(encoding="utf-8")
         if rendered == current:
             print(f"OK: {_OUT_PATH} is up to date")
-            return 0
-        print(f"DIFF: {_OUT_PATH} is stale; run without --check to regenerate")
-        return 1
+        else:
+            print(f"DIFF: {_OUT_PATH} is stale; run without --check to regenerate")
+            status = 1
+    else:
+        _OUT_PATH.write_text(rendered, encoding="utf-8")
+        print(f"Wrote {_OUT_PATH} ({rendered.count(chr(10))} lines)")
 
-    _OUT_PATH.write_text(rendered, encoding="utf-8")
-    print(f"Wrote {_OUT_PATH} ({rendered.count(chr(10))} lines)")
-    return 0
+    if tokens_path is None or not tokens_path.is_file():
+        print(
+            "SKIP: no tokens.txt found (pass --tokens to validate); "
+            "unknown tokens are silently ignored by the KWS runtime"
+        )
+        return status
+
+    known = load_known_tokens(tokens_path)
+    unknown = validate_tokens(rendered, known)
+    if unknown:
+        print(
+            f"FAIL: {len(unknown)} token(s) missing from {tokens_path}; "
+            "those keywords can never fire"
+        )
+        for line, token in unknown:
+            print(f"  {token!r}  in  {line}")
+        return 1
+    print(f"OK: all keyword tokens exist in {tokens_path} ({len(known)} symbols)")
+    return status
 
 
 if __name__ == "__main__":

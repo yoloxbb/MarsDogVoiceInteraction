@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 NLU_PROTOCOL = "rkllm_social_intent_control_v1"
 
 SOCIAL_LABELS = frozenset(
@@ -95,6 +94,8 @@ COMMAND_KEY_TO_NLU: dict[str, tuple[str, str, str]] = {
     "WAIT": ("NONE", "STAY", "DO"),
     "DROP": ("NONE", "DROP", "DO"),
     "QUIET": ("NONE", "BARK", "STOP"),
+    "EAT_CANNED_FOOD": ("NONE", "EAT", "DO"),
+    "GO_GET_IT": ("NONE", "FETCH", "DO"),
     "BRING": ("NONE", "FETCH", "DO"),
     "FETCH": ("NONE", "FETCH", "DO"),
     "RETURN": ("NONE", "COME", "DO"),
@@ -104,7 +105,6 @@ COMMAND_KEY_TO_NLU: dict[str, tuple[str, str, str]] = {
 COMMAND_KEY_TO_COMMAND_ID: dict[str, str] = {
     key: f"CMD_{key}" for key in COMMAND_KEY_TO_NLU
 }
-
 
 def validate_intent_combination(
     social: str,

@@ -7,26 +7,36 @@ from marsdog_voice_interaction.messages.audio_event import (
     normalize_audio_event,
 )
 from marsdog_voice_interaction.messages.intent_protocol import (
+    CONTROL_LABELS,
+    INTENT_LABELS,
     NLU_PROTOCOL,
+    SOCIAL_LABELS,
     parse_intent_tag,
+    validate_intent_combination,
 )
 from marsdog_voice_interaction.messages.intent_event_router import (
+    derive_intent_routes,
     route_classification_events,
 )
 from marsdog_voice_interaction.messages.voice_event_types import (
     ACTION_TO_VOICE_EVENT,
     EVT_VOICE_CALL_NAME,
+    EVT_VOICE_COMMAND_CALL_NAME,
+    EVT_VOICE_FOLK_ID,
     EVT_VOICE_COMMAND_FETCH,
     EVT_VOICE_COMMAND_KNOWN,
     EVT_VOICE_COMMAND_SIT,
-    EVT_VOICE_FOLK_ID,
-    EVT_VOICE_MASTER_ID,
     EVT_VOICE_NEUTRAL,
     EVT_VOICE_STATUS_CARE,
+    EVT_VOICE_COMMAND_UNKNOWN,
+    EVT_VOICE_MASTER_ID,
     EVT_VOICE_UNMASTER_ID,
+    EVT_VOICE_WAKEUP,
+    MODEL_INTENT_EVENT_TYPES,
     classification_to_voice_event,
     speaker_to_voice_event,
 )
+from marsdog_voice_interaction.core.command_lexicon import CommandLexicon
 from marsdog_voice_interaction.core.utterance_command_tracker import (
     UtteranceCommandTracker,
 )
@@ -55,7 +65,7 @@ def test_audio_contract_has_no_visual_binding() -> None:
 
 def test_audio_contract_preserves_interaction_id() -> None:
     value = normalize_audio_event({
-        "event_type": "EVT_VOICE_CALL_NAME",
+        "event_type": EVT_VOICE_WAKEUP,
         "interaction_id": "session-1",
     })
     assert value["interaction_id"] == "session-1"
@@ -63,7 +73,7 @@ def test_audio_contract_preserves_interaction_id() -> None:
 
 def test_audio_contract_bounds_wake_confidence_and_preserves_raw_score() -> None:
     value = normalize_audio_event({
-        "event_type": "EVT_VOICE_CALL_NAME",
+        "event_type": EVT_VOICE_WAKEUP,
         "wake_confidence": 1.8,
         "wake_score_raw": 907.0,
     })
@@ -74,10 +84,10 @@ def test_audio_contract_bounds_wake_confidence_and_preserves_raw_score() -> None
 
 def test_wake_angle_contract_uses_raw_microphone_array_frame() -> None:
     value = normalize_audio_event({
-        "event_type": EVT_VOICE_CALL_NAME,
+        "event_type": EVT_VOICE_WAKEUP,
         "wake_angle": 42.0,
     })
-    direct_mock = MockEventProvider({}).build_event(EVT_VOICE_CALL_NAME)
+    direct_mock = MockEventProvider({}).build_event(EVT_VOICE_WAKEUP)
     pipeline_mock = MockWakeupProvider({
         "mock_min_interval_sec": 1.0,
         "mock_max_interval_sec": 1.0,
@@ -93,6 +103,28 @@ def test_wake_angle_contract_uses_raw_microphone_array_frame() -> None:
     assert pipeline_event["header"]["frame_id"] == WAKE_ANGLE_FRAME_ID
 
 
+def test_hardware_wakeup_and_catalog_nickname_use_distinct_events() -> None:
+    lexicon = CommandLexicon(
+        Path(__file__).parents[1] / "config" / "command_catalog.yaml"
+    )
+    nickname = lexicon.match("小宝贝")
+
+    assert nickname is not None
+    assert nickname.command_id == "CMD_CALL_NAME"
+    assert nickname.event_type == EVT_VOICE_COMMAND_CALL_NAME
+    assert nickname.event_type != EVT_VOICE_CALL_NAME
+    assert nickname.event_type != EVT_VOICE_WAKEUP
+    nickname_event = nickname.to_event(asr_text="小宝贝", language="zh")
+    assert nickname_event["raw_nlu_tag"] == "CALL|NONE|NONE"
+    assert nickname_event["intent_category"] == "social"
+    assert nickname_event["action"] == "NONE"
+    assert not nickname_event["is_executable"]
+    assert not nickname_event["should_trigger_behavior_tree"]
+    assert derive_intent_routes("CALL", "NONE", "NONE") == [
+        (EVT_VOICE_CALL_NAME, "social")
+    ]
+
+
 def test_intent_protocol_and_event_mapping() -> None:
     assert NLU_PROTOCOL == "rkllm_social_intent_control_v1"
     assert parse_intent_tag("NONE|SIT|DO") == ("NONE", "SIT", "DO")
@@ -103,6 +135,31 @@ def test_intent_protocol_and_event_mapping() -> None:
     assert parse_intent_tag("NONE|SIT|CANCEL") is None
     assert parse_intent_tag("NONE|DOG_STATUS|DO") is None
     assert parse_intent_tag("NONE|NONE|DO") is None
+
+
+def test_all_model_intent_routes_use_stable_downstream_event_names() -> None:
+    routed_event_types = {EVT_VOICE_COMMAND_UNKNOWN}
+    for social in SOCIAL_LABELS:
+        for intent in INTENT_LABELS:
+            for control in CONTROL_LABELS:
+                if not validate_intent_combination(social, intent, control):
+                    continue
+                for asr_text in ("", "站好", "别动"):
+                    for object_name in ("", "NONE", "dog toy ball"):
+                        routed_event_types.update(
+                            event_type
+                            for event_type, _ in derive_intent_routes(
+                                social,
+                                intent,
+                                control,
+                                object_name=object_name,
+                                asr_text=asr_text,
+                            )
+                        )
+
+    assert routed_event_types == MODEL_INTENT_EVENT_TYPES
+    assert EVT_VOICE_WAKEUP not in routed_event_types
+    assert not any("EVT_VOICE_INTENT_" in item for item in routed_event_types)
 
 
 def test_model_intent_multi_axis_routes_specific_command_before_summary() -> None:
@@ -135,38 +192,40 @@ def test_model_intent_multi_axis_routes_specific_command_before_summary() -> Non
 
 
 @pytest.mark.parametrize(
-    ("intent", "control", "command_key", "event_type"),
+    ("intent", "control", "asr_text", "command_key", "event_type"),
     [
-        ("GO", "DO", "WALK", "EVT_VOICE_COMMAND_WALK"),
-        ("COME", "DO", "COME", "EVT_VOICE_COMMAND_COME"),
-        ("FOLLOW", "DO", "FOLLOW", "EVT_VOICE_COMMAND_FOLLOW"),
-        ("GO_OUT", "DO", "GO_OUT", "EVT_VOICE_COMMAND_GO_OUT"),
-        ("GO_HOME", "DO", "GO_HOME", "EVT_VOICE_COMMAND_GO_HOME"),
-        ("APPROACH", "DO", "APPROACH", "EVT_VOICE_COMMAND_APPROACH"),
-        ("BACK", "DO", "BACK_UP", "EVT_VOICE_COMMAND_BACK_UP"),
-        ("SIT", "DO", "SIT", "EVT_VOICE_COMMAND_SIT"),
-        ("LIE", "DO", "LIE_DOWN", "EVT_VOICE_COMMAND_LIE_DOWN"),
+        ("GO", "DO", "走一走", "WALK", "EVT_VOICE_COMMAND_WALK"),
+        ("COME", "DO", "快过来", "COME", "EVT_VOICE_COMMAND_COME"),
+        ("FOLLOW", "DO", "跟着我", "FOLLOW", "EVT_VOICE_COMMAND_FOLLOW"),
+        ("GO_OUT", "DO", "出去转转", "GO_OUT", "EVT_VOICE_COMMAND_GO_OUT"),
+        ("GO_HOME", "DO", "回家吧", "GO_HOME", "EVT_VOICE_COMMAND_GO_HOME"),
+        ("APPROACH", "DO", "靠近一点", "APPROACH", "EVT_VOICE_COMMAND_APPROACH"),
+        ("BACK", "DO", "后退一点", "BACK_UP", "EVT_VOICE_COMMAND_BACK_UP"),
+        ("SIT", "DO", "请坐好", "SIT", "EVT_VOICE_COMMAND_SIT"),
+        ("LIE", "DO", "趴下", "LIE_DOWN", "EVT_VOICE_COMMAND_LIE_DOWN"),
         (
             "PLAY_DEAD",
             "DO",
+            "装死",
             "PLAY_DEAD",
             "EVT_VOICE_COMMAND_PLAY_DEAD",
         ),
-        ("STAND", "DO", "STAND_UP", "EVT_VOICE_COMMAND_STAND_UP"),
-        ("SHAKE", "DO", "SHAKE_HAND", "EVT_VOICE_COMMAND_SHAKE_HAND"),
-        ("HIGH_FIVE", "DO", "HIGH_FIVE", "EVT_VOICE_COMMAND_HIGH_FIVE"),
-        ("SPIN", "DO", "SPIN", "EVT_VOICE_COMMAND_SPIN"),
-        ("ROLL", "DO", "ROLL_OVER", "EVT_VOICE_COMMAND_ROLL_OVER"),
-        ("DROP", "DO", "DROP", "EVT_VOICE_COMMAND_DROP"),
-        ("BARK", "STOP", "QUIET", "EVT_VOICE_COMMAND_QUIET"),
-        ("TOILET", "DO", "TOILET", "EVT_VOICE_COMMAND_TOILET"),
-        ("CLEAN", "DO", "CLEAN", "EVT_VOICE_COMMAND_CLEAN"),
-        ("SLEEP", "DO", "SLEEP", "EVT_VOICE_COMMAND_SLEEP"),
+        ("STAND", "DO", "站起来", "STAND_UP", "EVT_VOICE_COMMAND_STAND_UP"),
+        ("SHAKE", "DO", "握手", "SHAKE_HAND", "EVT_VOICE_COMMAND_SHAKE_HAND"),
+        ("HIGH_FIVE", "DO", "击掌", "HIGH_FIVE", "EVT_VOICE_COMMAND_HIGH_FIVE"),
+        ("SPIN", "DO", "转圈", "SPIN", "EVT_VOICE_COMMAND_SPIN"),
+        ("ROLL", "DO", "翻滚", "ROLL_OVER", "EVT_VOICE_COMMAND_ROLL_OVER"),
+        ("DROP", "DO", "放下", "DROP", "EVT_VOICE_COMMAND_DROP"),
+        ("BARK", "STOP", "别叫", "QUIET", "EVT_VOICE_COMMAND_QUIET"),
+        ("TOILET", "DO", "去尿尿", "TOILET", "EVT_VOICE_COMMAND_TOILET"),
+        ("CLEAN", "DO", "擦擦脚", "CLEAN", "EVT_VOICE_COMMAND_CLEAN"),
+        ("SLEEP", "DO", "睡觉吧", "SLEEP", "EVT_VOICE_COMMAND_SLEEP"),
     ],
 )
 def test_model_intent_explicit_command_allowlist(
     intent: str,
     control: str,
+    asr_text: str,
     command_key: str,
     event_type: str,
 ) -> None:
@@ -174,7 +233,7 @@ def test_model_intent_explicit_command_allowlist(
         "NONE",
         intent,
         control,
-        asr_text="model route",
+        asr_text=asr_text,
         source="rkllm",
     )
 
@@ -185,6 +244,40 @@ def test_model_intent_explicit_command_allowlist(
     assert events[0]["action"] == command_key
     assert events[0]["should_trigger_behavior_tree"]
     assert not events[1]["should_trigger_behavior_tree"]
+
+
+@pytest.mark.parametrize(
+    ("asr_text", "intent", "control", "reason"),
+    [
+        ("去睡觉", "GO", "DO", "missing_intent_text_evidence"),
+        ("行就就这里个那个", "GO", "DO", "missing_intent_text_evidence"),
+        ("扣出一点吧", "DROP", "DO", "missing_intent_text_evidence"),
+        ("不要过来", "COME", "DO", "negated_action_text"),
+        ("我今天走了很远", "GO", "DO", "statement_subject_prefix"),
+        ("你坐在这里吗", "SIT", "DO", "question_text"),
+    ],
+)
+def test_rkllm_action_requires_matching_text_evidence(
+    asr_text: str,
+    intent: str,
+    control: str,
+    reason: str,
+) -> None:
+    events = route_classification_events(
+        "NONE",
+        intent,
+        control,
+        asr_text=asr_text,
+        source="rkllm",
+    )
+
+    assert [event["event_type"] for event in events] == [
+        EVT_VOICE_COMMAND_KNOWN
+    ]
+    assert not events[0]["should_trigger_behavior_tree"]
+    slots = {slot["key"]: slot["value"] for slot in events[0]["slots"]}
+    assert slots["model_action_gate"] == "rejected"
+    assert slots["model_action_gate_reason"] == reason
 
 
 @pytest.mark.parametrize(
@@ -452,8 +545,8 @@ def test_documented_qa_command_inventory_matches_current_code() -> None:
         for line in keyword_lines
     }
 
-    assert len(ACTION_TO_VOICE_EVENT) == 23
+    assert len(ACTION_TO_VOICE_EVENT) == 25
     assert len(_RULES) == 30
-    assert len(keyword_lines) == 40
-    assert len(keyword_actions) == 19
-    assert {"BRING", "FETCH", "STOP"}.isdisjoint(keyword_actions)
+    assert len(keyword_lines) == 39
+    assert len(keyword_actions) == 20
+    assert {"BRING", "FETCH", "STOP", "WALK"}.isdisjoint(keyword_actions)

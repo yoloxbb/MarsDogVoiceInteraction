@@ -36,6 +36,9 @@ topics:
 interaction:
   idle_timeout_sec: 10.0
   hold_max_lease_sec: 30.0
+  # 测试模式默认关闭，以免「超时后回到待机」用例无法验证；
+  # 需要连续测试时设 true，并把 max_duration_sec 设 0 取消绝对上限。
+  refresh_on_any_speech: false
 
 providers:
   wakeup:

@@ -6,25 +6,33 @@
 
 ## 1. 当前目录口径
 
-- 目录版本：`2026-08-29-expanded-v1`。
+- 目录版本：`2026-09-12-social-reaction-v5`。
 - 源数据：`116` 条；事件路由：`81` 个；标准中文词/句：`155` 条。
-- 每个标准词/句按配置生成 `10` 条受控扩展，共 `1550` 条扩展；包含标准词/句后，
-  运行时精确匹配入口共 `1705` 条。
+- 每个标准词/句按配置生成 `10` 条受控扩展，共 `1550` 条扩展；另有 `70` 条人工登记
+  的变体（`phrase_variants:`，用于 ASR 稳定错写与自然口语说法）。包含标准词/句后，
+  运行时精确匹配入口共 `1775` 条。
 - 核心训练指令：`19` 组，对应表中“核心=是”的所有短语。
 - 表中每条中文标准词/句都必须独立测试；同一 `command_key` 下的短语是等价入口。
 - 英文 `reference_phrases_en` 当前只是参考元数据，不参与确定性词库匹配，因此不列入本表验收。
 - `BT=是` 只表示 Voice 应设置 `should_trigger_behavior_tree=true`，不代表下游已经完成事件映射或动作执行。
 - `action_name=—` 表示产品目录没有给出独立 `ACT_*`，但仍必须发布表中的 `event_type`。
-- 所有词库行（包括“核心=是”）都只产生本表 `event_type`
-  （`dispatch_role=specific_command`），不附带 `EVT_VOICE_COMMAND_KNOWN`。
+- 硬件或 pipeline Mock 唤醒使用 `EVT_VOICE_WAKEUP`，不属于本词库表；Model Intent
+  呼名沿用 `EVT_VOICE_CALL_NAME`，也不能用来代替词库 `CALL_NAME` 的测试结果。
+- 81 个路由组的 `command_key/command_id/event_type` 必须分别唯一。目录禁止使用
+  `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的 `EVT_VOICE_INTENT_*`；
+  姿态、移动、声音等显式白名单动作可以与 Model Intent 共用具体命令事件。
+- 所有词库行（包括“核心=是”）都只产生本表 `event_type`，不附带
+  `EVT_VOICE_COMMAND_KNOWN`。普通动作使用 `dispatch_role=specific_command`；
+  PRAISE/SCOLD 使用 `dispatch_role=social_reaction`。
   KWS 只缓存候选，最终由 `recognition_arbitration` 选择 KWS 或 ASR 目录作为唯一
   结果来源，并只发布选中来源的具体特殊事件。
 
 ### 1.1 测试日志字段速查与路径判定
 
-测试时不能只看 `event_type`。词库、KWS 和 Model Intent 都可能发布同名的
-`EVT_VOICE_COMMAND_*`，必须先用同一个 `utterance_id` 关联本句话的全部日志，再联合
-检查以下字段：
+词库与 KWS 对同一个确定性命令可以共享 `EVT_VOICE_COMMAND_*`。Model Intent 沿用
+下游既有业务分类事件；显式动作白名单也可以共用对应的具体命令事件，因此必须根据
+`intent_source/dispatch_role/command_id` 判断来源和职责，不能只看事件名。测试仍须
+使用同一个 `utterance_id` 关联本句话的全部日志，再联合检查以下字段：
 
 | 日志位置 | 重点字段 | 用途 |
 |---|---|---|
@@ -33,20 +41,21 @@
 | `stage_complete stage=kws` | `result/command_key/event_type/candidate_count/published_event_types` | `result=candidate` 只表示缓存候选；此时 `published_event_types=[]`，不能据此判定业务事件已发布。 |
 | `stage_complete stage=recognition_arbitration` | `result/selected_source/reason/kws_candidate_count/catalog_event_type` | 判断本句最终由 KWS 还是 ASR 链路取得业务结果；这是区分“候选”和“最终来源”的依据。 |
 | `stage_complete stage=intent` | `result/event_types/social/intent/control/intent_source` | 只有词库未命中并选择 ASR 链路后才应出现；用于判定 Model Intent 或兼容规则路径。 |
-| `event_publish` | `event_type/intent_source/dispatch_role/specific_event_type/command_id/raw_nlu_tag/is_executable/should_trigger_behavior_tree/slots` | 判断最终实际发布了什么、来源是什么、属于摘要还是具体事件、是否允许进入行为树。 |
+| `event_publish` | `event_type/command_id/intent_source/dispatch_role/specific_event_type/raw_nlu_tag/is_executable/should_trigger_behavior_tree/slots` | 判断最终实际发布了什么、来源是什么、属于摘要还是具体事件、是否允许进入行为树。 |
 | `utterance_complete` | `result/published_event_types/event_types/selected_source` | 核对本句最终事件组的数量、顺序和结束类型，防止漏发或重复发布。 |
 
 其中最关键的四个字段是：
 
 - `intent_source`：最终决策来源，常见为 `command_lexicon`、`kws`、
   `rkllm`、`rule_rkllm_compatible`、`invalid_protocol_fallback`；
-- `dispatch_role`：事件职责，`specific_command` 是词库/KWS 的具体命令，
+- `dispatch_role`：事件职责，`specific_command` 是词库/KWS 的具体动作命令，
+  `social_reaction` 是非动作但允许 Tree 反应的词库 PRAISE/SCOLD，
   `semantic_classification` 是 Model Intent 语义分类，
   `diagnostic` 是无有效协议结果时的诊断事件；
-- `specific_event_type`：摘要所指向的具体事件；比较 KNOWN 与具体事件时，两者应指向
-  同一个 `EVT_VOICE_COMMAND_*`；
-- `should_trigger_behavior_tree`：是否允许进入行为树。KNOWN 摘要必须为 `false`；即使
-  事件名正确，也不能仅凭 `event_type` 推断它可执行。
+- `specific_event_type`：摘要所指向的模型具体事件；比较 KNOWN 与具体事件时，两者应
+  指向同一个 `EVT_VOICE_COMMAND_*`；
+- `should_trigger_behavior_tree`：是否允许进入行为树。动作命令和词库 PRAISE/SCOLD
+  为 `true`，CALL_NAME 与 KNOWN 摘要为 `false`；不能仅凭事件名推断权限。
 
 #### 三条识别路径如何区分
 
@@ -71,7 +80,7 @@
 
 | 场景 | 事件顺序 | KNOWN 的关键字段 | 具体事件的关键字段 |
 |---|---|---|---|
-| Model Intent 命中显式动作白名单 | 可选社交大类事件 `→ 具体事件 → KNOWN` | `intent_source=rkllm` 或兼容规则来源、`dispatch_role=semantic_classification`、不可执行 | `dispatch_role=specific_command`、`should_trigger_behavior_tree=true` |
+| Model Intent 命中显式动作白名单且 ASR 文本含对应动作证据、未被否定 | 可选社交大类事件 `→ 具体事件 → KNOWN` | `intent_source=rkllm` 或兼容规则来源、`dispatch_role=semantic_classification`、不可执行 | `dispatch_role=specific_command`、`should_trigger_behavior_tree=true`、`model_dispatch_policy=allowlist_and_text_evidence` |
 | Model Intent 得到有命令语义但无法安全落到具体动作 | 仅 `KNOWN`，或社交大类事件 `→ KNOWN` | `dispatch_role=semantic_classification`、不可执行；`specific_event_type` 可为空 | 不应伪造可执行具体事件 |
 
 词库和 KWS 事件一律不附带 KNOWN。纯社交、QUERY、`NONE|NONE|NONE` 等 Model Intent
@@ -96,26 +105,22 @@
 5. 同一句必须有 `stage_complete stage=recognition_arbitration`，且只允许一个识别来源
    发布一个具体业务事件；不得因词库或 KWS 命中再附带 KNOWN 摘要。
 
-### KWS 修正 ASR 同音转写的判定
+### KWS 与 ASR 同音转写的安全仲裁
 
-核心短指令可能出现 ASR 同音误识别，但流式 KWS 候选正确。例如用户实际说“击掌”，
-`speech.asr_text` 为“机长”时，只要同一个 `utterance_id` 同时满足以下条件，命令功能
-仍判定为 **PASS（KWS 路径）**：
+普通短指令出现 ASR 同音误识别时，流式 KWS 候选不能独立授权动作。例如用户实际说
+“击掌”、`speech.asr_text` 为“机长”时，同一个 `utterance_id` 必须满足：
 
 1. `stage=kws result=candidate`，候选为 `HIGH_FIVE` /
    `EVT_VOICE_COMMAND_HIGH_FIVE`；
 2. `stage=command_lexicon result=no_match`，不得把“机长”伪报为目录命中；
-3. `stage=recognition_arbitration result=kws_selected`、`selected_source=kws`，且
-   `reason=short_asr_kws_preferred`；
-4. 最终先发布一条不可执行的 `EVT_VOICE_COMMAND_KNOWN`，再发布一条可执行的
-   `EVT_VOICE_COMMAND_HIGH_FIVE`，两条事件均属于 KWS 选中的同一结果组，不得重复，
-   且该句不得再进入 Model Intent 产生另一组业务事件。
+3. `stage=recognition_arbitration result=asr_selected`、
+   `reason=short_asr_unconfirmed_kws`；
+4. 不发布 `EVT_VOICE_COMMAND_HIGH_FIVE`。
 
-该结果只证明“击掌命令被正确路由”，不能把 `speech.asr_text=机长` 计为 ASR 正确，
-也不能计为 `CAT-029` 的 `catalog_exact` 命中。测试报告应分别记录：ASR 转写单项
-**FAIL（同音误识别）**、KWS/命令路由单项 **PASS**。若 ASR 已精确命中另一个目录命令、
-同句存在多个不同 KWS 候选，或最终事件不是 `EVT_VOICE_COMMAND_HIGH_FIVE`，则不适用
-此例外，必须按实际仲裁结果判定。
+测试报告记录 ASR 转写 **FAIL**、动作识别 **FAIL/拒识成功**、安全仲裁 **PASS**。
+短 ASR 文本精确命中另一个目录命令时选择 ASR 并记录
+`short_asr_catalog_conflict`。只有 `吃罐罐→去滚罐` 和 `去拿→去哪` 两个配置精确错写
+组合允许 KWS 胜出，记录 `configured_kws_priority_alias`。
 
 ### 受控扩展的判定
 
@@ -141,7 +146,7 @@
 运行时节点当前调用 `CommandLexicon.match()`，因此只启用“标准词/句 + 上述固定扩展”
 的规范化精确匹配。代码中的 `match_fuzzy()` 拼音同音回退目前没有接入节点运行链路，
 不能把“坐虾 → 坐下”等测试当作线上词库应当命中。第 3.5 节的“相似句”同样不属于
-这 1705 个确定性入口，而是专门用于测试词库未命中后的 Model Intent。
+这 1775 个确定性入口，而是专门用于测试词库未命中后的 Model Intent。
 
 扩展命中时必须同时满足：
 
@@ -165,7 +170,8 @@
 | 跟你说，我好孤独 | 我好孤独 | `statement/tell_you_preface` | `OWNER_LONELY` |
 | 嘿，小狗 | 小狗 | `vocative/prefix_hey` | `CALL_NAME` |
 
-说明：`PRAISE`、`SCOLD` 为非执行社交事件，`BT=否`。主表 `control` 是目录的具体
+说明：`PRAISE`、`SCOLD` 为非动作社交事件，`is_executable=false`，但通过
+`dispatch_role=social_reaction` 授权 Tree，因此 `BT=是`。主表 `control` 是目录的具体
 事件执行配置；核心事件 payload 的正式三轴以紧随其后的三轴表为准，因此 QUIET
 虽然具体事件可执行，语义仍为 `NONE|BARK|STOP`。
 
@@ -208,7 +214,7 @@ stage_complete stage=intent result=parsed
 冒充 Model Intent 准确率。Model Intent 的正式输出是 `SOCIAL|INTENT|CONTROL`；随后由开发侧
 固定规则映射成下表事件。业务大类和 `EVT_VOICE_COMMAND_KNOWN` 摘要均为
 `dispatch_role=semantic_classification`、`should_trigger_behavior_tree=false`。只有命中
-第 3.2 节显式动作白名单时，才额外发布
+第 3.2 节显式动作白名单、ASR 文本动作证据且未被否定时，才额外发布
 `dispatch_role=specific_command`、`should_trigger_behavior_tree=true` 的具体动作事件。
 
 ### 3.1 三轴到事件的固定映射
@@ -342,7 +348,7 @@ object_catalog_version=<目录版本>
 
 ### 3.5 产品示例的相似句测试表
 
-下列“测试相似句”均已确认不在当前 1705 个确定性匹配入口中，适合直接验证 Model Intent。
+下列“测试相似句”均已确认不在当前 1775 个确定性匹配入口中，适合直接验证 Model Intent。
 测试团队还应围绕每行自行补充同义改写，但期望标签必须遵守训练标注协议，不能仅凭
 最终事件反推模型标签。日志必须同时核对 `raw_nlu_tag` 和按序发布的 `event_types`。
 
@@ -429,11 +435,11 @@ object_catalog_version=<目录版本>
 | `CAT-005` | 是 | 2 | `回来` | `COME` | `CMD_COME_HERE` | `EVT_VOICE_COMMAND_COME` | `NONE` | `DO` | `ACT_COME` | 是 |
 | `CAT-006` | 是 | 2 | `来这` | `COME` | `CMD_COME_HERE` | `EVT_VOICE_COMMAND_COME` | `NONE` | `DO` | `ACT_COME` | 是 |
 | `CAT-007` | 是 | 2 | `到我这儿来` | `COME` | `CMD_COME_HERE` | `EVT_VOICE_COMMAND_COME` | `NONE` | `DO` | `ACT_COME` | 是 |
-| `CAT-008` | 是 | 3 | `跟着我` | `FOLLOW` | `CMD_FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` | `NONE` | `DO` | `ACT_GO_OUT_TO_PLAY` | 是 |
-| `CAT-009` | 是 | 3 | `跟我走` | `FOLLOW` | `CMD_FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` | `NONE` | `DO` | `ACT_GO_OUT_TO_PLAY` | 是 |
-| `CAT-010` | 是 | 4 | `出去玩` | `GO_OUT` | `CMD_GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` | `NONE` | `DO` | — | 是 |
-| `CAT-011` | 是 | 4 | `出去溜溜` | `GO_OUT` | `CMD_GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` | `NONE` | `DO` | — | 是 |
-| `CAT-012` | 是 | 5 | `回家` | `GO_HOME` | `CMD_GO_HOME` | `EVT_VOICE_COMMAND_GO_HOME` | `NONE` | `DO` | — | 是 |
+| `CAT-008` | 是 | 3 | `跟着我` | `FOLLOW` | `CMD_FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` | `NONE` | `DO` | `ACT_FOLLOW` | 是 |
+| `CAT-009` | 是 | 3 | `跟我走` | `FOLLOW` | `CMD_FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` | `NONE` | `DO` | `ACT_FOLLOW` | 是 |
+| `CAT-010` | 是 | 4 | `出去玩` | `GO_OUT` | `CMD_GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` | `NONE` | `DO` | `ACT_GO_OUT_TO_PLAY` | 是 |
+| `CAT-011` | 是 | 4 | `出去溜溜` | `GO_OUT` | `CMD_GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` | `NONE` | `DO` | `ACT_GO_OUT_TO_PLAY` | 是 |
+| `CAT-012` | 是 | 5 | `回家` | `GO_HOME` | `CMD_GO_HOME` | `EVT_VOICE_COMMAND_GO_HOME` | `NONE` | `DO` | `ACT_GO_HOME` | 是 |
 | `CAT-013` | 是 | 6 | `靠近点` | `APPROACH` | `CMD_APPROACH` | `EVT_VOICE_COMMAND_APPROACH` | `NONE` | `DO` | `ACT_COME_CLOSER` | 是 |
 | `CAT-014` | 是 | 7 | `退后` | `BACK_UP` | `CMD_BACK_UP` | `EVT_VOICE_COMMAND_BACK_UP` | `NONE` | `DO` | `ACT_BACK_UP` | 是 |
 | `CAT-015` | 是 | 8 | `坐` | `SIT` | `CMD_SIT` | `EVT_VOICE_COMMAND_SIT` | `NONE` | `DO` | `ACT_SIT` | 是 |
@@ -455,13 +461,13 @@ object_catalog_version=<目录版本>
 | `CAT-031` | 是 | 14 | `拍手` | `HIGH_FIVE` | `CMD_FIVE` | `EVT_VOICE_COMMAND_HIGH_FIVE` | `NONE` | `DO` | `ACT_HIGH_FIVE` | 是 |
 | `CAT-032` | 是 | 15 | `转圈` | `SPIN` | `CMD_SPIN` | `EVT_VOICE_COMMAND_SPIN` | `NONE` | `DO` | `ACT_SPIN` | 是 |
 | `CAT-033` | 是 | 16 | `翻滚` | `ROLL_OVER` | `CMD_ROLL` | `EVT_VOICE_COMMAND_ROLL_OVER` | `NONE` | `DO` | `ACT_ROLL_OVER` | 是 |
-| `CAT-034` | 是 | 17 | `别动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_STOP` | 是 |
-| `CAT-035` | 是 | 17 | `等着` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_STOP` | 是 |
-| `CAT-036` | 是 | 17 | `停` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_STOP` | 是 |
-| `CAT-037` | 是 | 17 | `不准动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_STOP` | 是 |
-| `CAT-038` | 是 | 17 | `不许动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_STOP` | 是 |
-| `CAT-039` | 是 | 17 | `老实点` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_STOP` | 是 |
-| `CAT-040` | 是 | 17 | `等等` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_STOP` | 是 |
+| `CAT-034` | 是 | 17 | `别动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
+| `CAT-035` | 是 | 17 | `等着` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
+| `CAT-036` | 是 | 17 | `停` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
+| `CAT-037` | 是 | 17 | `不准动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
+| `CAT-038` | 是 | 17 | `不许动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
+| `CAT-039` | 是 | 17 | `老实点` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
+| `CAT-040` | 是 | 17 | `等等` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
 | `CAT-041` | 是 | 18 | `放下` | `DROP` | `CMD_SPIT` | `EVT_VOICE_COMMAND_DROP` | `NONE` | `DO` | `ACT_DROP` | 是 |
 | `CAT-042` | 是 | 18 | `松开` | `DROP` | `CMD_SPIT` | `EVT_VOICE_COMMAND_DROP` | `NONE` | `DO` | `ACT_DROP` | 是 |
 | `CAT-043` | 是 | 18 | `松口` | `DROP` | `CMD_SPIT` | `EVT_VOICE_COMMAND_DROP` | `NONE` | `DO` | `ACT_DROP` | 是 |
@@ -470,37 +476,37 @@ object_catalog_version=<目录版本>
 | `CAT-046` | 是 | 19 | `闭嘴` | `QUIET` | `CMD_QUIET` | `EVT_VOICE_COMMAND_QUIET` | `NONE` | `DO` | `ACT_QUIET` | 是 |
 | `CAT-047` | 是 | 19 | `别叫` | `QUIET` | `CMD_QUIET` | `EVT_VOICE_COMMAND_QUIET` | `NONE` | `DO` | `ACT_QUIET` | 是 |
 | `CAT-048` | 是 | 19 | `不许叫` | `QUIET` | `CMD_QUIET` | `EVT_VOICE_COMMAND_QUIET` | `NONE` | `DO` | `ACT_QUIET` | 是 |
-| `CAT-049` | 否 | 20, 21, 22, 23, 24 | `小狗` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_CALL_NAME` | `NONE` | `DO` | — | 是 |
-| `CAT-050` | 否 | 20, 21, 22, 23, 24 | `小跟屁虫` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_CALL_NAME` | `NONE` | `DO` | — | 是 |
-| `CAT-051` | 否 | 20, 21, 22, 23, 24 | `小宝贝` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_CALL_NAME` | `NONE` | `DO` | — | 是 |
-| `CAT-052` | 否 | 20, 21, 22, 23, 24 | `乖狗狗` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_CALL_NAME` | `NONE` | `DO` | — | 是 |
-| `CAT-053` | 否 | 20, 21, 22, 23, 24 | `小坏蛋` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_CALL_NAME` | `NONE` | `DO` | — | 是 |
-| `CAT-054` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真棒` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-055` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `好狗` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-056` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真乖` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-057` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真聪明` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-058` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `可爱` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-059` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `厉害` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-060` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `太棒了` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-061` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `好样的` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-062` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `我爱你` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-063` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `我喜欢你` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-064` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `你真有趣` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-065` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真有意思` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_PRAISE` | `PRAISE` | `NONE` | — | 否 |
-| `CAT-066` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `不可以咬` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-067` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `你怎么不听话` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-068` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我要惩罚你咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-069` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `罚你站着` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-070` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `不准吃饭` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-071` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `321` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-072` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我不跟你玩咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-073` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我不理你咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-074` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `坏狗狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-075` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `笨狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-076` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `傻狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-077` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我要生气咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-078` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `臭狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
-| `CAT-079` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我讨厌你` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_SCOLD` | `SCOLD` | `NONE` | — | 否 |
+| `CAT-049` | 否 | 20, 21, 22, 23, 24 | `小狗` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
+| `CAT-050` | 否 | 20, 21, 22, 23, 24 | `小跟屁虫` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
+| `CAT-051` | 否 | 20, 21, 22, 23, 24 | `小宝贝` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
+| `CAT-052` | 否 | 20, 21, 22, 23, 24 | `乖狗狗` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
+| `CAT-053` | 否 | 20, 21, 22, 23, 24 | `小坏蛋` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
+| `CAT-054` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真棒` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-055` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `好狗` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-056` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真乖` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-057` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真聪明` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-058` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `可爱` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-059` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `厉害` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-060` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `太棒了` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-061` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `好样的` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-062` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `我爱你` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-063` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `我喜欢你` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-064` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `你真有趣` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-065` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真有意思` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
+| `CAT-066` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `不可以咬` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-067` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `你怎么不听话` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-068` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我要惩罚你咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-069` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `罚你站着` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-070` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `不准吃饭` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-071` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `321` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-072` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我不跟你玩咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-073` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我不理你咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-074` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `坏狗狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-075` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `笨狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-076` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `傻狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-077` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我要生气咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-078` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `臭狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
+| `CAT-079` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我讨厌你` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
 | `CAT-080` | 否 | 48 | `不怕不怕` | `COMFORT_DONT_BE_AFRAID` | `CMD_COMFORT_DONT_BE_AFRAID` | `EVT_VOICE_COMMAND_COMFORT_DONT_BE_AFRAID` | `NONE` | `DO` | `ACT_COMFORT_DONT_BE_AFRAID` | 是 |
 | `CAT-081` | 否 | 49 | `疼不疼` | `ASK_IF_HURTS` | `CMD_ASK_IF_HURTS` | `EVT_VOICE_COMMAND_ASK_IF_HURTS` | `NONE` | `DO` | `ACT_ASK_IF_HURTS` | 是 |
 | `CAT-082` | 否 | 50 | `没事没事` | `COMFORT_REASSURE` | `CMD_COMFORT_REASSURE` | `EVT_VOICE_COMMAND_COMFORT_REASSURE` | `NONE` | `DO` | `ACT_COMFORT_REASSURE` | 是 |

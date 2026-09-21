@@ -6,7 +6,7 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 讯飞唤醒板
     ↓
 麦克风采集 → Silero VAD ─┬→ 流式 KWS → 缓存候选 ─┐
-                          ├→ Paraformer ASR ───────┼→ 唯一来源仲裁
+                          ├→ SenseVoice ASR ───────┼→ 唯一来源仲裁
                           │                        ├→ KWS 结果组
                           │                        └→ ASR → 完整产品词库
                           │                                  └→ 未命中 → Model Intent / 兼容规则
@@ -27,15 +27,17 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 - VAD 与流式 KWS 复用同一份 16 kHz 麦克风数据，不重复打开设备。
 - KWS 命中中英文核心动作词后只缓存候选。VAD 结束、ASR 得到完整文本后再做
   KWS/ASR 仲裁，避免长句中包含短关键词时提前误触发动作。
-- 使用当前配置的 Paraformer 完成整句 ASR（实现仍支持 SenseVoice），优先精确匹配
+- 使用当前配置的 SenseVoice INT8 ONNX 完成整句 ASR，优先精确匹配
   完整产品词库。当前目录覆盖
   116 条源数据（其中 19 组为核心指令），归并为 81 个路由组、155 条标准
-  中文词/句；每条另有 10 个受控扩展，共 1705 个精确匹配入口。词库和 KWS 命中后
+  中文词/句；每条另有 10 个受控扩展，再加 70 条人工登记的变体，共 1775 个精确匹配入口。词库和 KWS 命中后
   只发布目录指定的 `EVT_VOICE_*` 特殊事件，不额外发布
   `EVT_VOICE_COMMAND_KNOWN`。所有目录命中均跳过意图模型。
 - 目录外文本使用 Model Intent `SOCIAL|INTENT|CONTROL` 三轴协议。模型结果先发布业务
-  大类事件；命中显式、无歧义的动作白名单时，再按“社交事件 → 可执行具体动作 →
-  `EVT_VOICE_COMMAND_KNOWN` 摘要”发布，未进入白名单的命令仍不可执行。
+  大类事件；只有同时命中动作白名单、ASR 文本动作证据且未被否定，才按“社交事件 →
+  可执行具体动作 → `EVT_VOICE_COMMAND_KNOWN` 摘要”发布，否则只保留不可执行摘要。
+  Model Intent 沿用下游既有的 `EVT_VOICE_CALL_NAME/PRAISE/SCOLD/...` 业务事件名；
+  显式动作白名单与词库/KWS 共用对应的 `EVT_VOICE_COMMAND_*` 动作事件。
   `NONE|NONE|NONE` 固定发布不可执行的 `EVT_VOICE_NEUTRAL`。
 - `FETCH/FIND_TOY` 额外经过目标物白名单：只接受 `config/object_targets.yaml` 中
   18 个视觉检测类别。命中时以规范英文类别写入 `slots.object_name` 并发布可执行
@@ -44,15 +46,15 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 - 使用 `interaction_id` 和 `utterance_id` 关联一次会话及其中的每句话。
 - 支持 pipeline Mock 和直接事件 Mock，无硬件也可联调下游。
 
-KWS 与 ASR 采用延迟发布、唯一来源仲裁。默认中文不超过 2 个规范化字符、英文不
-超过 2 个词时可优先采用唯一 KWS 候选；长句采用完整 ASR 文本，ASR 目录结果与 KWS
-冲突时也以 ASR 目录为准。ASR 为空且只有一个 KWS 候选时允许 KWS 回退；同一句出现
-多个 KWS 候选时交给 ASR 链路。被选中的核心命令只发布具体特殊事件，且不会再同时
+KWS 与 ASR 采用延迟发布、唯一来源仲裁。普通短指令的唯一 KWS 候选必须得到 ASR
+词库同事件确认；冲突、未确认、空 ASR 或多个 KWS 候选均不得由 KWS 单独执行。长句
+采用完整 ASR 文本。仅两个已确认的“命令 + ASR 精确错写”组合允许 KWS 覆盖。
+被选中的核心命令只发布具体特殊事件，且不会再同时
 发布另一识别来源的业务结果或 KNOWN 摘要。声纹和 `speech`
 证据不受业务结果仲裁影响。词库未命中且 ASR 被选中时才进行意图处理。
 
 上述长度阈值只决定“已有 KWS 候选能否胜出”，不会自动把所有一字/两字词加入 KWS。
-当前仍只使用显式关键词文件；暂不默认加入“走、去、来、停”等单字词，以避免环境
+当前仍只使用显式关键词文件；暂不默认加入“走、去、来、坐、停”等单字词，以避免环境
 音和长句片段造成高频候选。新增短关键词必须先完成误触发测试，再写入关键词文件。
 
 ## 项目边界
@@ -94,7 +96,7 @@ uv sync --extra dev
 | KWS | `wakeup/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/` |
 | ASR | `asr/sherpa-onnx-paraformer-zh-2024-03-09/` |
 | Speaker | `speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` |
-| RKLLM Model Intent | `llm/qwen2_5_5b_rk3588_260829_w8a8.rkllm` |
+| RKLLM Model Intent | `llm/qwen2_5_5b_rk3588_260903_w8a8.rkllm` |
 
 当前 Model Intent 文件 SHA-256 为
 `3c316cede8dcc40c6f019f7a2403f56c2d567eeacc29f410b656eb02981ca0b1`；测试和部署
@@ -168,8 +170,10 @@ uv run marsdog-voice-interaction \
 | `command_lexicon` | 完整产品词库、19 组核心子集及每标准词/句 10 个受控精确匹配扩展 |
 | `speaker_api` | 声纹上传 API 的开关、监听地址、端口和大小限制 |
 | `topics` | ROS2 Topic 和 Service 名称 |
-| `interaction.idle_timeout_sec` | 最后一次 VAD 确认说话后等待多久结束会话 |
+| `interaction.idle_timeout_sec` | 最后一次 ASR 返回非空文本后等待多久结束会话；NEUTRAL/UNKNOWN 和语义拒识也续期，纯 VAD、空白/空 ASR 不续期 |
+| `interaction.max_duration_sec` | 单次唤醒会话绝对最长时间；不被语音活动或 hold 租约延长；`0` 或负数 = 不设上限（测试模式） |
 | `interaction.hold_max_lease_sec` | 外部会话保持租约的单次最长秒数 |
+| `interaction.refresh_on_any_speech` | 测试专用：`true` 时 VAD 检测到语音即刷新空闲计时器；生产为 `false` 时要求 ASR 返回非空文本，不要求语义接受。见 `docs/TESTING_LOG_GUIDE.md` 的「测试模式」小节 |
 | `providers.wakeup` | 讯飞串口和唤醒事件类型 |
 | `providers.audio` | 麦克风、VAD 阈值、语音时长和预录缓存 |
 | `providers.kws` | KWS 模型、显式关键词、检测阈值及 deferred/exclusive 仲裁策略 |
@@ -210,6 +214,8 @@ audio_debug:
   save_asr_input: true
   compare_asr: false
   debug_disable_extra_pre_roll: false
+  # 保留的 utterance 目录数上限，超出后按时间删除最旧的；<= 0 表示不清理。
+  max_utterances: 200
 ```
 
 目录内的 `01_raw_capture.wav` 是连续麦克风输入，`02_vad_segment.wav` 是 VAD
@@ -221,6 +227,10 @@ WAV。日志 `audio_debug/vad_boundary/asr_boundary/vad_join` 分别记录幅值
 只切换 `debug_disable_extra_pre_roll` 可执行 A/B：`true` 为 VAD 原始 segment 直接送
 ASR，`false` 为额外 `pre_roll_sec` 加 VAD segment；其他 VAD/ASR 参数不变。
 `compare_asr: true` 会在正常识别外再用同一模型识别三份 WAV，开销较大，默认关闭。
+
+`max_utterances` 限定保留的 utterance 目录数，超出后每次落盘最多删除 16 个最旧目录
+（分批删除，避免一次删除造成存储抖动）；设为 `0` 表示不清理。被取消的采集（会话超时、
+用户打断）不写调试音频——取消后采集结果本就不会被采用，落盘只会拖长采集线程的退出。
 
 调试结束后应将 `audio_debug.enabled` 设为 `false`；关闭时不创建目录、WAV 或执行对照
 识别。
@@ -236,10 +246,18 @@ Swagger `/docs` 当前只提供文件选择和接口调试，不提供浏览器�
 ```bash
 curl -X POST http://127.0.0.1:8091/api/v1/speakers/owner/samples \
   -F 'audio=@/path/to/speaker.wav;type=audio/wav'
+
+# 一次原子新增多个样本（重复 audios 字段，最多 5 个）
+curl -X POST http://127.0.0.1:8091/api/v1/speakers/owner/samples/batch \
+  -F 'audios=@/path/to/owner-1.wav;type=audio/wav' \
+  -F 'audios=@/path/to/owner-2.wav;type=audio/wav'
 ```
 
 上传文件必须是未压缩的 16-bit PCM WAV，可为 1～8 声道、8～96 kHz。节点会转为
 16 kHz 单声道，用独立的 Silero VAD 去除首尾静音并拼接有效语音段，再提取声纹。
+无论源文件是 8、16、44.1 或 48 kHz，成功保存的 WAV 都统一为 16 kHz、单声道、
+16-bit PCM；响应同时返回 `source_sample_rate`、`stored_sample_rate=16000`、
+`stored_channels=1` 和 `stored_sample_width_bits=16`。
 `name` 不是自由输入姓名，只能从 `owner`、`family_member_1`、
 `family_member_2`、`family_member_3`、`family_member_4` 中选择；Swagger `/docs`
 会显示该枚举。结果按以下结构保存在 `storage.root`，同一身份上传会新增序号并重新
@@ -256,6 +274,13 @@ data/speakers/owner/
 参数，客户端传入的路径字段不会改变落盘位置。整个 `data/speakers` 最多保存 5 个
 身份槽位，对应 1 个主人和 4 个家人。每个身份最多保存 5 个声纹样本，同一身份第
 6 次上传返回 HTTP `409`，不会生成 `006.wav/006.npy`。
+
+新增或替换样本时，会把新 embedding 与其他身份的每个已有样本做余弦相似度比较。
+达到 `speaker_api.cross_identity_similarity_threshold`（当前为 `0.75`）时返回 HTTP
+`409` 和 `speaker_identity_conflict`，并给出 `conflicting_speaker`、`similarity` 与
+`similarity_threshold`；例如主人已注册后，同一个人的声音不能再注册为家人。同一身份
+内部允许继续追加同一个人的多个样本。该阈值依赖模型和采集环境，上板验收后可调，
+不应把 `0.75` 当作跨设备通用结论。
 
 管理接口：
 
@@ -283,14 +308,23 @@ curl -X PUT \
 # 只删除 owner 的第 1 条样本
 curl -X DELETE \
   http://127.0.0.1:8091/api/v1/speakers/owner/samples/1
+
+# 删除 owner 的全部样本
+curl -X DELETE \
+  http://127.0.0.1:8091/api/v1/speakers/owner/samples
+
+# 删除全部固定身份声纹；必须显式确认，避免误操作
+curl -X DELETE \
+  'http://127.0.0.1:8091/api/v1/speakers?confirm=true'
 ```
 
 样本编号是稳定的 `1～5`：删除 `001` 不会把 `002` 重命名为 `001`；下次新增会复用
 最小空闲编号。替换和删除都会重新计算该身份的 `centroid.npy` 并同步当前进程的声纹
 检索索引。删除最后一条样本时，该身份目录和注册表记录一并移除，身份槽位重新可用。
-新增、替换都执行与原上传接口相同的 WAV、VAD、有效语音和 embedding 校验，失败时
-保留原样本。旧版顶层上传、身份改名和整人删除接口已移除；删除一个身份时，应逐条
-删除其样本，最后一条删除成功后身份目录和注册表记录会自动移除。
+新增、批量新增、替换都执行相同的 WAV、VAD、有效语音、16 kHz 归一化、embedding
+和跨身份冲突校验，失败时保留原样本。批量新增先校验全部文件，任一文件失败时整批
+不落盘。删除单个身份使用样本集合 DELETE；删除全部身份还必须传 `confirm=true`。
+旧版顶层上传、身份改名和 `DELETE /api/v1/speakers/{name}` 仍保持移除。
 
 运行时声纹事件按身份固定路由：`owner` 发布 `EVT_VOICE_MASTER_ID`，任一
 `family_member_1`～`family_member_4` 发布 `EVT_VOICE_FOLK_ID`，`unknown` 或
@@ -367,7 +401,8 @@ ros2 service call /perception/voice/task \
 ```
 
 同一 `hold_token` 重复申请是幂等续租。租约只暂停空闲终止，不暂停录音、KWS
-或 STOP；到达目标后用 `reset_idle_timer=true` 释放，会从释放时重新等待 10 秒。
+或 STOP；到达目标后用 `reset_idle_timer=true` 释放，会从释放时重新等待当前配置的
+`idle_timeout_sec`（生产配置为 20 秒）。
 
 ## Mock 联调
 
@@ -383,7 +418,7 @@ ros2 launch marsdog_voice_interaction voice.launch.py \
 
 Mock 有两种模式：
 
-- `mock.mode: event`：绕过全部上游 Provider，按 `CALL_NAME → 会话事件 → idle`
+- `mock.mode: event`：绕过全部上游 Provider，按 `WAKEUP → 会话事件 → idle`
   生成语义完整的同 `interaction_id` 会话，适合测试行为树等下游消费者。
 - `mock.mode: pipeline`：使用 Mock Wakeup、VAD、ASR 和 Speaker 走完整节点流程，
   适合验证状态机和 Provider 编排。使用
@@ -492,11 +527,29 @@ arecord -l
 
 会话静默超时时，节点会取消当前 VAD 收音。`sounddevice` 路径只读取
 `read_available` 已确认就绪的帧，并由 `vad-capture` worker 独占
-PortAudio 流的关闭，避免取消线程与 worker 同时清理流。如果仍出现
-`VAD capture worker did not stop`，错误日志中的 `backend`、`phase` 和
-`worker_age_sec` 分别用于确认采音后端、卡住阶段和线程存活时间；同时检查后续是否出现
-`VAD capture start ignored because the previous worker has not exited`，后者才表示残留
-线程正在阻止下一轮收音。
+PortAudio 流的关闭，避免取消线程与 worker 同时清理流。取消后的调试音频落盘会被跳过，
+收尾只剩流关闭这一项不可取消的工作。
+
+节点在发布 `EVT_STATE_CHANGED idle` 之后才执行取消，因此唤醒轮询不会被取消等待推迟。
+如果仍出现 `VAD capture worker did not stop`，错误日志中的 `backend`、`phase` 和
+`worker_age_sec` 分别用于确认采音后端、卡住阶段和线程存活时间；紧随其后的
+`VAD capture worker Python stack` 是该线程的**当前调用栈采样**，不是异常回溯，用于判断
+它停在采集循环还是收尾路径。
+
+超时后残留的 worker 会被从采集状态中分离（detach）并登记为孤儿，不再阻止下一轮收音；
+已退出的孤儿会在下一次 `start_capture()` / `cancel_capture()` 时清理，不会在整个进程
+生命周期内累积。`start_capture()` 返回 `False` 时节点会打 `VAD capture refused to start`
+并把本次 `stage_start` 记为 `result="ignored"`，而不是继续上报 `result="started"`；该
+`utterance_id` 随即作废，不会被用来给别的采集结果命名。
+
+唤醒在采集进行中到达时，节点会先取消这次采集再开新的：唤醒意味着上一句话的会话已被
+替换，而 `start_capture()` 在旧 worker 仍持有设备时会拒绝启动——若不先取消，旧采集会
+继续跑完，其内容（包含刚说的唤醒词本身）会被当作新 utterance 走完整条识别链路，并可能
+额外触发一次动作事件。
+
+采集结果自带其产生时所属的 `utterance_id`（由 `vad-capture` worker 在退出前写入）。
+节点只在结果未携带 ID 时才用当前跟踪的 ID 补位，不会覆盖，因此「启动被拒」这类
+节点侧与采集侧 ID 不同步的情况下，日志、三阶段调试音频和下游事件仍然指向同一条语音。
 
 ## 目录结构
 
@@ -520,13 +573,21 @@ MarsDogVoiceInteraction/
 
 ## 开发约束
 
-- `EVT_VOICE_CALL_NAME` 到终止 `EVT_STATE_CHANGED` 必须保持同一个
+- `EVT_VOICE_WAKEUP` 到终止 `EVT_STATE_CHANGED` 必须保持同一个
   `interaction_id`。
+- `EVT_VOICE_WAKEUP` 只表示硬件或 pipeline Mock 唤醒；Model Intent 呼名发布
+  `EVT_VOICE_CALL_NAME`，昵称词库发布 `EVT_VOICE_COMMAND_CALL_NAME`。两类呼名均为
+  社交语义，`should_trigger_behavior_tree=false`，不得作为硬件唤醒或通用动作指令。
+- 词库 `PRAISE/SCOLD` 发布 `EVT_VOICE_COMMAND_PRAISE/SCOLD`，保持
+  `is_executable=false`，但以 `dispatch_role=social_reaction`、
+  `should_trigger_behavior_tree=true` 授权 Tree 生成一次性社交反应。
 - 每句话创建新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享
   该 ID。
-- VAD 确认 `has_voice=true` 即刷新会话活动时间；即使 ASR 为空且 KWS 未命中，也从
-  该次说话结束后重新计算静默超时。纯静音和缓存中的 KWS 候选不刷新。
+- 只有被接受的词库、KWS 或 Model Intent 业务语义刷新会话活动时间。纯 VAD、空 ASR、
+  NEUTRAL/UNKNOWN、仅 KNOWN 摘要、纯静音和缓存中的 KWS 候选均不刷新。
 - 会话静默时长使用单调时钟计算，不受 NTP、RTC 或人工调整系统时间影响。
+- 单次唤醒会话受 `max_duration_sec` 绝对上限约束；生产配置为 120 秒，活动刷新和
+  hold 租约都不能突破该上限。
 - 活跃 VAD 采集不能被会话静默超时截断。
 - 新增确定性命令时应同步修改 `command_catalog.yaml`、事件类型、测试、ROS2 契约
   以及下游行为树和 Action 行为映射；Voice 不直接调用动作系统。

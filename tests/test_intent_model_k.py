@@ -53,6 +53,6 @@ def test_production_config_selects_the_rkllm_artifact() -> None:
     intent_config = config["providers"]["intent_llm"]["config"]
 
     assert Path(intent_config["model"]).name == (
-        "qwen2_5_5b_rk3588_260829_w8a8.rkllm"
+        "qwen2_5_5b_rk3588_260903_w8a8.rkllm"
     )
     assert intent_config["system_prompt"] == DEFAULT_SYSTEM_PROMPT

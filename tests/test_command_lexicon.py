@@ -25,6 +25,11 @@ from marsdog_voice_interaction.nodes.voice_interaction_node import (
 from marsdog_voice_interaction.messages.intent_protocol import (
     classification_to_event,
 )
+from marsdog_voice_interaction.messages.voice_event_types import (
+    MODEL_INTENT_CLASSIFICATION_EVENT_TYPES,
+    MODEL_INTENT_EVENT_TYPES,
+    MODEL_INTENT_SHARED_COMMAND_EVENT_TYPES,
+)
 from marsdog_voice_interaction.providers.kws_sherpa import KWSSherpaProvider
 
 
@@ -82,6 +87,93 @@ def test_catalog_covers_all_19_core_command_groups(
     assert match.nlu_control in {"DO", "STOP"}
 
 
+def test_catalog_special_events_are_unique_and_share_only_reviewed_actions() -> None:
+    raw = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
+    commands = [
+        command for command in raw["commands"]
+        if command.get("enabled", True)
+    ]
+    command_keys = [command["command_key"] for command in commands]
+    command_ids = [command["command_id"] for command in commands]
+    event_types = [command["event_type"] for command in commands]
+
+    assert len(commands) == 81
+    assert len(command_keys) == len(set(command_keys))
+    assert len(command_ids) == len(set(command_ids))
+    assert len(event_types) == len(set(event_types))
+    assert all(event_type.startswith("EVT_VOICE_") for event_type in event_types)
+    assert all(
+        not event_type.startswith("EVT_VOICE_INTENT_")
+        for event_type in event_types
+    )
+    assert set(event_types).isdisjoint(
+        MODEL_INTENT_CLASSIFICATION_EVENT_TYPES
+    )
+    assert (
+        set(event_types) & MODEL_INTENT_EVENT_TYPES
+        <= MODEL_INTENT_SHARED_COMMAND_EVENT_TYPES
+    )
+
+
+def test_catalog_rejects_retired_intent_event_namespace(tmp_path: Path) -> None:
+    raw = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
+    raw["commands"][0]["event_type"] = "EVT_VOICE_INTENT_COMMAND_WALK"
+    catalog_path = tmp_path / "command_catalog.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="uses retired INTENT event_type"):
+        CommandLexicon(catalog_path)
+
+
+def test_catalog_rejects_model_classification_event(tmp_path: Path) -> None:
+    raw = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
+    raw["commands"][0]["event_type"] = "EVT_VOICE_PRAISE"
+    catalog_path = tmp_path / "command_catalog.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="reserved non-catalog event_type"):
+        CommandLexicon(catalog_path)
+
+
+def test_catalog_rejects_executable_social_event(tmp_path: Path) -> None:
+    raw = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
+    call_name = next(
+        command for command in raw["commands"]
+        if command["command_key"] == "CALL_NAME"
+    )
+    call_name["control"] = "DO"
+    catalog_path = tmp_path / "command_catalog.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="social event 'CALL' must use control NONE",
+    ):
+        CommandLexicon(catalog_path)
+
+
+def test_catalog_rejects_duplicate_special_event_names(tmp_path: Path) -> None:
+    raw = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
+    raw["commands"][1]["event_type"] = raw["commands"][0]["event_type"]
+    catalog_path = tmp_path / "command_catalog.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate catalog event_type"):
+        CommandLexicon(catalog_path)
+
+
 def test_catalog_uses_exact_normalized_match_and_preserves_negation() -> None:
     lexicon = CommandLexicon(CATALOG_PATH)
 
@@ -111,6 +203,162 @@ def test_match_fuzzy_rescues_homophone_but_rejects_prefix_edits() -> None:
     assert lexicon.match_fuzzy("Good dog") is None
 
 
+def _synthetic_catalog(tmp_path: Path, commands: list[dict[str, Any]]) -> Path:
+    path = tmp_path / "command_catalog.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {"version": "test-v1", "commands": commands},
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_phrase_variants_match_without_changing_catalog_counts() -> None:
+    lexicon = CommandLexicon(CATALOG_PATH)
+
+    assert lexicon.variant_phrase_count > 0
+    # The reviewed product catalog contract is untouched.
+    assert lexicon.phrase_count == 155
+    assert lexicon.expanded_phrase_count == 1550
+
+    for text, command_key in [
+        ("往后退一点点", "BACK_UP"),
+        ("后退", "BACK_UP"),
+        ("去睡觉", "SLEEP"),
+        ("转一圈", "SPIN"),
+        ("往我这儿来", "COME"),
+        ("吐掉", "DROP"),
+    ]:
+        match = lexicon.match(text)
+        assert match is not None, text
+        assert match.command_key == command_key, text
+        assert match.match_strategy == "catalog_variant"
+
+
+def test_phrase_variants_do_not_generate_expansions() -> None:
+    lexicon = CommandLexicon(CATALOG_PATH)
+
+    # Only the declared surface form matches; the polite templates are applied
+    # to product catalog phrases alone.
+    assert lexicon.match("去睡觉一下") is None
+    assert lexicon.match("请去睡觉") is None
+
+
+def test_phrase_variants_reject_conflicts_and_unknown_commands(
+    tmp_path: Path,
+) -> None:
+    base = {
+        "command_key": "SIT",
+        "command_id": "CMD_SIT",
+        "event_type": "EVT_VOICE_COMMAND_SIT",
+        "phrases": ["坐下"],
+    }
+
+    conflicting = _synthetic_catalog(
+        tmp_path, [dict(base, phrases=["坐下", "坐好"])]
+    )
+    raw = yaml.safe_load(conflicting.read_text(encoding="utf-8"))
+    raw["phrase_variants"] = {"SIT": ["坐好"]}
+    conflicting.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="conflicts with"):
+        CommandLexicon(conflicting)
+
+    unknown = _synthetic_catalog(tmp_path, [base])
+    raw = yaml.safe_load(unknown.read_text(encoding="utf-8"))
+    raw["phrase_variants"] = {"NOPE": ["随便"]}
+    unknown.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unknown command keys"):
+        CommandLexicon(unknown)
+
+
+def test_match_fuzzy_prefers_the_only_core_command_in_a_homophone_group(
+    tmp_path: Path,
+) -> None:
+    path = _synthetic_catalog(
+        tmp_path,
+        [
+            {
+                "command_key": "SIT",
+                "command_id": "CMD_SIT",
+                "event_type": "EVT_VOICE_COMMAND_SIT",
+                "core": True,
+                "phrases": ["坐下"],
+            },
+            {
+                "command_key": "LIE_DOWN",
+                "command_id": "CMD_LIE_DOWN",
+                "event_type": "EVT_VOICE_COMMAND_LIE_DOWN",
+                "core": False,
+                "phrases": ["坐虾"],
+            },
+        ],
+    )
+    lexicon = CommandLexicon(path)
+
+    assert lexicon.match("作下") is None
+    match = lexicon.match_fuzzy("作下")
+    assert match is not None and match.command_key == "SIT"
+    assert match.match_strategy == "fuzzy_homophone"
+
+
+def test_match_fuzzy_refuses_a_genuinely_ambiguous_group(
+    tmp_path: Path,
+) -> None:
+    path = _synthetic_catalog(
+        tmp_path,
+        [
+            {
+                "command_key": "SIT",
+                "command_id": "CMD_SIT",
+                "event_type": "EVT_VOICE_COMMAND_SIT",
+                "core": False,
+                "phrases": ["坐下"],
+            },
+            {
+                "command_key": "LIE_DOWN",
+                "command_id": "CMD_LIE_DOWN",
+                "event_type": "EVT_VOICE_COMMAND_LIE_DOWN",
+                "core": False,
+                "phrases": ["坐虾"],
+            },
+        ],
+    )
+    lexicon = CommandLexicon(path)
+
+    assert lexicon.match_fuzzy("作下") is None
+
+
+def test_match_fuzzy_accepts_a_group_that_dispatches_identically(
+    tmp_path: Path,
+) -> None:
+    # Two commands cannot share command_key/command_id/event_type, so the
+    # equivalent case is one command declaring both homophones itself.
+    path = _synthetic_catalog(
+        tmp_path,
+        [
+            {
+                "command_key": "SIT",
+                "command_id": "CMD_SIT",
+                "event_type": "EVT_VOICE_COMMAND_SIT",
+                "phrases": ["坐下", "坐虾"],
+            }
+        ],
+    )
+    lexicon = CommandLexicon(path)
+
+    match = lexicon.match_fuzzy("作下")
+    assert match is not None and match.command_key == "SIT"
+
+
 def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
     lexicon = CommandLexicon(CATALOG_PATH)
     raw = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
@@ -120,7 +368,13 @@ def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
     assert lexicon.variants_per_phrase == 10
     assert lexicon.expansion_profile_count == 5
     assert lexicon.expanded_phrase_count == 1550
-    assert lexicon.total_match_phrase_count == 1705
+    # phrase_count/expanded_phrase_count describe the reviewed product catalog
+    # only; natural-speech variants are counted separately.
+    variant_count = sum(
+        len(phrases) for phrases in raw.get("phrase_variants", {}).values()
+    )
+    assert lexicon.variant_phrase_count == variant_count
+    assert lexicon.total_match_phrase_count == 1705 + variant_count
 
     command_profiles = expansion["command_profiles"]
     phrase_profiles = expansion["phrase_profiles"]
@@ -177,9 +431,28 @@ def test_representative_expansions_route_without_intent_model(
 @pytest.mark.parametrize(
     ("text", "command_key", "event_type", "action_name"),
     [
-        ("小宝贝", "CALL_NAME", "EVT_VOICE_CALL_NAME", ""),
-        ("真聪明", "PRAISE", "EVT_VOICE_PRAISE", ""),
-        ("坏狗狗", "SCOLD", "EVT_VOICE_SCOLD", ""),
+        ("跟着我", "FOLLOW", "EVT_VOICE_COMMAND_FOLLOW", "ACT_FOLLOW"),
+        (
+            "出去溜溜",
+            "GO_OUT",
+            "EVT_VOICE_COMMAND_GO_OUT",
+            "ACT_GO_OUT_TO_PLAY",
+        ),
+        ("回家", "GO_HOME", "EVT_VOICE_COMMAND_GO_HOME", "ACT_GO_HOME"),
+        (
+            "停",
+            "HOLD_POSITION",
+            "EVT_VOICE_COMMAND_HOLD_POSITION",
+            "ACT_HOLD_POSITION",
+        ),
+        (
+            "小宝贝",
+            "CALL_NAME",
+            "EVT_VOICE_COMMAND_CALL_NAME",
+            "",
+        ),
+        ("真聪明", "PRAISE", "EVT_VOICE_COMMAND_PRAISE", ""),
+        ("坏狗狗", "SCOLD", "EVT_VOICE_COMMAND_SCOLD", ""),
         (
             "吃饭",
             "EAT_MEAL",
@@ -318,6 +591,9 @@ class _DirectRouteHarness:
     _publish_selected_kws_candidate = (
         VoiceInteractionNode._publish_selected_kws_candidate
     )
+    _refresh_for_asr_result = (
+        VoiceInteractionNode._refresh_for_asr_result
+    )
 
     def __init__(self, text: str = "坐下") -> None:
         self._providers = {
@@ -335,13 +611,17 @@ class _DirectRouteHarness:
             "publish_mode": "deferred",
             "arbitration_mode": "exclusive",
             "asr_long_text_wins": True,
-            "kws_fallback_on_asr_empty": True,
+            "kws_fallback_on_asr_empty": False,
+            "short_requires_asr_agreement": True,
             "short_max_chars_zh": 2,
             "short_max_words_en": 2,
+            "priority_command_keys": (),
+            "priority_asr_aliases": {},
         }
         self.published: list[dict[str, Any]] = []
         self.traces: list[tuple[str, dict[str, Any]]] = []
         self.intent_called = False
+        self.activity_reasons: list[str] = []
 
     def _publish(self, event: dict[str, Any]) -> None:
         self.published.append(dict(event))
@@ -349,8 +629,8 @@ class _DirectRouteHarness:
     def _trace(self, record: str, **fields: Any) -> None:
         self.traces.append((record, fields))
 
-    def _refresh_interaction_activity(self) -> None:
-        pass
+    def _refresh_interaction_activity(self, *, reason: str = "activity") -> None:
+        self.activity_reasons.append(reason)
 
     def _parse_intent(self, _text: str) -> dict[str, Any] | None:
         self.intent_called = True
@@ -371,6 +651,9 @@ class _KwsRouteHarness:
     )
     _publish_selected_kws_candidate = (
         VoiceInteractionNode._publish_selected_kws_candidate
+    )
+    _refresh_for_asr_result = (
+        VoiceInteractionNode._refresh_for_asr_result
     )
 
     def __init__(
@@ -397,14 +680,18 @@ class _KwsRouteHarness:
             "publish_mode": "deferred",
             "arbitration_mode": "exclusive",
             "asr_long_text_wins": True,
-            "kws_fallback_on_asr_empty": True,
+            "kws_fallback_on_asr_empty": False,
+            "short_requires_asr_agreement": True,
             "short_max_chars_zh": 2,
             "short_max_words_en": 2,
+            "priority_command_keys": (),
+            "priority_asr_aliases": {},
         }
         self._utterance_started_monotonic = time.perf_counter()
         self.published: list[dict[str, Any]] = []
         self.traces: list[tuple[str, dict[str, Any]]] = []
         self.activity_refreshed = False
+        self.activity_reasons: list[str] = []
         self.intent_called = False
 
     def _publish(self, event: dict[str, Any]) -> None:
@@ -413,8 +700,9 @@ class _KwsRouteHarness:
     def _trace(self, record: str, **fields: Any) -> None:
         self.traces.append((record, fields))
 
-    def _refresh_interaction_activity(self) -> None:
+    def _refresh_interaction_activity(self, *, reason: str = "activity") -> None:
         self.activity_refreshed = True
+        self.activity_reasons.append(reason)
 
     def _parse_intent(self, text: str) -> dict[str, Any]:
         self.intent_called = True
@@ -448,8 +736,12 @@ def test_core_kws_is_cached_without_publishing_before_arbitration() -> None:
     )
 
 
-def test_asr_homophone_does_not_remove_or_repeat_core_kws_events() -> None:
-    node = _KwsRouteHarness(asr_text="机长")
+def test_unconfirmed_short_kws_candidate_does_not_publish_action() -> None:
+    # The ASR sample must NOT hit the lexicon on its own: when it does, the
+    # direct-match path publishes from ASR evidence alone and the KWS gate is
+    # never exercised.  The original sample "机长" became a fuzzy homophone hit
+    # for HIGH_FIVE once command_lexicon.fuzzy_matching was enabled.
+    node = _KwsRouteHarness(asr_text="苹果")
 
     node._poll_kws_events()
     assert node._process_speech(
@@ -459,8 +751,10 @@ def test_asr_homophone_does_not_remove_or_repeat_core_kws_events() -> None:
 
     event_types = [event["event_type"] for event in node.published]
     assert event_types.count("EVT_VOICE_COMMAND_KNOWN") == 0
-    assert event_types.count("EVT_VOICE_COMMAND_HIGH_FIVE") == 1
-    assert not node.intent_called
+    assert event_types.count("EVT_VOICE_COMMAND_HIGH_FIVE") == 0
+    assert node.intent_called
+    assert node.activity_refreshed
+    assert node.activity_reasons == ["asr_result"]
     assert any(
         record == "stage_complete"
         and fields.get("stage") == "command_lexicon"
@@ -470,13 +764,8 @@ def test_asr_homophone_does_not_remove_or_repeat_core_kws_events() -> None:
     assert any(
         record == "stage_complete"
         and fields.get("stage") == "recognition_arbitration"
-        and fields.get("result") == "kws_selected"
-        and fields.get("reason") == "short_asr_kws_preferred"
-        for record, fields in node.traces
-    )
-    assert any(
-        record == "utterance_complete"
-        and fields.get("result") == "published_kws_selected"
+        and fields.get("result") == "asr_selected"
+        and fields.get("reason") == "short_asr_unconfirmed_kws"
         for record, fields in node.traces
     )
 
@@ -503,6 +792,7 @@ def test_direct_catalog_match_publishes_event_and_skips_intent_model() -> None:
     assert direct["intent_source"] == "command_lexicon"
     assert direct["should_trigger_behavior_tree"]
     assert direct["utterance_id"] == "utterance-1"
+    assert node.activity_reasons == ["asr_result"]
     assert any(
         record == "stage_complete"
         and fields.get("stage") == "command_lexicon"
@@ -541,6 +831,7 @@ def test_expanded_catalog_match_publishes_event_and_skips_intent_model() -> None
         and fields.get("expansion_rule") == "polite_please_you"
         for record, fields in node.traces
     )
+    assert node.activity_reasons == ["asr_result"]
     catalog_events = [
         event for event in node.published
         if event.get("intent_source") == "command_lexicon"
@@ -560,11 +851,27 @@ def test_expanded_catalog_match_publishes_event_and_skips_intent_model() -> None
 @pytest.mark.parametrize(
     ("text", "event_type", "emotion", "category"),
     [
-        ("真聪明", "EVT_VOICE_PRAISE", "PRAISE", "praise"),
-        ("坏狗狗", "EVT_VOICE_SCOLD", "SCOLD", "blame"),
+        (
+            "小宝贝",
+            "EVT_VOICE_COMMAND_CALL_NAME",
+            "CALL",
+            "social",
+        ),
+        (
+            "真聪明",
+            "EVT_VOICE_COMMAND_PRAISE",
+            "PRAISE",
+            "praise",
+        ),
+        (
+            "坏狗狗",
+            "EVT_VOICE_COMMAND_SCOLD",
+            "SCOLD",
+            "blame",
+        ),
     ],
 )
-def test_social_catalog_event_skips_intent_without_becoming_executable(
+def test_social_catalog_event_uses_event_specific_tree_authority(
     text: str,
     event_type: str,
     emotion: str,
@@ -588,11 +895,20 @@ def test_social_catalog_event_skips_intent_without_becoming_executable(
     assert direct["control"] == "NONE"
     assert direct["intent_category"] == category
     assert not direct["is_executable"]
-    assert not direct["should_trigger_behavior_tree"]
-    assert node._state_machine.state == State.ATTENTION
+    is_reaction = emotion in {"PRAISE", "SCOLD"}
+    assert direct["should_trigger_behavior_tree"] is is_reaction
+    assert direct["dispatch_role"] == (
+        "social_reaction" if is_reaction else "specific_command"
+    )
+    assert node._state_machine.state == (
+        State.EXECUTION if is_reaction else State.ATTENTION
+    )
     assert any(
         record == "utterance_complete"
-        and fields.get("result") == "published_catalog_event"
+        and fields.get("result") == (
+            "published_social_reaction"
+            if is_reaction else "published_catalog_event"
+        )
         for record, fields in node.traces
     )
 
@@ -621,6 +937,7 @@ def test_short_asr_catalog_agreement_selects_kws_result_group() -> None:
         and fields.get("reason") == "short_asr_catalog_agrees"
         for record, fields in node.traces
     )
+    assert node.activity_reasons == ["asr_result"]
 
 
 def test_long_asr_text_containing_keyword_selects_asr_catalog() -> None:
@@ -653,7 +970,82 @@ def test_long_asr_text_containing_keyword_selects_asr_catalog() -> None:
     )
 
 
-def test_short_conflicting_kws_candidate_overrides_asr_catalog() -> None:
+@pytest.mark.parametrize(
+    ("command_key", "asr_text", "event_type"),
+    [
+        (
+            "EAT_CANNED_FOOD",
+            "去滚罐",
+            "EVT_VOICE_COMMAND_EAT_CANNED_FOOD",
+        ),
+        ("GO_GET_IT", "去哪", "EVT_VOICE_COMMAND_GO_GET_IT"),
+    ],
+)
+def test_configured_kws_priority_recovers_confirmed_asr_errors(
+    command_key: str,
+    asr_text: str,
+    event_type: str,
+) -> None:
+    node = _KwsRouteHarness(command_key=command_key, asr_text=asr_text)
+    node._kws_arbitration["priority_command_keys"] = frozenset({
+        "EAT_CANNED_FOOD",
+        "GO_GET_IT",
+    })
+    node._kws_arbitration["priority_asr_aliases"] = {
+        "EAT_CANNED_FOOD": ("去滚罐",),
+        "GO_GET_IT": ("去哪",),
+    }
+    node._poll_kws_events()
+
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000},
+        "utterance-1",
+    )
+
+    business_events = [
+        event for event in node.published
+        if event.get("intent_source") in {"kws", "command_lexicon"}
+    ]
+    assert [event["event_type"] for event in business_events] == [event_type]
+    assert business_events[0]["asr_text"] == asr_text
+    assert not node.intent_called
+    assert any(
+        record == "stage_complete"
+        and fields.get("stage") == "recognition_arbitration"
+        and fields.get("result") == "kws_selected"
+        and fields.get("reason") == "configured_kws_priority_alias"
+        for record, fields in node.traces
+    )
+
+
+def test_priority_kws_does_not_override_unlisted_asr_text() -> None:
+    node = _KwsRouteHarness(
+        command_key="GO_GET_IT",
+        asr_text="我们今天去哪里玩",
+    )
+    node._kws_arbitration["priority_command_keys"] = ("GO_GET_IT",)
+    node._kws_arbitration["priority_asr_aliases"] = {
+        "GO_GET_IT": ("去哪",),
+    }
+    node._poll_kws_events()
+
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000},
+        "utterance-1",
+    )
+
+    assert not any(
+        event.get("intent_source") == "kws" for event in node.published
+    )
+    assert any(
+        record == "stage_complete"
+        and fields.get("stage") == "recognition_arbitration"
+        and fields.get("reason") == "long_asr_text"
+        for record, fields in node.traces
+    )
+
+
+def test_short_conflicting_kws_candidate_defers_to_asr_catalog() -> None:
     node = _KwsRouteHarness(command_key="STAND_UP", asr_text="坐下")
     node._poll_kws_events()
 
@@ -667,15 +1059,18 @@ def test_short_conflicting_kws_candidate_overrides_asr_catalog() -> None:
         if event.get("intent_source") in {"kws", "command_lexicon"}
     ]
     assert [event["event_type"] for event in business_events] == [
-        "EVT_VOICE_COMMAND_STAND_UP",
+        "EVT_VOICE_COMMAND_SIT",
     ]
-    assert all(event["intent_source"] == "kws" for event in business_events)
+    assert all(
+        event["intent_source"] == "command_lexicon"
+        for event in business_events
+    )
     assert not node.intent_called
     assert any(
         record == "stage_complete"
         and fields.get("stage") == "recognition_arbitration"
-        and fields.get("result") == "kws_selected"
-        and fields.get("reason") == "short_kws_overrides_asr_conflict"
+        and fields.get("result") == "asr_selected"
+        and fields.get("reason") == "short_asr_catalog_conflict"
         for record, fields in node.traces
     )
 
@@ -702,11 +1097,11 @@ def test_long_asr_text_without_catalog_match_does_not_trigger_kws() -> None:
     )
 
 
-def test_empty_asr_uses_single_kws_candidate_as_fallback() -> None:
+def test_empty_asr_does_not_execute_single_kws_candidate() -> None:
     node = _KwsRouteHarness(command_key="SIT", asr_text="")
     node._poll_kws_events()
 
-    assert node._process_speech(
+    assert not node._process_speech(
         {"audio_samples": [0.1], "sample_rate": 16000},
         "utterance-1",
     )
@@ -714,17 +1109,16 @@ def test_empty_asr_uses_single_kws_candidate_as_fallback() -> None:
     business_events = [
         event for event in node.published if event.get("intent_source") == "kws"
     ]
-    assert [event["event_type"] for event in business_events] == [
-        "EVT_VOICE_COMMAND_SIT",
-    ]
+    assert business_events == []
     assert not any(event["event_type"] == "speech" for event in node.published)
     assert not node.intent_called
     assert any(
         record == "stage_complete"
         and fields.get("stage") == "recognition_arbitration"
-        and fields.get("reason") == "empty_asr_single_candidate"
+        and fields.get("reason") == "empty_asr_fallback_disabled"
         for record, fields in node.traces
     )
+    assert not node.activity_refreshed
 
 
 def test_multiple_kws_candidates_defer_to_asr_pipeline() -> None:
@@ -776,6 +1170,48 @@ class _ModelRouteHarness(_DirectRouteHarness):
         )
 
 
+@pytest.mark.parametrize("labels", [None, ("NONE", "NONE", "NONE")])
+def test_non_command_asr_refreshes_before_speaker_and_semantic_routing(labels) -> None:
+    node = _ModelRouteHarness("我今天随便说句话", labels)
+
+    class Speaker:
+        def verify(self, _audio):
+            assert node.activity_reasons == ["asr_result"]
+            return {"speaker_id": "unknown", "confidence": 0.0}
+
+    node._providers["speaker"] = Speaker()
+    node._process_speech({"audio_samples": [0.1], "sample_rate": 16000})
+    assert node.activity_reasons == ["asr_result"]
+
+
+@pytest.mark.parametrize("text", ["", "  \t\n", None])
+def test_empty_or_blank_asr_does_not_refresh(text) -> None:
+    node = _DirectRouteHarness(text)
+    node._process_speech({"audio_samples": [0.1], "sample_rate": 16000})
+    assert node.activity_reasons == []
+
+
+def test_asr_exception_does_not_refresh() -> None:
+    node = _DirectRouteHarness()
+
+    class BrokenASR:
+        def transcribe(self, _audio):
+            raise RuntimeError("ASR failed")
+
+    node._providers["asr"] = BrokenASR()
+    node._process_speech({"audio_samples": [0.1], "sample_rate": 16000})
+    assert node.activity_reasons == []
+
+
+def test_kws_fallback_without_asr_does_not_refresh() -> None:
+    node = _KwsRouteHarness(command_key="SIT", asr_text="")
+    node._kws_arbitration["kws_fallback_on_asr_empty"] = True
+    node._poll_kws_events()
+    assert node._process_speech({"audio_samples": [0.1], "sample_rate": 16000})
+    assert any(event.get("intent_source") == "kws" for event in node.published)
+    assert node.activity_reasons == []
+
+
 def test_catalog_miss_routes_model_intent_to_social_specific_and_summary() -> None:
     node = _ModelRouteHarness("真乖请坐好", ("PRAISE", "SIT", "DO"))
 
@@ -801,6 +1237,36 @@ def test_catalog_miss_routes_model_intent_to_social_specific_and_summary() -> No
     assert model_events[2]["specific_event_type"] == (
         "EVT_VOICE_COMMAND_SIT"
     )
+    assert node.activity_reasons == ["asr_result"]
+
+
+def test_rkllm_go_label_without_go_evidence_is_summary_only() -> None:
+    # The utterance must miss the command lexicon, otherwise the catalog
+    # answers the request and the rkllm action gate is never reached.
+    # "去睡觉" is now a SLEEP catalog variant.
+    node = _ModelRouteHarness("读一下消息", ("NONE", "GO", "DO"))
+
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000},
+        "utterance-1",
+    )
+
+    model_events = [
+        event for event in node.published
+        if event.get("intent_source") == "rkllm"
+    ]
+    assert [event["event_type"] for event in model_events] == [
+        "EVT_VOICE_COMMAND_KNOWN"
+    ]
+    assert not model_events[0]["should_trigger_behavior_tree"]
+    assert node.activity_reasons == ["asr_result"]
+    slots = {
+        slot["key"]: slot["value"] for slot in model_events[0]["slots"]
+    }
+    assert slots["model_action_gate"] == "rejected"
+    assert slots["model_action_gate_reason"] == (
+        "missing_intent_text_evidence"
+    )
 
 
 def test_catalog_miss_with_all_none_publishes_neutral_event() -> None:
@@ -824,6 +1290,24 @@ def test_catalog_miss_with_all_none_publishes_neutral_event() -> None:
         and fields.get("result") == "published"
         for record, fields in node.traces
     )
+
+
+def test_catalog_miss_with_invalid_model_output_uses_intent_unknown() -> None:
+    node = _ModelRouteHarness("无法解析的输入", None)
+
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000},
+        "utterance-1",
+    )
+
+    diagnostic_events = [
+        event for event in node.published
+        if event.get("intent_source") == "invalid_protocol_fallback"
+    ]
+    assert [event["event_type"] for event in diagnostic_events] == [
+        "EVT_VOICE_COMMAND_UNKNOWN"
+    ]
+    assert not diagnostic_events[0]["should_trigger_behavior_tree"]
 
 
 def test_asr_number_text_is_normalized_before_publish_and_intent() -> None:

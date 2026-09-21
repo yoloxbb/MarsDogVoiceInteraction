@@ -75,6 +75,9 @@ def test_project_configs_only_use_relative_filesystem_paths() -> None:
     assert production["command_lexicon"] == {
         "enabled": True,
         "catalog": str(root / "config" / "command_catalog.yaml"),
+        # Homophone fallback for ASR near-miss characters; on by default so
+        # short commands still resolve when ASR writes the wrong character.
+        "fuzzy_matching": True,
     }
     assert event_mock["storage"]["root"] == str(root / "data" / "mock")
     assert pipeline_mock["storage"]["root"] == str(

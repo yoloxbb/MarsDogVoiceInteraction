@@ -24,13 +24,36 @@ logger = logging.getLogger(__name__)
 
 _VALID_MODEL_TYPES = frozenset({"sense_voice", "paraformer"})
 
+# SenseVoice accepts a language hint; the empty string means "auto".  The
+# catalog carries English commands (SIT / WAIT / SPIN / DROP IT), so pinning
+# the decoder to ``zh`` forces those through a Chinese decode.
+_LANGUAGE_AUTO = "auto"
+_VALID_LANGUAGE_HINTS = frozenset({"zh", "en", "ja", "ko", "yue"})
+
+
+def _resolve_language_hint(value: Any) -> str:
+    """Validate a configured ASR language hint.
+
+    ``auto`` (or an empty value) lets SenseVoice detect the language itself,
+    which is what the English catalog commands need.
+    """
+    hint = str(value or "").strip().lower()
+    if not hint or hint == _LANGUAGE_AUTO:
+        return _LANGUAGE_AUTO
+    if hint in _VALID_LANGUAGE_HINTS:
+        return hint
+    raise ValueError(
+        f"Unsupported ASR language hint {value!r}; expected one of "
+        f"{sorted(_VALID_LANGUAGE_HINTS | {_LANGUAGE_AUTO})}"
+    )
+
 
 def _normalize_sense_voice_language(value: Any, fallback: str) -> str:
     """Convert SenseVoice tags such as ``<|en|>`` to protocol values."""
     language = str(value or "").strip()
     if language.startswith("<|") and language.endswith("|>"):
         language = language[2:-2]
-    return language if language in {"zh", "en", "ja", "ko", "yue"} else fallback
+    return language if language in _VALID_LANGUAGE_HINTS else fallback
 
 
 class ASRSherpaProvider(BaseProvider):
@@ -61,7 +84,14 @@ class ASRSherpaProvider(BaseProvider):
         self._model_path = config.get("asr_model", "")
         self._tokens = config.get("tokens", "")
         self._sample_rate = int(config.get("sample_rate", 16000))
-        self._language = config.get("language", "zh")
+        self._language = _resolve_language_hint(config.get("language", "zh"))
+        # ``auto`` is a decoder hint, not a protocol value: docs/ROS2_CONTRACT.md
+        # restricts ``language`` on published events to zh/en/ja/ko/yue.  When
+        # the model emits no usable tag we report the catalog's dominant
+        # language instead of leaking "auto" onto the wire.
+        self._language_fallback = (
+            "zh" if self._language == _LANGUAGE_AUTO else self._language
+        )
         self._use_itn = bool(config.get("use_itn", True))
         self._num_threads = int(config.get("num_threads", 4))
         self._audio_debug = AudioDebugRecorder(config.get("audio_debug"))
@@ -94,7 +124,11 @@ class ASRSherpaProvider(BaseProvider):
                 self._recognizer = OfflineRecognizer.from_sense_voice(
                     model=self._model_path,
                     tokens=self._tokens,
-                    language=self._language,
+                    # sherpa-onnx spells "detect the language" as an empty hint.
+                    language=(
+                        "" if self._language == _LANGUAGE_AUTO
+                        else self._language
+                    ),
                     use_itn=self._use_itn,
                     **common,
                 )
@@ -142,20 +176,20 @@ class ASRSherpaProvider(BaseProvider):
             success and ``0.0`` on empty/error outcomes.
         """
         if not self.available or self._recognizer is None:
-            return {"asr_text": "", "language": self._language,
+            return {"asr_text": "", "language": self._language_fallback,
                     "confidence": 0.0, "reason": "unavailable"}
 
         if audio_data is None:
-            return {"asr_text": "", "language": self._language,
+            return {"asr_text": "", "language": self._language_fallback,
                     "confidence": 0.0, "reason": "no_audio"}
 
         samples = audio_data.get("audio_samples")
         if samples is None or (hasattr(samples, "__len__") and len(samples) == 0):
-            return {"asr_text": "", "language": self._language,
+            return {"asr_text": "", "language": self._language_fallback,
                     "confidence": 0.0, "reason": "empty_audio"}
 
         if not audio_data.get("has_voice", True):
-            return {"asr_text": "", "language": self._language,
+            return {"asr_text": "", "language": self._language_fallback,
                     "confidence": 0.0, "reason": "no_voice"}
 
         try:
@@ -234,7 +268,7 @@ class ASRSherpaProvider(BaseProvider):
 
         except Exception as exc:
             logger.error("ASR transcription error: %s", exc, exc_info=True)
-            return {"asr_text": "", "language": self._language,
+            return {"asr_text": "", "language": self._language_fallback,
                     "confidence": 0.0, "reason": "error"}
 
     def _decode_waveform(
@@ -254,7 +288,7 @@ class ASRSherpaProvider(BaseProvider):
             language = "zh"
         else:
             language = _normalize_sense_voice_language(
-                getattr(result, "lang", ""), self._language,
+                getattr(result, "lang", ""), self._language_fallback,
             )
         return str(result.text), language
 

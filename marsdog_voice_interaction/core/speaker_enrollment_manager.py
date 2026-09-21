@@ -17,7 +17,11 @@ from marsdog_voice_interaction.messages.speaker_identity import (
     speaker_identity_role,
     validate_speaker_identity,
 )
-from marsdog_voice_interaction.utils.uploaded_audio import decode_pcm16_wav
+from marsdog_voice_interaction.utils.uploaded_audio import (
+    decode_pcm16_wav,
+    encode_pcm16_wav,
+    normalize_pcm16_wav,
+)
 
 
 _STORAGE_ROOT = Path("data")
@@ -25,6 +29,7 @@ _SPEAKERS_DIR = _STORAGE_ROOT / "speakers"
 _REGISTRY_PATH = _STORAGE_ROOT / "speaker_registry.json"
 MAX_SPEAKERS = len(ALLOWED_SPEAKER_IDENTITIES)
 MAX_SAMPLES_PER_SPEAKER = 5
+SPEAKER_SAMPLE_RATE = 16000
 
 ENROLL_SENTENCES = (
     "你好小狗，很高兴认识你",
@@ -240,16 +245,49 @@ class SpeakerEnrollment:
     current_step: int = 1
     shots_collected: int = 0
     embeddings: list[np.ndarray] = field(default_factory=list)
+    samples: list[_PreparedSpeakerSample] = field(default_factory=list)
     done: bool = False
+
+
+@dataclass(frozen=True)
+class _PreparedSpeakerSample:
+    embedding: np.ndarray
+    wav_bytes: bytes
+    source_sample_rate: int
+    source_duration_ms: float
+    speech_duration_ms: float
+    segment_count: int
 
 
 class SpeakerEnrollmentManager:
     """Own voice-print sessions; no face or camera state exists here."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        cross_identity_similarity_threshold: float | None = 0.75,
+        same_identity_similarity_threshold: float | None = 0.5,
+    ) -> None:
         self._extractor: Any = None
         self._session: SpeakerEnrollment | None = None
         self._storage_lock = threading.RLock()
+        self._same_identity_similarity_threshold = same_identity_similarity_threshold
+        if (
+            same_identity_similarity_threshold is not None
+            and not 0.0 <= same_identity_similarity_threshold <= 1.0
+        ):
+            raise ValueError("same_identity_similarity_threshold 必须在 0.0 到 1.0 之间")
+        self._cross_identity_similarity_threshold = (
+            None
+            if cross_identity_similarity_threshold is None
+            else float(cross_identity_similarity_threshold)
+        )
+        if (
+            self._cross_identity_similarity_threshold is not None
+            and not 0.0 <= self._cross_identity_similarity_threshold <= 1.0
+        ):
+            raise ValueError(
+                "cross_identity_similarity_threshold 必须在 0.0 到 1.0 之间"
+            )
         _SPEAKERS_DIR.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -290,6 +328,15 @@ class SpeakerEnrollmentManager:
                 ),
                 "max_samples_per_speaker": MAX_SAMPLES_PER_SPEAKER,
             }
+        with self._storage_lock:
+            current_count = _speaker_sample_count(name)
+            if current_count + required > MAX_SAMPLES_PER_SPEAKER:
+                return {
+                    "ok": False, "status": 409,
+                    "code": "speaker_sample_limit_reached",
+                    "error": "新增注册样本将超过单人 5 个样本上限",
+                    "shots": current_count,
+                }
         self._session = SpeakerEnrollment(name, required, time.time())
         return {
             "ok": True,
@@ -303,12 +350,22 @@ class SpeakerEnrollmentManager:
         self,
         audio_samples: np.ndarray,
         sample_rate: int,
+        vad: Any | None = None,
     ) -> dict[str, Any]:
         session = self._session
         if session is None or session.done:
             return {"ok": False, "error": "没有进行中的声纹注册会话"}
-        embedding = self._extract_embedding(audio_samples, sample_rate)
-        if embedding is None:
+        try:
+            prepared = self._prepare_uploaded_sample(
+                encode_pcm16_wav(audio_samples, sample_rate), vad,
+            )
+        except (ValueError, RuntimeError) as exc:
+            return {
+                "ok": False, "status": "retry", "done": False,
+                "code": "invalid_audio", "error": str(exc),
+                "step": session.current_step,
+            }
+        if prepared is None:
             return {
                 "ok": True,
                 "status": "retry",
@@ -317,35 +374,25 @@ class SpeakerEnrollmentManager:
                 "done": False,
             }
 
-        session.embeddings.append(embedding)
+        with self._storage_lock:
+            conflict = self._cross_identity_conflict(session.name, prepared.embedding)
+            if conflict is None:
+                references = (
+                    self.get_speaker_templates(session.name)
+                    or session.embeddings[:1]
+                )
+                conflict = self._same_identity_conflict(prepared.embedding, references)
+        if conflict is not None:
+            return {**conflict, "done": False, "step": session.current_step}
+        session.embeddings.append(prepared.embedding)
+        session.samples.append(prepared)
         session.shots_collected += 1
         if session.shots_collected >= session.required_shots:
-            with self._storage_lock:
-                registry = _load_registry()
-                capacity_error = _capacity_error(session.name, registry)
-                if capacity_error is not None:
-                    session.done = True
-                    return {**capacity_error, "done": True}
-                session.done = True
-                directory = _SPEAKERS_DIR / session.name
-                directory.mkdir(parents=True, exist_ok=True)
-                for index, value in enumerate(session.embeddings, start=1):
-                    np.save(directory / f"{index:03d}.npy", value)
-                np.save(
-                    directory / "centroid.npy",
-                    np.mean(session.embeddings, axis=0),
-                )
-                registry["speakers"][session.name] = {
-                    "shots": session.shots_collected,
-                    "enrolled_at": time.time(),
-                }
-                _save_registry(registry)
+            result = self._commit_speaker_samples(session.name, session.samples)
+            session.done = True
             return {
-                "ok": True,
-                "name": session.name,
-                "status": "done",
-                "shots": session.shots_collected,
-                "done": True,
+                **result, "done": True,
+                "status": "done" if result.get("ok") else "failed",
             }
 
         session.current_step = session.shots_collected + 1
@@ -368,85 +415,210 @@ class SpeakerEnrollmentManager:
         audio_bytes: bytes,
         vad: Any | None = None,
     ) -> dict[str, Any]:
+        """Validate and append one uploaded sample."""
+        result = self.enroll_speaker_batch_from_audio(
+            name,
+            [audio_bytes],
+            vad=vad,
+        )
+        if not result.get("ok"):
+            return result
+        sample = result["samples"][0]
+        return {
+            key: value
+            for key, value in result.items()
+            if key not in {"added_count", "sample_ids", "samples"}
+        } | sample
+
+    def enroll_speaker_batch_from_audio(
+        self,
+        name: str,
+        audio_items: list[bytes],
+        vad: Any | None = None,
+    ) -> dict[str, Any]:
+        """Validate a group of uploads, then append all of them together."""
         try:
             normalized_name = validate_speaker_identity(name)
-            with self._storage_lock:
-                registry = _load_registry()
-                capacity_error = _capacity_error(
-                    normalized_name,
-                    registry,
-                )
-                if capacity_error is not None:
-                    return capacity_error
-                sample_error = _sample_capacity_error(
-                    normalized_name,
-                    registry,
-                )
-                if sample_error is not None:
-                    return sample_error
-            if vad is None:
-                samples, sample_rate = decode_pcm16_wav(audio_bytes)
-                source_duration_ms = len(samples) / sample_rate * 1000.0
-                speech_duration_ms = source_duration_ms
-                segment_count = 1
-                stored_wav = audio_bytes
-            else:
-                trimmed = vad.trim_wav(audio_bytes)
-                samples = trimmed.samples
-                sample_rate = trimmed.sample_rate
-                source_duration_ms = trimmed.source_duration_ms
-                speech_duration_ms = trimmed.speech_duration_ms
-                segment_count = trimmed.segment_count
-                stored_wav = trimmed.wav_bytes
-        except (RuntimeError, ValueError) as exc:
-            result: dict[str, Any] = {"ok": False, "error": str(exc)}
-            if isinstance(exc, ValueError) and str(exc).startswith("声纹身份只能是"):
-                result.update({
-                    "status": 422,
-                    "code": "invalid_speaker_identity",
-                    "allowed_names": list(ALLOWED_SPEAKER_IDENTITIES),
-                })
-            return result
-
-        embedding = self._extract_embedding(samples, sample_rate)
-        if embedding is None:
-            return {"ok": False, "error": "无法提取声纹"}
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status": 422,
+                "code": "invalid_speaker_identity",
+                "error": str(exc),
+                "allowed_names": list(ALLOWED_SPEAKER_IDENTITIES),
+            }
+        if not audio_items:
+            return {
+                "ok": False,
+                "status": 400,
+                "code": "empty_audio_batch",
+                "error": "至少需要上传 1 个音频文件",
+            }
+        if len(audio_items) > MAX_SAMPLES_PER_SPEAKER:
+            return {
+                "ok": False,
+                "status": 409,
+                "code": "speaker_sample_limit_reached",
+                "error": (
+                    "单次上传不能超过 "
+                    f"{MAX_SAMPLES_PER_SPEAKER} 个声纹样本"
+                ),
+                "max_samples_per_speaker": MAX_SAMPLES_PER_SPEAKER,
+            }
 
         with self._storage_lock:
             registry = _load_registry()
             capacity_error = _capacity_error(normalized_name, registry)
             if capacity_error is not None:
                 return capacity_error
-            sample_error = _sample_capacity_error(normalized_name, registry)
-            if sample_error is not None:
-                return sample_error
-            directory = _SPEAKERS_DIR / normalized_name
-            directory.mkdir(parents=True, exist_ok=True)
-            sample_id = _next_available_sample_id(directory)
-            if sample_id is None:
+            current_count = _speaker_sample_count(normalized_name, registry)
+            if current_count + len(audio_items) > MAX_SAMPLES_PER_SPEAKER:
                 return {
                     "ok": False,
                     "status": 409,
                     "code": "speaker_sample_limit_reached",
                     "error": (
-                        "单人声纹样本已达到上限 "
+                        f"当前已有 {current_count} 个样本，本次上传 "
+                        f"{len(audio_items)} 个将超过单人上限 "
                         f"{MAX_SAMPLES_PER_SPEAKER} 个"
                     ),
                     "name": normalized_name,
-                    "shots": MAX_SAMPLES_PER_SPEAKER,
+                    "shots": current_count,
+                    "requested_count": len(audio_items),
                     "max_samples_per_speaker": MAX_SAMPLES_PER_SPEAKER,
                 }
-            stem = f"{sample_id:03d}"
-            embedding_path = directory / f"{stem}.npy"
-            audio_path = directory / f"{stem}.wav"
-            audio_path.write_bytes(stored_wav)
-            np.save(embedding_path, embedding)
-            sample_ids = _speaker_sample_ids(directory)
-            _save_array_atomic(
-                directory / "centroid.npy",
-                _mean_sample_embeddings(directory, sample_ids),
-            )
-            shots = len(sample_ids)
+
+        prepared_items: list[_PreparedSpeakerSample] = []
+        for index, audio_bytes in enumerate(audio_items, start=1):
+            try:
+                prepared = self._prepare_uploaded_sample(audio_bytes, vad)
+            except (RuntimeError, ValueError) as exc:
+                return {
+                    "ok": False,
+                    "status": 422,
+                    "code": "invalid_audio",
+                    "error": str(exc),
+                    "failed_file_index": index,
+                }
+            if prepared is None:
+                return {
+                    "ok": False,
+                    "status": 422,
+                    "code": "speaker_embedding_failed",
+                    "error": "无法提取声纹",
+                    "failed_file_index": index,
+                }
+            prepared_items.append(prepared)
+
+        return self._commit_speaker_samples(normalized_name, prepared_items)
+
+    def _commit_speaker_samples(
+        self, normalized_name: str, prepared_items: list[_PreparedSpeakerSample],
+    ) -> dict[str, Any]:
+        """Shared append path for uploaded and live enrollment samples."""
+        with self._storage_lock:
+            registry = _load_registry()
+            capacity_error = _capacity_error(normalized_name, registry)
+            if capacity_error is not None:
+                return capacity_error
+            directory = _SPEAKERS_DIR / normalized_name
+            existing_ids = _speaker_sample_ids(directory)
+            if len(existing_ids) + len(prepared_items) > MAX_SAMPLES_PER_SPEAKER:
+                return {
+                    "ok": False,
+                    "status": 409,
+                    "code": "speaker_sample_limit_reached",
+                    "error": (
+                        f"当前已有 {len(existing_ids)} 个样本，本次上传 "
+                        f"{len(prepared_items)} 个将超过单人上限 "
+                        f"{MAX_SAMPLES_PER_SPEAKER} 个"
+                    ),
+                    "name": normalized_name,
+                    "shots": len(existing_ids),
+                    "requested_count": len(prepared_items),
+                    "max_samples_per_speaker": MAX_SAMPLES_PER_SPEAKER,
+                }
+
+            for index, prepared in enumerate(prepared_items, start=1):
+                conflict = self._cross_identity_conflict(
+                    normalized_name,
+                    prepared.embedding,
+                )
+                if conflict is not None:
+                    return {**conflict, "failed_file_index": index}
+
+            occupied = set(existing_ids)
+            allocated_ids: list[int] = []
+            for _ in prepared_items:
+                sample_id = next(
+                    (
+                        value
+                        for value in range(1, MAX_SAMPLES_PER_SPEAKER + 1)
+                        if value not in occupied
+                    ),
+                    None,
+                )
+                if sample_id is None:
+                    raise RuntimeError("声纹样本编号分配失败")
+                occupied.add(sample_id)
+                allocated_ids.append(sample_id)
+
+            try:
+                existing_embeddings = [
+                    np.asarray(
+                        np.load(directory / f"{sample_id:03d}.npy"),
+                        dtype=np.float32,
+                    )
+                    for sample_id in existing_ids
+                ]
+                all_embeddings = existing_embeddings + [
+                    item.embedding for item in prepared_items
+                ]
+                references = existing_embeddings or [prepared_items[0].embedding]
+                for index, item in enumerate(prepared_items, start=1):
+                    conflict = self._same_identity_conflict(item.embedding, references)
+                    if conflict is not None:
+                        return {**conflict, "failed_file_index": index}
+                shapes = {value.shape for value in all_embeddings}
+                if len(shapes) != 1:
+                    raise RuntimeError("声纹样本 embedding 维度不一致")
+                centroid = np.mean(all_embeddings, axis=0)
+            except (OSError, RuntimeError, ValueError) as exc:
+                return {
+                    "ok": False,
+                    "status": 409,
+                    "code": "speaker_sample_storage_inconsistent",
+                    "error": str(exc),
+                }
+
+            directory.mkdir(parents=True, exist_ok=True)
+            committed_paths: list[Path] = []
+            try:
+                for sample_id, prepared in zip(
+                    allocated_ids,
+                    prepared_items,
+                    strict=True,
+                ):
+                    stem = f"{sample_id:03d}"
+                    audio_path = directory / f"{stem}.wav"
+                    embedding_path = directory / f"{stem}.npy"
+                    committed_paths.extend([audio_path, embedding_path])
+                    audio_path.write_bytes(prepared.wav_bytes)
+                    np.save(embedding_path, prepared.embedding)
+                _save_array_atomic(directory / "centroid.npy", centroid)
+            except OSError as exc:
+                for path in committed_paths:
+                    path.unlink(missing_ok=True)
+                if not existing_ids and directory.exists():
+                    shutil.rmtree(directory)
+                return {
+                    "ok": False,
+                    "status": 500,
+                    "code": "speaker_sample_write_failed",
+                    "error": str(exc),
+                }
+
+            shots = len(existing_ids) + len(prepared_items)
             previous_metadata = registry["speakers"].get(
                 normalized_name,
                 {},
@@ -460,23 +632,158 @@ class SpeakerEnrollmentManager:
                 "updated_at": now,
             }
             _save_registry(registry)
+
+        samples_result = []
+        for sample_id, prepared in zip(
+            allocated_ids,
+            prepared_items,
+            strict=True,
+        ):
+            stem = f"{sample_id:03d}"
+            samples_result.append({
+                "sample_id": sample_id,
+                "sample_key": stem,
+                "audio_path": str(directory / f"{stem}.wav"),
+                "embedding_path": str(directory / f"{stem}.npy"),
+                "source_sample_rate": prepared.source_sample_rate,
+                "stored_sample_rate": SPEAKER_SAMPLE_RATE,
+                "stored_channels": 1,
+                "stored_sample_width_bits": 16,
+                "source_duration_ms": round(prepared.source_duration_ms, 2),
+                "speech_duration_ms": round(prepared.speech_duration_ms, 2),
+                "segment_count": prepared.segment_count,
+                "audio_valid": True,
+                "has_effective_speech": True,
+            })
         return {
             "ok": True,
             "name": normalized_name,
             "shots": shots,
-            "sample_id": sample_id,
-            "sample_key": stem,
-            "audio_path": str(audio_path),
-            "embedding_path": str(embedding_path),
-            "source_duration_ms": round(source_duration_ms, 2),
-            "speech_duration_ms": round(speech_duration_ms, 2),
-            "segment_count": segment_count,
-            "audio_valid": True,
-            "has_effective_speech": True,
+            "added_count": len(samples_result),
+            "sample_ids": allocated_ids,
+            "samples": samples_result,
             "max_speakers": MAX_SPEAKERS,
             "max_samples_per_speaker": MAX_SAMPLES_PER_SPEAKER,
             "speaker_role": speaker_identity_role(normalized_name),
+            "cross_identity_similarity_threshold": (
+                self._cross_identity_similarity_threshold
+            ),
         }
+
+    def _prepare_uploaded_sample(
+        self,
+        audio_bytes: bytes,
+        vad: Any | None,
+    ) -> _PreparedSpeakerSample | None:
+        if vad is None:
+            source_samples, source_sample_rate = decode_pcm16_wav(audio_bytes)
+            samples, sample_rate, stored_wav = normalize_pcm16_wav(
+                audio_bytes,
+                SPEAKER_SAMPLE_RATE,
+            )
+            source_duration_ms = (
+                len(source_samples) / source_sample_rate * 1000.0
+            )
+            speech_duration_ms = source_duration_ms
+            segment_count = 1
+        else:
+            trimmed = vad.trim_wav(audio_bytes)
+            source_sample_rate = int(
+                getattr(trimmed, "source_sample_rate", trimmed.sample_rate)
+            )
+            samples, sample_rate, stored_wav = normalize_pcm16_wav(
+                trimmed.wav_bytes,
+                SPEAKER_SAMPLE_RATE,
+            )
+            source_duration_ms = trimmed.source_duration_ms
+            speech_duration_ms = trimmed.speech_duration_ms
+            segment_count = trimmed.segment_count
+        embedding = self._extract_embedding(samples, sample_rate)
+        if embedding is None:
+            return None
+        return _PreparedSpeakerSample(
+            embedding=embedding,
+            wav_bytes=stored_wav,
+            source_sample_rate=source_sample_rate,
+            source_duration_ms=source_duration_ms,
+            speech_duration_ms=speech_duration_ms,
+            segment_count=segment_count,
+        )
+
+    def _cross_identity_conflict(
+        self,
+        name: str,
+        embedding: np.ndarray,
+    ) -> dict[str, Any] | None:
+        threshold = self._cross_identity_similarity_threshold
+        if threshold is None:
+            return None
+        best_name = ""
+        best_sample_id = 0
+        best_score = -1.0
+        for candidate_name in sorted(_known_speaker_names()):
+            if candidate_name == name:
+                continue
+            directory = _SPEAKERS_DIR / candidate_name
+            for sample_id in _speaker_sample_ids(directory):
+                path = directory / f"{sample_id:03d}.npy"
+                if not path.exists():
+                    continue
+                try:
+                    candidate = np.asarray(np.load(path), dtype=np.float32)
+                    score = self._cosine_similarity(embedding, candidate)
+                except (OSError, ValueError):
+                    continue
+                if score > best_score:
+                    best_name = candidate_name
+                    best_sample_id = sample_id
+                    best_score = score
+        if best_name and best_score >= threshold:
+            return {
+                "ok": False,
+                "status": 409,
+                "code": "speaker_identity_conflict",
+                "error": (
+                    f"上传声纹与已注册身份 {best_name} 高度相似，"
+                    "不能注册到不同身份"
+                ),
+                "name": name,
+                "conflicting_speaker": best_name,
+                "conflicting_sample_id": best_sample_id,
+                "similarity": round(best_score, 4),
+                "similarity_threshold": threshold,
+            }
+        return None
+
+    @staticmethod
+    def _cosine_similarity(left: np.ndarray, right: np.ndarray) -> float:
+        left = np.asarray(left, dtype=np.float32).reshape(-1)
+        right = np.asarray(right, dtype=np.float32).reshape(-1)
+        if left.shape != right.shape:
+            return -1.0
+        denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+        if denominator == 0.0:
+            return 0.0
+        return float(np.dot(left, right) / denominator)
+
+    def _same_identity_conflict(
+        self, embedding: np.ndarray, references: list[np.ndarray],
+    ) -> dict[str, Any] | None:
+        threshold = self._same_identity_similarity_threshold
+        if threshold is None or not references:
+            return None
+        score = max(
+            self._cosine_similarity(embedding, value) for value in references
+        )
+        if not np.isfinite(score) or score < threshold:
+            return {
+                "ok": False, "status": 409,
+                "code": "speaker_sample_inconsistent",
+                "error": "新样本与该身份已有样本不一致，请确认说话人并重新录制",
+                "similarity": round(score, 4) if np.isfinite(score) else None,
+                "similarity_threshold": threshold,
+            }
+        return None
 
     def cancel_speaker(self) -> dict[str, Any]:
         if self._session is None:
@@ -506,7 +813,15 @@ class SpeakerEnrollmentManager:
             stream.input_finished()
             if not self._extractor.is_ready(stream):
                 return None
-            return np.asarray(self._extractor.compute(stream), dtype=np.float32)
+            embedding = np.asarray(
+                self._extractor.compute(stream), dtype=np.float32,
+            ).reshape(-1)
+            if (
+                not embedding.size or not np.isfinite(embedding).all()
+                or np.linalg.norm(embedding) == 0
+            ):
+                return None
+            return embedding
         except Exception:
             return None
 
@@ -544,6 +859,13 @@ class SpeakerEnrollmentManager:
                 "count": len(records),
                 "max_speakers": MAX_SPEAKERS,
                 "max_samples_per_speaker": MAX_SAMPLES_PER_SPEAKER,
+                "max_batch_files": MAX_SAMPLES_PER_SPEAKER,
+                "stored_sample_rate": SPEAKER_SAMPLE_RATE,
+                "stored_channels": 1,
+                "stored_sample_width_bits": 16,
+                "cross_identity_similarity_threshold": (
+                    self._cross_identity_similarity_threshold
+                ),
                 "allowed_names": list(ALLOWED_SPEAKER_IDENTITIES),
                 "available_names": [
                     name
@@ -634,28 +956,20 @@ class SpeakerEnrollmentManager:
                         "status": 404,
                         "error": "speaker sample not found",
                     }
-            if vad is None:
-                samples, sample_rate = decode_pcm16_wav(audio_bytes)
-                source_duration_ms = len(samples) / sample_rate * 1000.0
-                speech_duration_ms = source_duration_ms
-                segment_count = 1
-                stored_wav = audio_bytes
-            else:
-                trimmed = vad.trim_wav(audio_bytes)
-                samples = trimmed.samples
-                sample_rate = trimmed.sample_rate
-                source_duration_ms = trimmed.source_duration_ms
-                speech_duration_ms = trimmed.speech_duration_ms
-                segment_count = trimmed.segment_count
-                stored_wav = trimmed.wav_bytes
+            prepared = self._prepare_uploaded_sample(audio_bytes, vad)
         except (RuntimeError, ValueError) as exc:
-            return {"ok": False, "status": 422, "error": str(exc)}
-
-        embedding = self._extract_embedding(samples, sample_rate)
-        if embedding is None:
             return {
                 "ok": False,
                 "status": 422,
+                "code": "invalid_audio",
+                "error": str(exc),
+            }
+
+        if prepared is None:
+            return {
+                "ok": False,
+                "status": 422,
+                "code": "speaker_embedding_failed",
                 "error": "无法提取声纹",
             }
 
@@ -669,11 +983,24 @@ class SpeakerEnrollmentManager:
                     "status": 404,
                     "error": "speaker sample not found",
                 }
+            conflict = self._cross_identity_conflict(
+                normalized,
+                prepared.embedding,
+            )
+            if conflict is not None:
+                return conflict
             try:
+                references = [
+                    np.asarray(np.load(directory / f"{value:03d}.npy"), dtype=np.float32)
+                    for value in sample_ids if value != normalized_sample_id
+                ]
+                conflict = self._same_identity_conflict(prepared.embedding, references)
+                if conflict is not None:
+                    return conflict
                 centroid = _mean_sample_embeddings(
                     directory,
                     sample_ids,
-                    replacement=(normalized_sample_id, embedding),
+                    replacement=(normalized_sample_id, prepared.embedding),
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 return {
@@ -689,9 +1016,9 @@ class SpeakerEnrollmentManager:
             audio_temporary = directory / f".{stem}.wav.tmp"
             embedding_temporary = directory / f".{stem}.npy.tmp"
             try:
-                audio_temporary.write_bytes(stored_wav)
+                audio_temporary.write_bytes(prepared.wav_bytes)
                 with embedding_temporary.open("wb") as stream:
-                    np.save(stream, embedding)
+                    np.save(stream, prepared.embedding)
                 audio_temporary.replace(audio_path)
                 embedding_temporary.replace(embedding_path)
                 _save_array_atomic(directory / "centroid.npy", centroid)
@@ -719,11 +1046,75 @@ class SpeakerEnrollmentManager:
             "replaced": True,
             "audio_path": str(audio_path),
             "embedding_path": str(embedding_path),
-            "source_duration_ms": round(source_duration_ms, 2),
-            "speech_duration_ms": round(speech_duration_ms, 2),
-            "segment_count": segment_count,
+            "source_sample_rate": prepared.source_sample_rate,
+            "stored_sample_rate": SPEAKER_SAMPLE_RATE,
+            "stored_channels": 1,
+            "stored_sample_width_bits": 16,
+            "source_duration_ms": round(prepared.source_duration_ms, 2),
+            "speech_duration_ms": round(prepared.speech_duration_ms, 2),
+            "segment_count": prepared.segment_count,
             "audio_valid": True,
             "has_effective_speech": True,
+        }
+
+    def delete_speaker(self, name: str) -> dict[str, Any]:
+        """Delete every sample belonging to one fixed identity."""
+        try:
+            normalized = validate_speaker_identity(name)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status": 422,
+                "code": "invalid_speaker_identity",
+                "error": str(exc),
+                "allowed_names": list(ALLOWED_SPEAKER_IDENTITIES),
+            }
+        with self._storage_lock:
+            registry = _load_registry()
+            directory = _SPEAKERS_DIR / normalized
+            sample_ids = _speaker_sample_ids(directory)
+            if normalized not in _known_speaker_names(registry):
+                return {
+                    "ok": False,
+                    "status": 404,
+                    "code": "speaker_not_found",
+                    "error": "speaker not found",
+                }
+            if directory.exists():
+                shutil.rmtree(directory)
+            registry["speakers"].pop(normalized, None)
+            _save_registry(registry)
+            if self._session is not None and self._session.name == normalized:
+                self._session = None
+        return {
+            "ok": True,
+            "name": normalized,
+            "speaker_role": speaker_identity_role(normalized),
+            "deleted_sample_ids": sample_ids,
+            "deleted_count": len(sample_ids),
+            "speaker_removed": True,
+        }
+
+    def delete_all_speakers(self) -> dict[str, Any]:
+        """Delete all fixed-identity speaker data, preserving unrelated data."""
+        with self._storage_lock:
+            registry = _load_registry()
+            names = sorted(_known_speaker_names(registry))
+            deleted_sample_count = 0
+            for name in names:
+                directory = _SPEAKERS_DIR / name
+                deleted_sample_count += len(_speaker_sample_ids(directory))
+                if directory.exists():
+                    shutil.rmtree(directory)
+                registry["speakers"].pop(name, None)
+            _save_registry(registry)
+            if self._session is not None and self._session.name in names:
+                self._session = None
+        return {
+            "ok": True,
+            "deleted_speakers": names,
+            "deleted_speaker_count": len(names),
+            "deleted_sample_count": deleted_sample_count,
         }
 
     def delete_speaker_sample(

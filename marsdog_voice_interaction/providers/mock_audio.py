@@ -91,21 +91,25 @@ class MockAudioProvider(BaseProvider):
 
     # ── Streaming interface (matches AudioSherpaProvider) ──────────
 
-    def start_capture(self) -> None:
+    def start_capture(self) -> bool:
         """Start background capture (non-blocking).
 
         Simulates microphone capture — after ~2s, produces a synthetic
         audio buffer with has_voice=True.
+
+        Returns:
+            True when a new capture worker was started, False when the
+            request was refused.  Matches AudioSherpaProvider.
         """
         if not self.available:
-            return
+            return False
         if self._capturing:
-            return
+            return False
         if (
             self._capture_thread is not None
             and self._capture_thread.is_alive()
         ):
-            return
+            return False
 
         cancel_event = threading.Event()
         with self._capture_lock:
@@ -121,6 +125,7 @@ class MockAudioProvider(BaseProvider):
         )
         self._capture_thread.start()
         logger.debug("MockAudio: capture started (streaming)")
+        return True
 
     def cancel_capture(self, timeout: float = 2.0) -> bool:
         """Cancel the synthetic capture and discard its pending result."""

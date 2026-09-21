@@ -13,6 +13,8 @@ audio_debug:
   save_asr_input: true
   compare_asr: false
   debug_disable_extra_pre_roll: false
+  # 保留的 utterance 目录数上限，超出后按时间删除最旧的；<= 0 表示不清理。
+  max_utterances: 200
 
 mock:
   enabled: false
@@ -27,6 +29,9 @@ storage:
 command_lexicon:
   enabled: true
   catalog: command_catalog.yaml
+  # ASR 近音错字（坐虾→坐下、爬下→趴下）的拼音同音兜底。默认开启。
+  # 关掉即退回严格整句精确匹配；怀疑误执行时优先关此项定位。
+  fuzzy_matching: true
 
 object_target_routing:
   enabled: true
@@ -37,6 +42,11 @@ speaker_api:
   host: 0.0.0.0
   port: 8091
   max_upload_mb: 20
+  max_batch_files: 5
+  # 新样本与其他身份任一样本的余弦相似度达到该值时，拒绝跨身份重复注册。
+  cross_identity_similarity_threshold: 0.75
+  # 新增样本须与本身份已有样本相容；初始阈值需用真人录音校准。
+  same_identity_similarity_threshold: 0.5
 
 topics:
   audio_event: /perception/audio_event
@@ -44,15 +54,23 @@ topics:
   voice_task: /perception/voice/task
 
 interaction:
-  idle_timeout_sec: 30.0
-  hold_max_lease_sec: 30.0
+  # ASR 返回非空文本即刷新空闲计时，不要求命中命令或通过语义校验。
+  idle_timeout_sec: 20.0
+  hold_max_lease_sec: 20.0
+  # 无论环境语音或下游租约如何续期，单次唤醒会话最多保留两分钟。
+  # 0 或负数 = 不设绝对上限（测试模式，见 docs/TESTING_LOG_GUIDE.md）。
+  max_duration_sec: 120.0
+  # ⚠️ 测试专用：true 时 VAD 检测到任何语音即刷新空闲计时器，不再要求
+  # 「ASR 返回非空文本」。仅 VAD 有声音、ASR 为空也会续期 —— 生产保持 false。
+  # 开启方法：本项设 true，并把上面的 max_duration_sec 设为 0。
+  refresh_on_any_speech: false
 
 providers:
   wakeup:
     type: xfyun_serial
     enabled: true
     config:
-      port: /dev/ttyACM0
+      port: /dev/marsdog_voice  # udev 稳定映射 -> CH343(ttyACM0), 见 /etc/udev/rules.d/99-marsdog-voice.rules
       baudrate: 115200
       timeout: 0.2
       reconnect_interval_sec: 2.0
@@ -73,7 +91,7 @@ providers:
       upload_join_silence_sec: 0.1
       upload_max_duration_sec: 60.0
       upload_min_speech_sec: 0.5
-      num_threads: 4
+      num_threads: 2
   kws:
     type: sherpa
     enabled: true
@@ -83,18 +101,28 @@ providers:
       sample_rate: 16000
       num_threads: 2
       keywords_score: 1.0
-      keywords_threshold: 0.25
+      # 现场负样本优先：避免环境短音节在低阈值下被当成动作词。
+      keywords_threshold: 0.4
       num_trailing_blanks: 1
       event_confidence: 0.9
       # KWS 仅生成候选；VAD 结束后与完整 ASR 文本仲裁，只发布一个结果来源。
-      # 明确分工：长句走 ASR（asr_long_text_wins），短命令（<= short_max_chars_zh 字）
-      # 走 KWS，即使 ASR 词库命中与 KWS 冲突也以 KWS 为准。
+      # 明确分工：KWS 只做候选；普通短命令也必须得到 ASR 词库同事件确认。
       publish_mode: deferred
       arbitration_mode: exclusive
       asr_long_text_wins: true
+      # ASR 整段为空（低电平/极短音频常见）时不再丢弃已命中的 KWS 候选。
+      # 原先 false 会让「KWS 听对了、ASR 没出字」直接变成一次无声失败。
       kws_fallback_on_asr_empty: true
+      short_requires_asr_agreement: true
       short_max_chars_zh: 2
       short_max_words_en: 2
+      # 只有已确认的”命令 + ASR 错写”精确组合允许 KWS 覆盖；不得泛化。
+      # GO_GET_IT:[去哪] 已于 2026-09-18 删除：fuzzy 同音兜底现在能通用地把
+      # 「去哪」解析成 GO_GET_IT，仲裁改走 short_asr_catalog_agrees，结果等价。
+      # ⚠️ 此删除依赖 command_lexicon.fuzzy_matching=true；若关掉 fuzzy，需恢复该别名。
+      priority_command_keys: [EAT_CANNED_FOOD]
+      priority_asr_aliases:
+        EAT_CANNED_FOOD: [去滚罐]
   asr:
     type: sherpa
     enabled: true
@@ -103,15 +131,23 @@ providers:
       asr_model: ../../models/asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/model.int8.onnx
       tokens: ../../models/asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/tokens.txt
       sample_rate: 16000
+      # 可选 zh / en / ja / ko / yue / auto。auto 让 SenseVoice 自判语种。
+      # 2026-09-18 用 155 条 TTS 黄金集实测：zh 命中 146/155，auto 仅 140/155。
+      # auto 会把中文短词判成日/韩 —— 「走」「坐」→ そう。、「真乖」→ gen과.、
+      # 「可爱」→ 可い。、「拜拜」→ 拜e拜e。。
+      # 字表里也没有可匹配的英文短语：catalog 的 reference_phrases_en 只是参考
+      # 译文，只被计数、不进匹配表。故没有理由开 auto，保持 zh。
       language: zh
       use_itn: true
-      num_threads: 4
+      num_threads: 2
   speaker:
     type: sherpa
     enabled: true
     config:
       speaker_model: ../../models/speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
       match_threshold: 0.5
+      # 第一、第二身份的余弦分差不足时拒识；初始值需用板端真人录音校准。
+      min_score_margin: 0.05
       # 最短有效语音长度（16k 采样点），低于该值无法产生可靠声纹，直接判定 audio_too_short。
       min_samples: 8000
       num_threads: 2

@@ -25,7 +25,15 @@ def _trace_payload(message: str) -> dict[str, object]:
 
 def test_trace_record_is_one_line_json_with_stable_record_name(
     caplog: object,
+    monkeypatch: object,
 ) -> None:
+    from marsdog_voice_interaction.utils import logging_utils
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        logging_utils,
+        "now_ms",
+        lambda: 1_788_480_123_456,
+    )
     logger = get_logger("test_trace_record", module="voice")
     with caplog.at_level(logging.INFO):  # type: ignore[attr-defined]
         log_trace(
@@ -42,6 +50,7 @@ def test_trace_record_is_one_line_json_with_stable_record_name(
     payload = _trace_payload(records[-1].getMessage())
     assert payload == {
         "record": "stage_complete",
+        "timestamp_ms": 1_788_480_123_456,
         "stage": "asr",
         "result": "ok",
         "latency_ms": 12.34,
@@ -63,6 +72,38 @@ def test_structured_logger_preserves_exception_logging_kwargs(
     record = caplog.records[-1]  # type: ignore[attr-defined]
     assert record.exc_info is not None
     assert "stage='asr'" in record.getMessage()
+
+
+def test_every_trace_record_contains_current_time_to_milliseconds(
+    caplog: object,
+    monkeypatch: object,
+) -> None:
+    from marsdog_voice_interaction.utils import logging_utils
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        logging_utils,
+        "now_ms",
+        lambda: 1_788_480_123_456,
+    )
+    logger = get_logger("test_all_trace_timestamps", module="voice")
+    with caplog.at_level(logging.INFO):  # type: ignore[attr-defined]
+        log_trace(logger, "runtime_start", result="ready")
+        log_trace(logger, "interaction_start", source="wakeup")
+        log_trace(logger, "stage_complete", stage="vad_capture")
+        log_trace(logger, "event_publish", event_type="EVT_VOICE_WAKEUP")
+
+    records = caplog.records  # type: ignore[attr-defined]
+    payloads = [_trace_payload(record.getMessage()) for record in records[-4:]]
+    assert [payload["record"] for payload in payloads] == [
+        "runtime_start",
+        "interaction_start",
+        "stage_complete",
+        "event_publish",
+    ]
+    assert all(
+        payload["timestamp_ms"] == 1_788_480_123_456
+        for payload in payloads
+    )
 
 
 class _Publisher:

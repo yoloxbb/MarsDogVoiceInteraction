@@ -25,7 +25,7 @@ _KNOWN_VOICE_EVENTS = {
     for name, value in vars(voice_event_types).items()
     if name.startswith("EVT_VOICE_") and isinstance(value, str)
 }
-_CATALOG_SOCIAL_LABELS = frozenset({"NONE", "PRAISE", "SCOLD"})
+_CATALOG_SOCIAL_LABELS = frozenset({"NONE", "CALL", "PRAISE", "SCOLD"})
 
 
 def normalize_command_phrase(value: str) -> str:
@@ -117,11 +117,16 @@ class DirectCommandMatch:
                 "key": "catalog_source_rows",
                 "value": ",".join(str(row) for row in self.source_rows),
             })
-        triggers_behavior_tree = self.control == "DO"
+        is_social_event = self.emotion in {"CALL", "PRAISE", "SCOLD"}
+        is_social_reaction = self.emotion in {"PRAISE", "SCOLD"}
+        is_executable = self.control == "DO" and not is_social_event
+        triggers_behavior_tree = is_executable or is_social_reaction
         if self.emotion == "PRAISE":
             intent_category = "praise"
         elif self.emotion == "SCOLD":
             intent_category = "blame"
+        elif self.emotion == "CALL":
+            intent_category = "social"
         elif triggers_behavior_tree:
             intent_category = "command"
         else:
@@ -130,12 +135,8 @@ class DirectCommandMatch:
             social = self.nlu_social
             intent = self.nlu_intent
             semantic_control = self.nlu_control
-        elif self.emotion in {"PRAISE", "SCOLD"}:
+        elif is_social_event:
             social = self.emotion
-            intent = "NONE"
-            semantic_control = "NONE"
-        elif self.command_key == "CALL_NAME":
-            social = "CALL"
             intent = "NONE"
             semantic_control = "NONE"
         else:
@@ -151,9 +152,7 @@ class DirectCommandMatch:
             "social": social,
             "intent": intent,
             "emotion": social or self.emotion,
-            "action": (
-                "NONE" if self.emotion != "NONE" else self.command_key
-            ),
+            "action": "NONE" if is_social_event else self.command_key,
             "control": semantic_control,
             "command_id": self.command_id,
             "intent_category": intent_category,
@@ -162,10 +161,13 @@ class DirectCommandMatch:
             "nlu_protocol": NLU_PROTOCOL if raw_nlu_tag else "",
             "raw_nlu_tag": raw_nlu_tag,
             "specific_event_type": self.event_type,
-            "dispatch_role": "specific_command",
+            "dispatch_role": (
+                "social_reaction" if is_social_reaction
+                else "specific_command"
+            ),
             "slots": slots,
             "response_text": "",
-            "is_executable": triggers_behavior_tree,
+            "is_executable": is_executable,
             "should_trigger_behavior_tree": triggers_behavior_tree,
             "language": language or "zh",
         }
@@ -276,6 +278,8 @@ class CommandLexicon:
         self._catalog_phrases: list[DirectCommandMatch] = []
         self._commands: dict[str, DirectCommandMatch] = {}
         self._command_keys: set[str] = set()
+        self._command_ids: set[str] = set()
+        self._event_types: set[str] = set()
         self._source_rows: set[int] = set()
         self.command_count = 0
         self.core_command_count = 0
@@ -284,6 +288,11 @@ class CommandLexicon:
         self.variants_per_phrase = 0
         self.expanded_phrase_count = 0
         self.expansion_profile_count = 0
+        # Natural-speech variants declared under the optional top-level
+        # ``phrase_variants`` mapping.  They join the exact-match table but are
+        # deliberately excluded from ``phrase_count``/``expanded_phrase_count``
+        # so the reviewed product catalog contract stays intact.
+        self.variant_phrase_count = 0
         for index, item in enumerate(commands, start=1):
             if not isinstance(item, dict):
                 raise ValueError(f"Command entry {index} must be a mapping")
@@ -303,6 +312,7 @@ class CommandLexicon:
                     f"missing={missing} unexpected={unexpected}"
                 )
         self._load_expansions(raw.get("expansion"))
+        self._load_phrase_variants(raw.get("phrase_variants"))
 
         self._homophones: dict[tuple[str, ...], list[str]] = {}
         for normalized in self._phrases:
@@ -318,7 +328,7 @@ class CommandLexicon:
 
     @property
     def total_match_phrase_count(self) -> int:
-        """Total exact lookup entries, including controlled expansions."""
+        """Total exact lookup entries: standard phrases, expansions, variants."""
 
         return len(self._phrases)
 
@@ -340,6 +350,12 @@ class CommandLexicon:
         the input's pinyin but whose characters differ — this rescues common
         ASR homophone/typo errors (e.g. ``坐虾`` → ``坐下``) while rejecting
         prefix/suffix edits such as ``不要坐下`` or ``你想不想吃``.
+
+        Several catalog entries routinely share one tone-less pinyin (the
+        ``zuo|xia`` and ``pa|xia`` families are the common ones for two-syllable
+        commands), so an ambiguous group is resolved by :meth:`_resolve_ambiguous`
+        instead of being rejected outright.  When that cannot decide safely the
+        match is refused and ``None`` is returned.
         """
         exact = self.match(text)
         if exact is not None:
@@ -351,14 +367,74 @@ class CommandLexicon:
         if not syllables:
             return None
         candidates = self._homophones.get(syllables)
-        if not candidates or len(candidates) != 1:
+        if not candidates:
             return None
-        template = self._phrases[candidates[0]]
+        chosen = self._resolve_ambiguous(candidates)
+        if chosen is None:
+            return None
+        template = self._phrases[chosen]
         return replace(
             template,
             matched_phrase=text,
             match_strategy="fuzzy_homophone",
         )
+
+    def _resolve_ambiguous(self, candidates: list[str]) -> str | None:
+        """Pick one phrase out of a same-pinyin group, or refuse.
+
+        Only refusals are safe by default, so each rule below has to leave
+        exactly one candidate standing:
+
+        1. every candidate routes to the same command — the ambiguity is
+           cosmetic because any of them dispatches identically;
+        2. exactly one candidate is a core command;
+        3. exactly one candidate is an authoritative catalog phrase (the rest
+           being controlled expansions or declared variants).
+
+        Otherwise the group is genuinely ambiguous and stays unmatched.
+        """
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        templates = [self._phrases[name] for name in candidates]
+
+        command_keys = {item.command_key for item in templates}
+        if len(command_keys) == 1:
+            return self._prefer_authoritative(candidates, templates)
+
+        core = [
+            name for name, item in zip(candidates, templates) if item.core
+        ]
+        if len(core) == 1:
+            return core[0]
+
+        authoritative = [
+            name
+            for name, item in zip(candidates, templates)
+            if item.match_strategy == "catalog_exact"
+        ]
+        if len(authoritative) == 1:
+            return authoritative[0]
+
+        return None
+
+    @staticmethod
+    def _prefer_authoritative(
+        candidates: list[str],
+        templates: list[DirectCommandMatch],
+    ) -> str:
+        """Deterministically pick one name out of an equivalent group."""
+
+        order = {"catalog_exact": 0, "catalog_variant": 1, "rule_expansion": 2}
+        return min(
+            zip(candidates, templates),
+            key=lambda pair: (
+                order.get(pair[1].match_strategy, 3),
+                len(pair[0]),
+                pair[0],
+            ),
+        )[0]
 
     def get_command(self, command_key: str) -> DirectCommandMatch | None:
         """Return immutable catalog metadata for one canonical command key."""
@@ -385,6 +461,20 @@ class CommandLexicon:
             raise ValueError(
                 f"Command entry {index} has invalid event_type {event_type!r}"
             )
+        if event_type.startswith("EVT_VOICE_INTENT_"):
+            raise ValueError(
+                f"Command entry {index} uses retired INTENT event_type "
+                f"{event_type!r}"
+            )
+        if (
+            event_type
+            in voice_event_types.MODEL_INTENT_CLASSIFICATION_EVENT_TYPES
+            or event_type == voice_event_types.EVT_VOICE_WAKEUP
+        ):
+            raise ValueError(
+                f"Command entry {index} reuses reserved non-catalog "
+                f"event_type {event_type!r}"
+            )
         derived_event = (
             f"EVT_VOICE_COMMAND_{action_name[4:]}"
             if action_name.startswith("ACT_") else ""
@@ -396,7 +486,13 @@ class CommandLexicon:
             )
         if command_key in self._command_keys:
             raise ValueError(f"Duplicate command_key {command_key!r}")
+        if command_id in self._command_ids:
+            raise ValueError(f"Duplicate command_id {command_id!r}")
+        if event_type in self._event_types:
+            raise ValueError(f"Duplicate catalog event_type {event_type!r}")
         self._command_keys.add(command_key)
+        self._command_ids.add(command_id)
+        self._event_types.add(event_type)
         if control not in {"NONE", "DO"}:
             raise ValueError(
                 f"Command entry {index} has invalid control {control!r}"
@@ -404,6 +500,11 @@ class CommandLexicon:
         if emotion not in _CATALOG_SOCIAL_LABELS:
             raise ValueError(
                 f"Command entry {index} has invalid emotion {emotion!r}"
+            )
+        if emotion != "NONE" and control != "NONE":
+            raise ValueError(
+                f"Command entry {index} social event {emotion!r} must use "
+                "control NONE"
             )
 
         configured_nlu = item.get("nlu")
@@ -647,3 +748,60 @@ class CommandLexicon:
                 f"expected={expected} actual={self.expanded_phrase_count}"
             )
         self.expansion_profile_count = len(profiles)
+
+    def _load_phrase_variants(self, raw_variants: Any) -> None:
+        """Load natural-speech variants declared under ``phrase_variants``.
+
+        These are the surface forms people actually say but which the reviewed
+        product catalog intentionally does not carry as standard phrases, for
+        example ``往后退一点点`` for ``退后`` or ``去睡觉`` for ``睡觉``.
+
+        Variants join the exact-match table (and therefore the homophone
+        index) with ``match_strategy="catalog_variant"``.  They are kept out of
+        ``_catalog_phrases`` so that ``phrase_count``/``expanded_phrase_count``
+        keep describing the product catalog alone, and they never generate
+        controlled expansions.
+        """
+
+        if raw_variants is None:
+            return
+        if not isinstance(raw_variants, dict):
+            raise ValueError("Command catalog phrase_variants must be a mapping")
+
+        unknown_commands = sorted(
+            {str(key).strip().upper() for key in raw_variants}
+            - self._command_keys
+        )
+        if unknown_commands:
+            raise ValueError(
+                "phrase_variants reference unknown command keys: "
+                f"{unknown_commands}"
+            )
+
+        for raw_key, raw_phrases in raw_variants.items():
+            command_key = str(raw_key).strip().upper()
+            if not isinstance(raw_phrases, list) or not raw_phrases:
+                raise ValueError(
+                    f"phrase_variants.{command_key} must be a non-empty list"
+                )
+            template = self._commands[command_key]
+            for raw_phrase in raw_phrases:
+                phrase = str(raw_phrase).strip()
+                normalized = normalize_command_phrase(phrase)
+                if not normalized:
+                    raise ValueError(
+                        f"phrase_variants.{command_key} contains an empty phrase"
+                    )
+                existing = self._phrases.get(normalized)
+                if existing is not None:
+                    raise ValueError(
+                        f"Variant {phrase!r} for {command_key} conflicts with "
+                        f"{existing.command_key}/{existing.catalog_phrase!r} "
+                        f"({existing.match_strategy})"
+                    )
+                self._phrases[normalized] = replace(
+                    template,
+                    matched_phrase=phrase,
+                    match_strategy="catalog_variant",
+                )
+                self.variant_phrase_count += 1

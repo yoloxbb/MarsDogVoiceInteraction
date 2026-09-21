@@ -1,13 +1,13 @@
 # 语音项目交接说明
 
-> 对接基线：2026-08-04 / 多项目契约 1.0.0
+> Voice 对接基线：2026-09-08 / AudioEvent schema v2
 
 ## 1. 本项目负责什么
 
 语音节点负责唤醒、录音/VAD、流式 KWS、ASR、声纹识别、完整产品词库匹配、
 非词库文本的意图分类，以及一次语音会话的生命周期。当前词库覆盖 116 条
 源数据，归并为 81 个路由组和 155 条标准中文短语；每条另生成 10 个受控扩展，
-共 1705 个精确匹配入口；其中 19 组是核心指令子集。
+再加 70 条人工登记的变体，共 1775 个精确匹配入口；其中 19 组是核心指令子集。
 它只发布“听见了什么”和
 “会话状态”，不订阅视觉数据，也不直接发布 `/cmd_vel` 或调用动作系统。
 
@@ -23,7 +23,8 @@
 | 发布 | `/perception/voice/enrollment_event` | `std_msgs/msg/String` JSON | RELIABLE, KEEP_LAST 10 |
 | 提供 | `/perception/voice/task` | `marsdog_voice_interaction/srv/VoiceTask` | 管理声纹和监听状态 |
 | 提供 | `GET /api/v1/speakers` | FastAPI JSON | 查询固定身份槽位及样本数量 |
-| 提供 | `/api/v1/speakers/{name}/samples...` | FastAPI multipart/JSON/WAV | 单条样本新增、查询、WAV 下载、替换和删除；变更后重算 centroid 并同步运行时索引 |
+| 提供 | `/api/v1/speakers/{name}/samples...` | FastAPI multipart/JSON/WAV | 单条/批量样本新增、查询、WAV 下载、替换、单条及整身份删除；新增/替换校验跨身份冲突，变更后重算 centroid 并同步运行时索引 |
+| 提供 | `DELETE /api/v1/speakers?confirm=true` | FastAPI Query/JSON | 显式确认后删除全部固定身份声纹并同步运行时索引 |
 
 完整 JSON 字段和任务参数见 [ROS2_CONTRACT.md](ROS2_CONTRACT.md)，测试日志、取证
 步骤和报告模板见 [TESTING_LOG_GUIDE.md](TESTING_LOG_GUIDE.md)。跨项目总契约归档
@@ -34,7 +35,7 @@
 ### 会话 ID
 
 - 唤醒成功后创建 `interaction_id`。
-- 从 `EVT_VOICE_CALL_NAME` 到最终 `EVT_STATE_CHANGED(state=idle)` 必须保持同一个 `interaction_id`。
+- 从 `EVT_VOICE_WAKEUP` 到最终 `EVT_STATE_CHANGED(state=idle)` 必须保持同一个 `interaction_id`。
 - 每句话使用新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享该 ID。
 
 ### 声纹身份事件
@@ -48,17 +49,18 @@
 这些事件发布到 `/perception/audio_event`，由行为树等下游消费。Voice 只负责身份识别
 和事件发布，不直接调用动作系统。
 
-### 行为树直接消费的事件
+### Voice 下发、供行为树路由的事件
 
 ```text
-EVT_VOICE_CALL_NAME
+EVT_VOICE_WAKEUP
 EVT_VOICE_COMMAND_SIT / LIE_DOWN / STAND_UP / WAIT / COME / FOLLOW
 EVT_VOICE_COMMAND_SHAKE_HAND / HIGH_FIVE / ROLL_OVER / SPIN / RETURN
 EVT_VOICE_COMMAND_DROP / PLAY_DEAD / BRING / FETCH / STOP
 EVT_STATE_CHANGED
 ```
 
-词库命中结果仍发布到 `/perception/audio_event`，进入下游事件路由/行为树，
+下表是 Voice 的发布契约，不等于当前 Tree 已全部接入。词库命中结果仍发布到
+`/perception/audio_event`，进入下游事件路由/行为树，
 不由动作系统直接消费。语音项目可以保证事件和 `action_name`正确发布，
 但不能代替行为树的事件白名单、Behavior 映射和动作项目的 `ACT_*` 实现。
 
@@ -69,11 +71,15 @@ COME / FOLLOW / SIT / LIE_DOWN / PLAY_DEAD / STAND_UP
 SHAKE_HAND / HIGH_FIVE / SPIN / ROLL_OVER / DROP
 ```
 
-另外，`EVT_VOICE_CALL_NAME` 已有下游路由；`EVT_VOICE_PRAISE` 和
-`EVT_VOICE_SCOLD` 进入现有情绪计算链路，使用 `control=NONE`、
-`should_trigger_behavior_tree=false`，不应强行转成直接动作。因此，81 个路由组中
-当前可确认 14 个已有对应的下游入口（11 个核心动作 + 呼名 + 夸赞 + 责备）；
-其余 67 个路由组在 Voice 中已可发布，但仍需 Tree/Action 按产品动作表逐项对齐。
+`EVT_VOICE_WAKEUP` 现在只表示硬件或 pipeline Mock 唤醒。Model Intent 呼名仍发布
+下游既有的 `EVT_VOICE_CALL_NAME`；词库昵称调用发布
+`EVT_VOICE_COMMAND_CALL_NAME`（`CMD_CALL_NAME`）。词库夸赞/责备分别发布
+`EVT_VOICE_COMMAND_PRAISE/SCOLD`，不占用 Model Intent 的
+`EVT_VOICE_PRAISE/SCOLD`。三类词库社交事件均保持 `is_executable=false`；其中
+昵称固定 `should_trigger_behavior_tree=false`，不得直接唤醒或执行通用动作；
+PRAISE/SCOLD 则固定 `dispatch_role=social_reaction`、
+`should_trigger_behavior_tree=true`，授权 Tree 生成一次性社交反应。该权限只证明
+事件允许进入 Tree，仍不能把 Voice 发布成功当作 Action 或硬件已经执行。
 其中原 19 组核心指令里尚未补齐的 8 组是：
 
 ```text
@@ -85,11 +91,18 @@ STAND_STILL / HOLD_POSITION / QUIET
 判定动作已经执行。特别地，`HOLD_POSITION` 是保持当前姿态，不能映射成全局急停；
 `QUIET` 是停止发声，也不能映射成底盘急停。
 
+Model Intent 沿用已交付下游的业务事件名；明确的姿态、移动、声音等动作必须同时
+通过标签白名单、ASR 文本动作证据和否定语义拦截，才复用对应
+`EVT_VOICE_COMMAND_*`。业务分类和 KNOWN 摘要不可执行，只有通过门控的具体动作
+事件可设置 `should_trigger_behavior_tree=true`。
+
 `EVT_VOICE_COMMAND_FOLLOW` 必须携带当前 `interaction_id`。行为树收到后把动作系统切到持续 `follow_owner` 模式；该模式一直保持到语音节点发布匹配会话的 `EVT_STATE_CHANGED(state="idle")`。
 
 状态结束原因当前为：
 
-- `interaction_timeout`：生产配置在最后一次 VAD 确认说话后 30 秒无新语音。
+- `interaction_timeout`：生产配置在最后一次被接受的语义结果后 20 秒无新结果；纯
+  VAD、空 ASR、NEUTRAL/UNKNOWN 和仅 KNOWN 摘要不刷新会话。单次会话另有 120 秒
+  绝对上限，活动刷新和 hold 租约都不能突破。
 - `stop_listening`：Service 主动结束。
 
 行为树进行唤醒转向、视觉锁定或靠近期间，可调用 VoiceTask 的
@@ -112,8 +125,9 @@ ASR 得到文本后，节点先使用 `config/command_catalog.yaml` 做规范化
 `Good dog` 这类跨分类重复表达，在产品给出唯一归属前不能盲目直发。
 
 KWS 在 VAD 结束前只缓存候选，不发布业务事件。ASR 完成后由 Voice 在 KWS 和 ASR
-链路之间选择唯一结果来源：短指令可选择唯一 KWS 候选，长句选择 ASR；ASR 目录结果
-与 KWS 冲突时选择 ASR，ASR 为空且只有一个候选时允许 KWS 回退。仲裁记录为
+链路之间选择唯一结果来源：普通短指令只有在 ASR 词库命中同一事件时才选择 KWS；
+冲突、未确认、多个候选或空 ASR 均不允许 KWS 单独执行。长句选择 ASR。仅
+`吃罐罐→去滚罐`、`去拿→去哪` 两个已确认的精确错写组合允许 KWS 覆盖。仲裁记录为
 `stage_complete stage=recognition_arbitration`。词库或 KWS 指令无论由哪一来源选中，
 都只发布目录指定的具体特殊事件，不附带 KNOWN 摘要。下游仍应按
 `interaction_id + utterance_id + event_type` 做幂等保护。
@@ -153,24 +167,29 @@ Provider，不能只按模式名称判断真机或 Mock。
 
 | 配置项 | 当前值/含义 |
 |---|---|
-| `interaction.idle_timeout_sec` | 生产配置为 30 秒，从最后一次 VAD 确认说话开始计算 |
-| `interaction.hold_max_lease_sec` | 单次会话保持租约上限 30 秒，调用方需定期续租 |
+| `interaction.idle_timeout_sec` | 生产配置为 20 秒，从最后一次被接受的业务语义结果开始计算；纯 VAD/空 ASR/拒识不续期 |
+| `interaction.max_duration_sec` | 生产配置为 120 秒；单次唤醒会话硬上限，不被活动或租约延长；`0` 或负数 = 不设上限（测试模式） |
+| `interaction.refresh_on_any_speech` | 测试专用，生产为 `false` 时非空 ASR 文本即刷新，不要求语义接受；`true` 时仅 VAD 检测到语音也会刷新 |
+| `interaction.hold_max_lease_sec` | 单次会话保持租约上限 20 秒，调用方需定期续租 |
 | `topics.*` | 对外 Topic/Service 名称 |
 | `speaker_api.*` | 当前为 `0.0.0.0:8091`，无身份验证，仅限可信开发局域网 |
 | `providers.wakeup` | 讯飞串口唤醒板 `/dev/ttyACM0` |
 | `providers.audio` | 16 kHz VAD 和录音 |
 | `providers.kws` | 流式关键词命令 |
-| `providers.asr` | 当前为 Paraformer ASR；provider 实现同时支持 SenseVoice |
+| `providers.asr` | 当前为 SenseVoice INT8 ONNX；provider 实现仍支持其他 Sherpa ASR 模型 |
 | `providers.speaker` | 声纹模型和阈值 |
-| `command_lexicon` | 完整产品词库（116 条源数据/81 个路由组/155 条标准词句/1550 条受控扩展/19 组核心子集）开关和目录路径 |
+| `command_lexicon` | 完整产品词库（116 条源数据/81 个路由组/155 条标准词句/1550 条受控扩展/70 条变体/19 组核心子集）开关、目录路径和 `fuzzy_matching` 同音兜底 |
 | `providers.intent_*` | Model Intent 优先、三轴兼容规则回退 |
 
 配置文件中的文件和目录均使用相对于 YAML 所在目录的路径：模型默认通过
 `../../models` 指向项目同级的 `models/`，注册数据通过 `../data` 指向本项目
-`data/`。FastAPI 上传的
-有效语音保存到 `data/speakers/<固定身份>/<序号>.wav`，固定身份只能是 `owner` 和
+`data/`。FastAPI 上传的有效语音保存到
+`data/speakers/<固定身份>/<序号>.wav`，固定身份只能是 `owner` 和
 `family_member_1`～`family_member_4`，对应 embedding 使用同名 `.npy`。存储路径
-只能来自 `storage.root`，接口无权覆盖；身份槽位总数固定为 5，单个身份的声纹样本
+中的 WAV 统一为 16 kHz、单声道、16-bit PCM；源文件允许 8～96 kHz。新样本与其他
+身份任一样本达到 `speaker_api.cross_identity_similarity_threshold` 时拒绝写入，
+避免同一个人同时占用主人和家人身份。批量新增先全量校验再落盘，失败不会留下半批
+数据。存储根目录只能来自 `storage.root`，接口无权覆盖；身份槽位总数固定为 5，单个身份的声纹样本
 数也硬限制为 5。不得把模型二进制或用户声纹数据复制到其他
 项目。当前 FastAPI 认证模块已移除，只能部署在可信开发局域网；生产认证方案后续
 另行设计。
@@ -185,9 +204,11 @@ Provider，不能只按模式名称判断真机或 Mock。
 - FOLLOW 事件只发布一次有效指令，且会话结束必有 idle 状态事件。
 - 19 组核心目录指令和其他词库/KWS 指令都只发布各自的具体特殊事件，不得额外发布
   `EVT_VOICE_COMMAND_KNOWN`。
-- Model Intent `SOCIAL|INTENT|CONTROL` 先路由业务大类；命中显式动作白名单时按“社交
-  大类 → 可执行具体动作 → `EVT_VOICE_COMMAND_KNOWN` 摘要”发布。只有具体动作事件
-  可执行；大类和摘要不可执行。`NONE|NONE|NONE` 发布不可执行的
+- Model Intent `SOCIAL|INTENT|CONTROL` 先路由业务大类；同时命中动作白名单、ASR
+  文本动作证据且未被否定时，才按“社交大类 → 可执行具体动作 →
+  `EVT_VOICE_COMMAND_KNOWN` 摘要”发布。动作白名单可与
+  词库/KWS 共用具体 `EVT_VOICE_COMMAND_*`；词库社交事件使用独立名称，不占用模型
+  业务分类事件。只有具体动作事件可执行；大类和摘要不可执行。`NONE|NONE|NONE` 发布不可执行的
   `EVT_VOICE_NEUTRAL`。
 - `FETCH/FIND_TOY` 还受 `object_targets.yaml` 的 18 类视觉目标门控。命中后
   `EVT_VOICE_COMMAND_FETCH` 携带规范 `slots.object_name` 并可执行；未命中写入

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,10 @@ _FILENAMES = {
     "vad": "02_vad_segment.wav",
     "asr_input": "03_asr_input.wav",
 }
+
+# Delete at most this many stale utterance directories per save so pruning
+# never turns one capture into a multi-second storage stall.
+_PRUNE_BATCH = 16
 
 
 class AudioDebugRecorder:
@@ -36,6 +41,8 @@ class AudioDebugRecorder:
         self.disable_extra_pre_roll = bool(
             config.get("debug_disable_extra_pre_roll", False)
         )
+        # Retention cap in utterance directories; <= 0 disables pruning.
+        self.max_utterances = int(config.get("max_utterances", 200))
 
     @staticmethod
     def _safe_utterance_id(utterance_id: str) -> str:
@@ -103,7 +110,52 @@ class AudioDebugRecorder:
             int(np.count_nonzero((finite < -1.0) | (finite > 1.0))),
             path,
         )
+        self._prune()
         return path
+
+    @staticmethod
+    def _dir_mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    @staticmethod
+    def _remove_dir(path: Path) -> bool:
+        try:
+            shutil.rmtree(path)
+            return True
+        except OSError as exc:
+            logger.warning("audio_debug cannot remove %s: %s", path, exc)
+            return False
+
+    def _prune(self) -> None:
+        """Drop the oldest utterance directories beyond ``max_utterances``."""
+        if not self.enabled or self.max_utterances <= 0:
+            return
+        try:
+            entries = [
+                entry for entry in self.output_dir.iterdir() if entry.is_dir()
+            ]
+        except OSError:
+            return
+        excess = len(entries) - self.max_utterances
+        if excess <= 0:
+            return
+        entries.sort(key=self._dir_mtime)
+        removed = 0
+        for entry in entries[:min(excess, _PRUNE_BATCH)]:
+            if self._remove_dir(entry):
+                removed += 1
+        if removed:
+            logger.info(
+                "audio_debug pruned %d oldest utterance dirs "
+                "(kept=%d max_utterances=%d) under %s",
+                removed,
+                len(entries) - removed,
+                self.max_utterances,
+                self.output_dir,
+            )
 
     def load(
         self,

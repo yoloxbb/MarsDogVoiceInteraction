@@ -27,6 +27,7 @@ from marsdog_voice_interaction.messages.voice_event_types import (
     EVT_VOICE_SCOLD,
     EVT_VOICE_STATUS_CARE,
     EVT_VOICE_UNMASTER_ID,
+    EVT_VOICE_WAKEUP,
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
 
@@ -51,6 +52,7 @@ _COMMANDS = (
 )
 
 MOCK_AUDIO_EVENT_TYPES = (
+    EVT_VOICE_WAKEUP,
     EVT_VOICE_CALL_NAME,
     EVT_VOICE_MASTER_ID,
     EVT_VOICE_FOLK_ID,
@@ -67,7 +69,7 @@ MOCK_AUDIO_EVENT_TYPES = (
 
 _MOCK_INTERACTION_EVENT_TYPES = tuple(
     event_type for event_type in MOCK_AUDIO_EVENT_TYPES
-    if event_type != EVT_VOICE_CALL_NAME
+    if event_type != EVT_VOICE_WAKEUP
 )
 
 
@@ -95,7 +97,7 @@ class MockEventProvider(BaseProvider):
         if self._phase == "waiting":
             return None
         if self._phase == "call":
-            event_type = EVT_VOICE_CALL_NAME
+            event_type = EVT_VOICE_WAKEUP
             self._phase = "event"
         else:
             choices = tuple(
@@ -114,7 +116,7 @@ class MockEventProvider(BaseProvider):
         self._next = time.monotonic() + self._interval
 
     def build_event(self, event_type: str) -> dict[str, Any]:
-        if event_type == EVT_VOICE_CALL_NAME:
+        if event_type == EVT_VOICE_WAKEUP:
             return {
                 "header": {"frame_id": WAKE_ANGLE_FRAME_ID},
                 "event_type": event_type,
@@ -164,6 +166,11 @@ class MockEventProvider(BaseProvider):
                 executable=True,
             )
             event["action"] = command_key
+        elif event_type == EVT_VOICE_CALL_NAME:
+            event = classification_to_event(
+                social="CALL", intent="NONE", control="NONE",
+                asr_text="旺财看看我", source="mock_event", confidence=1.0,
+            )
         elif event_type == EVT_VOICE_PRAISE:
             event = classification_to_event(
                 social="PRAISE", intent="NONE", control="NONE",

@@ -49,11 +49,11 @@ intent_confidence                           float          意图分类置信度
 nlu_protocol                                str            当前为 rkllm_social_intent_control_v1
 raw_nlu_tag                                 str            经严格校验的 SOCIAL|INTENT|CONTROL 原始三元组
 specific_event_type                         str            KNOWN 摘要对应的具体指令事件；非摘要可为空
-dispatch_role                               str            recognition_summary / specific_command / semantic_classification / diagnostic
+dispatch_role                               str            recognition_summary / specific_command / social_reaction / semantic_classification / diagnostic
 slots                                       array          槽位 [{"key": "...", "value": "..."}]
 response_text                               str            预留：LLM 口语回复
-is_executable                               bool           可执行标记（旧字段，新消费者请用 should_trigger_behavior_tree）
-should_trigger_behavior_tree                bool           是否交给行为树；目录具体指令或显式白名单模型具体事件可为 true
+is_executable                               bool           是否为动作命令；社交反应保持 false
+should_trigger_behavior_tree                bool           是否交给行为树；动作命令或显式授权的社交反应可为 true
 
 danger_type                                 str            危险检测类型（预留）
 danger_angle                                float          危险检测角度（预留）
@@ -75,7 +75,7 @@ latency_ms                                  float          处理延迟（ms）
 #### 唤醒
 | event_type | 说明 |
 |---|---|
-| `EVT_VOICE_CALL_NAME` | 唤醒词命中，携带 `wake_word` / `wake_angle` / `wake_confidence` |
+| `EVT_VOICE_WAKEUP` | 硬件或 pipeline Mock 唤醒，携带 `wake_word` / `wake_angle` / `wake_confidence`；不表示呼名语义 |
 
 #### 声纹识别
 | event_type | 说明 |
@@ -96,6 +96,9 @@ latency_ms                                  float          处理延迟（ms）
 #### 确定性产品词库与兼容指令
 | event_type | command_id | 说明 |
 |---|---|---|
+| `EVT_VOICE_COMMAND_CALL_NAME` | `CMD_CALL_NAME` | 词库昵称调用：小狗/小跟屁虫/小宝贝/乖狗狗/小坏蛋；仅表示社交呼名，固定不可执行，不携带硬件唤醒语义 |
+| `EVT_VOICE_COMMAND_PRAISE` | `CMD_PRAISE` | 词库精确命中的夸赞表达；非动作命令，以 `social_reaction` 授权 Tree 一次性反应，不占用 Model Intent 的 `EVT_VOICE_PRAISE` |
+| `EVT_VOICE_COMMAND_SCOLD` | `CMD_SCOLD` | 词库精确命中的责备表达；非动作命令，以 `social_reaction` 授权 Tree 一次性反应，不占用 Model Intent 的 `EVT_VOICE_SCOLD` |
 | `EVT_VOICE_COMMAND_WALK` | `CMD_WALK` | 走/去 |
 | `EVT_VOICE_COMMAND_COME` | `CMD_COME_HERE` | 过来/回来/到我这儿 |
 | `EVT_VOICE_COMMAND_GO_OUT` | `CMD_GO_OUT` | 出去玩/出去溜溜 |
@@ -124,13 +127,27 @@ latency_ms                                  float          处理延迟（ms）
 上表保留常用核心事件和旧版兼容事件，不重复列出完整产品词库。对产品表中
 已明确 `ACT_*` 的行，确定性事件名按 `EVT_VOICE_COMMAND_<ACT 后缀>` 生成，
 例如 `ACT_EAT_MEAL → EVT_VOICE_COMMAND_EAT_MEAL`。无独立 `ACT_*` 的同类表达可归并到
-`EVT_VOICE_CALL_NAME/PRAISE/SCOLD` 或 `EVT_VOICE_COMMAND_TOILET/CLEAN/SLEEP/PLAY`。
+`EVT_VOICE_COMMAND_CALL_NAME/PRAISE/SCOLD` 或
+`EVT_VOICE_COMMAND_TOILET/CLEAN/SLEEP/PLAY`。
 完整的短语、事件和动作名对应以 `config/command_catalog.yaml` 为权威源。
+
+硬件唤醒、Model Intent 呼名和词库昵称调用是三个独立事件：硬件或 pipeline Mock
+唤醒固定为 `EVT_VOICE_WAKEUP`，没有 `utterance_id`；Model Intent 的 `social=CALL`
+沿用 `EVT_VOICE_CALL_NAME`；词库昵称固定为 `EVT_VOICE_COMMAND_CALL_NAME`，携带
+当前语句的 `utterance_id`、`command_id=CMD_CALL_NAME`、
+`dispatch_role=specific_command` 和词库匹配槽位，但其语义固定为
+`CALL|NONE|NONE`、`action=NONE`、`is_executable=false`、
+`should_trigger_behavior_tree=false`。它不得作为硬件唤醒或通用动作指令。
+
+词库 `PRAISE/SCOLD` 的三轴分别为 `PRAISE|NONE|NONE` 和
+`SCOLD|NONE|NONE`，并固定 `action=NONE`、`is_executable=false`、
+`dispatch_role=social_reaction`、`should_trigger_behavior_tree=true`。这表示授权 Tree
+创建有界的一次性社交反应，不把社交语义伪装成动作命令。
 
 `EVT_VOICE_COMMAND_KNOWN` 只用于 Model Intent 命令摘要：
 
-- `dispatch_role=semantic_classification`，不可执行；命中开发侧
-  显式动作白名单时，会在摘要之前额外发布
+- `dispatch_role=semantic_classification`，不可执行；同时命中开发侧动作白名单、ASR
+  文本动作证据且未被否定时，会在摘要之前额外发布
   `dispatch_role=specific_command` 的具体事件，只有该具体事件可执行。
 - 确定性词库和 KWS 命中的是具体特殊事件，不发布此摘要。
 
@@ -155,11 +172,18 @@ latency_ms                                  float          处理延迟（ms）
 一次。`NONE|NONE|NONE` 固定发布不可执行的 `EVT_VOICE_NEUTRAL`，不伪造成
 UNKNOWN。
 
-动作标签优先发布已定义的 `EVT_VOICE_COMMAND_*` 具体事件，而不是只发布 KNOWN。
-其中 `STAND|DO` 固定映射为 `EVT_VOICE_COMMAND_STAND_UP`；`STAY|DO` 必须结合
-ASR 原文区分：站立保持语义映射 `EVT_VOICE_COMMAND_STAND_STILL`，原地不动语义
-映射 `EVT_VOICE_COMMAND_HOLD_POSITION`。无法可靠区分时只保留不可执行的
+Model Intent 继续使用下游已定义的上述业务事件名。经显式白名单确认的姿态、移动、
+声音等动作，可与确定性词库/KWS 共用相应 `EVT_VOICE_COMMAND_*` 具体事件，并通过
+`intent_source` 区分来源；词库社交/产品事件不得占用 Model Intent 业务分类事件。
+动作标签优先发布具体事件而不是只发布 KNOWN。其中 `STAND|DO` 固定映射为
+`EVT_VOICE_COMMAND_STAND_UP`；`STAY|DO` 必须结合 ASR 原文区分：站立保持语义
+映射 `EVT_VOICE_COMMAND_STAND_STILL`，原地不动语义映射
+`EVT_VOICE_COMMAND_HOLD_POSITION`。无法可靠区分时只保留不可执行的
 `EVT_VOICE_COMMAND_KNOWN`，禁止猜测具体动作。
+
+Voice 不再发布任何 `EVT_VOICE_INTENT_*`。本次硬件唤醒由旧的
+`EVT_VOICE_CALL_NAME` 迁移为 `EVT_VOICE_WAKEUP`，属于事件名破坏性变更；本次未修改
+Tree、Vision 或 Action，不能把 Voice 发布成功视为这些下游已经完成迁移。
 
 #### Model Intent 找物/捡取目标物门控
 
@@ -189,27 +213,34 @@ ASR 原文区分：站立保持语义映射 `EVT_VOICE_COMMAND_STAND_STILL`，�
 
 | 值 | 说明 |
 |---|---|
-| `interaction_timeout` | 最后一次 VAD 确认说话后超过 `idle_timeout_sec` 无新语音；ASR 为空也会刷新 |
+| `interaction_timeout` | 最后一次被接受的词库/KWS/模型语义结果后超过 `idle_timeout_sec`，或会话达到 `max_duration_sec` 绝对上限；纯 VAD、空 ASR、NEUTRAL/UNKNOWN 和仅 KNOWN 摘要不刷新。测试模式（`refresh_on_any_speech=true`）下任何 VAD 语音都算活动，且 `max_duration_sec=0` 表示不设绝对上限 |
 | `stop_listening` | 外部通过 `/perception/voice/task` 主动停止 |
 
 ### 完整确定性产品词库
 
 ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短语精确匹配。
 当前目录覆盖产品表 116 条源数据（不含表头），归并为 81 个路由组和 155 条
-标准中文词/句；每条标准词/句通过五类受控规则生成 10 条扩展，共 1550 条扩展、
-1705 条运行时精确匹配入口。19 组核心训练指令是这个完整目录的子集。产品表中 138 条英文
+标准中文词/句；每条标准词/句通过五类受控规则生成 10 条扩展，共 1550 条扩展，
+另有 70 条人工登记的变体（用于 ASR 稳定错写与自然口语说法），合计
+1775 条运行时精确匹配入口。19 组核心训练指令是这个完整目录的子集。产品表中 138 条英文
 参考短语只作元数据，当前不进入直接匹配，避免跨分类重复表达产生错误事件。
 匹配成功时：
 
+- 81 个启用路由组均必须声明非空且唯一的 `command_key/command_id/event_type`；目录
+  禁止使用 `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的
+  `EVT_VOICE_INTENT_*`。缺失、重复或越界时节点启动失败；
 - 所有目录条目只发布自身的具体特殊事件，不额外发布
   `EVT_VOICE_COMMAND_KNOWN`；
-- 具体事件是否可执行由目录条目决定，来源为
-  `intent_source=command_lexicon`，`dispatch_role=specific_command`；
+- 具体事件来源为 `intent_source=command_lexicon`；普通动作使用
+  `dispatch_role=specific_command`，PRAISE/SCOLD 使用 `social_reaction`；
 - 可执行性以 `should_trigger_behavior_tree=true` 为准；核心指令的 `control` 使用
-  新三轴语义（例如 QUIET 为 `BARK|STOP`）。呼名事件仍进入
-  行为树。`PRAISE/SCOLD` 是非执行社交事件，分别使用
-  `PRAISE|NONE|NONE` 和 `SCOLD|NONE|NONE`，`should_trigger_behavior_tree=false`，
-  由下游情绪链路处理；
+  新三轴语义（例如 QUIET 为 `BARK|STOP`）。词库呼名使用
+  `EVT_VOICE_COMMAND_CALL_NAME`，其语义为 `CALL|NONE|NONE`。词库
+  `PRAISE/SCOLD` 使用 `EVT_VOICE_COMMAND_PRAISE/SCOLD`，分别使用
+  `PRAISE|NONE|NONE` 和 `SCOLD|NONE|NONE`。三类词库社交事件均为非动作事件，
+  `is_executable=false`；CALL_NAME 固定 `should_trigger_behavior_tree=false`，
+  PRAISE/SCOLD 固定 `dispatch_role=social_reaction`、
+  `should_trigger_behavior_tree=true`；
 - 所有目录事件仍经 `/perception/audio_event` 下发，Voice 不直接调用动作系统；
 - `slots` 包含 `command_key/matched_phrase/catalog_phrase/command_catalog_version/`
   `match_strategy`，受控扩展另带 `expansion_profile/expansion_rule`，并在配置有值时
@@ -247,8 +278,9 @@ DOG_PREFERENCE / DOG_CAPABILITY
 
 组合约束：`intent=NONE` 时只能是 `control=NONE`；三个 `DOG_*` 查询标签只能配
 `QUERY`；`OWNER_LEAVE/OWNER_RETURN` 只能配 `DO`。模型输出包含多余文本、字段数
-错误、未知枚举或非法组合时均拒绝。Model Intent 的大类事件和 `COMMAND_KNOWN` 摘要均为
-`should_trigger_behavior_tree=false`；只有显式动作白名单生成的具体命令事件为
+错误、未知枚举或非法组合时均拒绝。Model Intent 的大类事件和
+`EVT_VOICE_COMMAND_KNOWN` 摘要均为
+`should_trigger_behavior_tree=false`；只有通过动作白名单和文本证据门控的具体命令事件为
 `true`。词库具体指令仍由确定性目录直接授权，不依赖模型标签。
 
 ### 交互流程与事件序列
@@ -256,7 +288,7 @@ DOG_PREFERENCE / DOG_CAPABILITY
 ```
 ┌─ IDLE（等待唤醒）──────────────────────────────────────┐
 │                          │                             │
-│   EVT_VOICE_CALL_NAME    │  唤醒词命中                  │
+│   EVT_VOICE_WAKEUP       │  硬件/Mock 唤醒              │
 │   （wake_word / wake_angle / wake_confidence）         │
 │                          ▼                             │
 │   state: idle → attention                             │
@@ -296,17 +328,20 @@ ASR 和声纹，再通过 `stage_complete stage=recognition_arbitration` 选择�
 
 - 没有 KWS 候选时选择 ASR 链路；
 - 同一句出现多个不同 KWS 候选时选择 ASR 链路；
-- 中文规范化文本不超过 2 字、英文不超过 2 个词且只有一个 KWS 候选时，可选择 KWS；
-- ASR 精确目录结果与 KWS 候选冲突时选择 ASR 目录结果；
+- 中文规范化文本不超过 2 字、英文不超过 2 个词且只有一个 KWS 候选时，仍要求
+  ASR 词库命中同一事件；冲突时选择 ASR，未确认时 KWS 不执行；
 - 长文本选择 ASR 链路，即使其中包含 KWS 关键词；
-- ASR 为空且只有一个 KWS 候选时，可用 KWS 回退；
+- `priority_command_keys` 还必须命中 `priority_asr_aliases` 中同一命令的精确错写，才
+  允许覆盖；当前仅为 `吃罐罐→去滚罐` 和 `去拿→去哪`；
+- ASR 为空时不允许单一 KWS 候选独立执行；
 - 只有被选来源发布一个具体业务事件；词库/KWS 不附带 KNOWN 摘要；
-- 声纹身份事件与 `speech` 是链路证据，不参与业务结果互斥。ASR 为空时没有
-  `speech`，但仍可按上述规则使用单一 KWS 候选。
+- 声纹身份事件与 `speech` 是链路证据，不参与业务结果互斥。
 
 配置位于 `providers.kws.config`：`publish_mode=deferred`、
 `arbitration_mode=exclusive`、`short_max_chars_zh`、`short_max_words_en`、
-`asr_long_text_wins` 和 `kws_fallback_on_asr_empty`。当前仅允许 deferred/exclusive，
+`asr_long_text_wins`、`kws_fallback_on_asr_empty` 和
+`short_requires_asr_agreement`。当前仅允许 deferred/exclusive，另有窄范围
+`priority_command_keys + priority_asr_aliases` 精确错写白名单。
 配置为其他值会在启动时失败，避免恢复成先执行后纠错的链路。
 长度阈值只作用于已配置 KWS 候选，不会自动把目录中的一字/两字词加入关键词文件；
 单字关键词默认不启用，必须经过独立误触发验收后显式配置。
@@ -314,13 +349,14 @@ ASR 和声纹，再通过 `stage_complete stage=recognition_arbitration` 选择�
 ### 非语音字段说明
 
 本 Topic **不产生** `target_track_id`、`target_identity`、人脸或相机字段。
-语音与视觉目标的关联由 `/perception/target_event` 消费者完成。
+需要视觉目标的下游应通过 Vision 的正式 Topic/Service 获取并完成关联；当前契约不
+声明 `/perception/target_event` 存在正式发布者。
 
 ---
 
 ## `/perception/voice/enrollment_event`
 
-声纹注册过程的实时反馈，每采集到一帧有效音频即发布。
+声纹注册过程的实时反馈。每次完整录音/VAD 结果处理后发布一次，而不是按音频帧发布。
 
 ### 字段
 
@@ -339,11 +375,11 @@ ASR 和声纹，再通过 `stage_complete stage=recognition_arbitration` 选择�
 ### 状态变化示例
 
 ```json
-// 开始录音 → step=1
-{"ok": true, "name": "owner", "status": "captured", "step": 1, "total_steps": 3, "text": "你好小狗，很高兴认识你", "done": false}
-
-// 采集成功 → step=2
+// 第一次采集成功 → 下一提示 step=2
 {"ok": true, "name": "owner", "status": "captured", "step": 2, "total_steps": 3, "shots": 1, "text": "今天天气不错，我们一起玩吧", "done": false}
+
+// 当前录音无法提取有效声纹 → 保持当前步骤重试
+{"ok": true, "status": "retry", "step": 2, "total_steps": 3, "done": false}
 
 // 注册完成
 {"ok": true, "name": "owner", "status": "done", "shots": 3, "done": true}
@@ -385,6 +421,11 @@ float64 latency_ms     # 处理耗时
 
 调用成功后自动开始麦克风采集，注册进度通过 `/perception/voice/enrollment_event` 发布。
 
+现场注册与 HTTP 上传共用 VAD 校验、身份冲突检查及样本追加逻辑。
+对已有身份注册会占用新的样本 ID，保留旧 WAV 和 embedding；已有数量与
+`required_shots` 合计不得超过 5。需要替换某条样本时使用 HTTP PUT 接口。
+全部采集通过后才写入，失败不会覆盖旧样本。
+
 #### `cancel_speaker_enrollment` — 取消注册
 
 无特殊参数，返回 `{"ok": true}`。
@@ -396,12 +437,40 @@ float64 latency_ms     # 处理耗时
 | 请求 `params_json` | `audio_base64` | WAV 文件 Base64（可选，不传则用最近一次交互音频） |
 | 响应 `result_json` | `ok` | 是否成功 |
 | | `speaker_id` | 识别结果 |
-| | `confidence` | 匹配置信度 |
+| | `confidence` | 最高余弦相似度，不是概率；拒识时仍可能高于绝对阈值 |
+| | `matched` | 是否接受该身份 |
+| | `reason` | `matched`、`below_threshold`、`ambiguous_identity`、`audio_too_short`、`unavailable` 等 |
+| | `runner_up_score` | 第二身份分数，无第二身份时为 null |
+| | `score_margin` | 第一、第二身份的分差，无第二身份时为 null |
+
+显式提供 `audio_base64` 时，按 HTTP 上传相同规则检查 PCM16 WAV、混合声道、
+重采样到 16 kHz 并执行 VAD。无有效语音、格式错误或显式空字符串返回失败，
+不会转用上一条音频。仅省略字段时使用最近一次交互音频。
+
+识别先取每个身份所有样本的最高分，再比较不同身份；最高分须达到
+`providers.speaker.config.match_threshold`（默认 0.5），且与第二身份的差值
+达到 `min_score_margin`（默认 0.05），否则返回 `unknown`。同分始终拒识。
+这些是初始参数，须用真实设备录音评估误识和拒识后校准。
+正式 `type: sherpa` 加载失败保持不可用，不会自动切换到模拟身份；测试模拟
+必须显式设置 `type: mock`。
+
+同一身份新增样本还需通过 `speaker_api.same_identity_similarity_threshold`
+（默认 0.5）检查。已有身份以其已有样本为参照，新建身份的批次以第一条为参照；
+替换以该身份其余样本为参照，无其他样本时不做此项检查。
+不相容返回 `speaker_sample_inconsistent`；跨身份冲突仍返回
+`speaker_identity_conflict`。声纹注册的 `speech_duration_ms` 只统计 VAD 检出的
+片段，不包含额外前后补音及段间静音，可能小于下载 WAV 的总时长。
 
 旧版 `upload_speaker`、`list_speakers`、`delete_speaker` 任务已移除，调用时返回
 `unsupported task_type`。文件和样本管理统一使用下文 FastAPI 样本级接口。
 
 #### `start_listening` — 手动开始交互
+
+会话空闲计时在 ASR 返回非空文本时立即刷新，发生在声纹和语义处理之前。
+不要求命中词库或触发行为，NEUTRAL、UNKNOWN、语义拒识文本同样续期；
+空字符串、纯空白、ASR 异常以及只有 KWS 候选的情况不刷新。
+正式配置空闲超时为 20 秒，会话总时长上限仍为 120 秒，ASR 续期不重置
+会话开始时间。日志中此次续期原因为 `last_activity_reason=asr_result`。
 
 跳过唤醒环节，直接开始录音。用于外部触发（如视觉模块联动）。
 
@@ -432,10 +501,10 @@ ID 对应会话已经结束，返回失败且不得复活旧会话。
 - `interaction_id` 必须精确匹配当前活跃会话。
 - `hold_token` 必须非空；同 token 重复请求为幂等续租。
 - `lease_sec` 必须为有限正数，且不超过
-  `interaction.hold_max_lease_sec`（正式配置 30 秒）。
+  `interaction.hold_max_lease_sec`（正式配置 20 秒）。
 - deadline 使用本地 monotonic clock；租约到期自动删除。
-- 有有效租约时只暂停 `interaction_timeout`，不屏蔽录音、KWS、STOP 或
-  `stop_listening`。
+- 有有效租约时只暂停 idle 计时，不屏蔽录音、KWS、STOP、`stop_listening`，也不能
+  突破 `interaction.max_duration_sec` 的绝对会话上限。
 
 #### `release_interaction_hold` — 释放保持租约
 
@@ -446,8 +515,8 @@ ID 对应会话已经结束，返回失败且不得复活旧会话。
 #### `get_interaction_state` — 查询会话及租约
 
 无参数。返回 `interaction_active/listening`、`interaction_id`、`state`、
-`idle_timeout_sec`、`idle_elapsed_sec`、`last_activity_reason`、`hold_active` 和
-`holds[]`。静默时长使用单调时钟计算；租约条目包含
+`idle_timeout_sec`、`idle_elapsed_sec`、`max_duration_sec`、`active_elapsed_sec`、
+`last_activity_reason`、`hold_active` 和 `holds[]`。时长使用单调时钟计算；租约条目包含
 `hold_token`、`reason` 和当前 `expires_in_sec`。
 
 ---
@@ -480,6 +549,10 @@ Swagger 页面中的 `name` 是枚举选择，不是自由文本；页面只支�
   "sample_key": "001",
   "audio_path": "/path/to/data/speakers/owner/001.wav",
   "embedding_path": "/path/to/data/speakers/owner/001.npy",
+  "source_sample_rate": 48000,
+  "stored_sample_rate": 16000,
+  "stored_channels": 1,
+  "stored_sample_width_bits": 16,
   "source_duration_ms": 3200.0,
   "speech_duration_ms": 1810.0,
   "segment_count": 1,
@@ -490,8 +563,12 @@ Swagger 页面中的 `name` 是枚举选择，不是自由文本；页面只支�
 ```
 
 处理顺序固定为：解析 WAV → 转 16 kHz 单声道 → Silero VAD 截取有效语音 →
-校验固定身份 → 保存 WAV 和 embedding → 更新 `centroid.npy` 与注册表。相同身份
+提取 embedding → 与其他身份样本做相似度冲突校验 → 保存 WAV 和 embedding →
+更新 `centroid.npy` 与注册表。相同身份
 不会覆盖旧样本，而是分配 `1～5` 中最小的空闲稳定编号。
+
+成功落盘的音频固定为 16 kHz、单声道、16-bit PCM WAV，不保留源采样率格式；
+`source_sample_rate` 表示输入采样率，`stored_sample_rate` 表示实际落盘采样率。
 
 落盘根目录只读取节点启动配置中的 `storage.root`。任何 HTTP 接口都不定义或接受
 可生效的路径参数，客户端不能覆盖该目录。上传成功还会明确返回
@@ -510,7 +587,7 @@ ROS2 录制注册的 `required_shots` 同样只能取 1～5。
 | `201` | 注册并落盘成功 |
 | `400` | 空文件 |
 | `404` | 人员或指定样本不存在 |
-| `409` | 单个身份已有 5 个样本，或样本文件状态不一致 |
+| `409` | 单个身份已有 5 个样本、跨身份声纹冲突，或样本文件状态不一致 |
 | `413` | 超过 `speaker_api.max_upload_mb` |
 | `415` | 文件扩展名不是 `.wav` |
 | `422` | 身份不在固定枚举、WAV 格式错误、VAD 无有效语音、有效语音过短或无法提取声纹 |
@@ -519,6 +596,21 @@ ROS2 录制注册的 `required_shots` 同样只能取 1～5。
 当前配置使用 `host: 0.0.0.0`，`GET /health` 和全部声纹管理接口都不包含身份验证。
 认证模块已移除，后续生产认证方案不属于当前接口契约。声纹文件始终只保存在设备
 本地的 `storage.root`。
+
+业务校验失败使用结构化错误：`detail.error` 为提示，`detail.code` 为稳定错误码。
+跨身份冲突的 `code=speaker_identity_conflict`，并返回
+`conflicting_speaker`、`conflicting_sample_id`、`similarity` 和
+`similarity_threshold`。当前阈值由
+`speaker_api.cross_identity_similarity_threshold` 配置为 `0.75`；该值需要使用实际
+设备、麦克风和注册语料验收后再校准。
+
+### 批量新增样本
+
+`POST /api/v1/speakers/{name}/samples/batch` 使用 `multipart/form-data`，重复提交
+字段 `audios`，一次允许 1～`speaker_api.max_batch_files` 个文件（当前最多 5 个）。
+系统先完成整批文件的格式、VAD、时长、embedding、容量和跨身份冲突校验，全部通过后
+才分配稳定 ID 并落盘；任一文件失败时返回 `failed_file_index`（从 1 开始），整批不
+创建样本。成功响应包含 `added_count`、`sample_ids` 和逐文件 `samples[]`。
 
 ### `GET /api/v1/speakers`
 
@@ -556,11 +648,14 @@ ROS2 录制注册的 `required_shots` 同样只能取 1～5。
 | 方法和路径 | 请求 | 用途 |
 |---|---|---|
 | `POST /api/v1/speakers/{name}/samples` | multipart `audio=.wav` | 给指定身份新增样本 |
+| `POST /api/v1/speakers/{name}/samples/batch` | multipart 重复 `audios=.wav` | 原子新增 1～5 个样本 |
 | `GET /api/v1/speakers/{name}/samples` | 无 | 列出稳定样本 ID、文件状态和 WAV 下载地址 |
 | `GET /api/v1/speakers/{name}/samples/{sample_id}` | 无 | 查询一条样本的元数据 |
 | `GET /api/v1/speakers/{name}/samples/{sample_id}/audio` | 无 | 下载 VAD 后的 PCM16 WAV |
 | `PUT /api/v1/speakers/{name}/samples/{sample_id}` | multipart `audio=.wav` | 校验新音频并原位替换 WAV 和 embedding |
 | `DELETE /api/v1/speakers/{name}/samples/{sample_id}` | 无 | 只删除指定 WAV/embedding |
+| `DELETE /api/v1/speakers/{name}/samples` | 无 | 删除该身份的全部样本并移除身份 |
+| `DELETE /api/v1/speakers?confirm=true` | Query 必须显式确认 | 删除全部固定身份及其全部样本 |
 
 样本列表响应示例：
 
@@ -594,20 +689,22 @@ ROS2 录制注册的 `required_shots` 同样只能取 1～5。
 `centroid.npy`。DELETE 删除非最后一条样本时重算 centroid；删除最后一条时同时删除
 身份目录和注册表记录并释放身份槽位。两种变更成功后均同步当前进程声纹检索索引。
 
-PUT 与新增上传使用完全相同的 WAV/VAD/有效语音/embedding 校验。新文件校验失败时
+PUT、单文件新增与批量新增使用相同的 WAV/VAD/有效语音/16 kHz 归一化、embedding
+和跨身份冲突校验。新文件校验失败时
 原 WAV、embedding 和 centroid 保持不变。接口只允许下载 WAV，不提供 `.npy` 或
 `centroid.npy` 下载端点；这些生物特征模板继续只保存在设备本地。
 
 旧版 `POST /api/v1/speakers`、`PATCH /api/v1/speakers/{name}` 和
-`DELETE /api/v1/speakers/{name}` 均已移除。删除整个身份应逐条调用样本 DELETE；
-删除最后一条时系统自动移除身份目录、注册表记录和运行时索引。
+`DELETE /api/v1/speakers/{name}` 均保持移除。新的身份级删除位于样本集合路径
+`DELETE /api/v1/speakers/{name}/samples`；全库删除为
+`DELETE /api/v1/speakers?confirm=true`。删除成功后都会同步运行时索引。
 
 ---
 
 ## Mock 模式
 
 设置 `mock.enabled: true`、`mock.mode: event` 可直接模拟下游语音事件，
-不加载硬件和模型。每轮按 `EVT_VOICE_CALL_NAME → 一个同会话语音事件 →
+不加载硬件和模型。每轮按 `EVT_VOICE_WAKEUP → 一个同会话语音事件 →
 EVT_STATE_CHANGED(state=idle)` 运行，整轮保持同一个 `interaction_id`；空闲终止
 仍遵守 10 秒超时和会话保持租约。
 

@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import math
 import re
 import threading
 import time
 import uuid
-import wave
 from typing import Any
 
 import numpy as np
@@ -47,8 +45,10 @@ from marsdog_voice_interaction.messages.intent_event_router import (
 from marsdog_voice_interaction.messages.intent_protocol import NLU_PROTOCOL
 from marsdog_voice_interaction.messages.voice_event_types import (
     EVT_STATE_CHANGED,
-    EVT_VOICE_CALL_NAME,
     EVT_VOICE_COMMAND_KNOWN,
+    EVT_VOICE_COMMAND_UNKNOWN,
+    EVT_VOICE_NEUTRAL,
+    EVT_VOICE_WAKEUP,
     speaker_to_voice_event,
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
@@ -73,7 +73,7 @@ _AUDIO_QOS = QoSProfile(
 )
 
 _UNKNOWN_INTENT = {
-    "event_type": "EVT_VOICE_COMMAND_UNKNOWN",
+    "event_type": EVT_VOICE_COMMAND_UNKNOWN,
     "social": "NONE",
     "intent": "NONE",
     "emotion": "NONE",
@@ -143,7 +143,16 @@ class VoiceInteractionNode(Node):
         set_storage_root(
             self._config.get("storage", {}).get("root", "data")
         )
-        self._enrollment = SpeakerEnrollmentManager()
+        speaker_api_config = self._config.get("speaker_api", {})
+        self._enrollment = SpeakerEnrollmentManager(
+            cross_identity_similarity_threshold=speaker_api_config.get(
+                "cross_identity_similarity_threshold",
+                0.75,
+            ),
+            same_identity_similarity_threshold=speaker_api_config.get(
+                "same_identity_similarity_threshold", 0.5,
+            ),
+        )
         self._state_machine = VoiceInteractionStateMachine()
         self._providers: dict[str, BaseProvider | None] = {}
         self._speaker_operation_lock = threading.RLock()
@@ -156,6 +165,7 @@ class VoiceInteractionNode(Node):
         self._interaction_lock = threading.RLock()
         self._interaction_active = False
         self._interaction_id = ""
+        self._interaction_started_time = 0.0
         self._last_interaction_time = 0.0
         self._last_interaction_activity_reason = ""
         self._interaction_holds: dict[str, dict[str, Any]] = {}
@@ -166,10 +176,31 @@ class VoiceInteractionNode(Node):
 
         interaction = self._config.get("interaction", {})
         self._idle_timeout = float(interaction.get("idle_timeout_sec", 10))
+        self._refresh_on_any_speech = bool(
+            interaction.get("refresh_on_any_speech", False)
+        )
+        self._max_interaction_duration = self._resolve_max_interaction_duration(
+            self._idle_timeout,
+            interaction.get("max_duration_sec", 120.0),
+        )
         self._hold_max_lease_sec = max(
             0.1,
             float(interaction.get("hold_max_lease_sec", 30.0)),
         )
+        # Test-mode settings widen the session lifetime, so make them loud in
+        # the logs: they must never reach a production run unnoticed.
+        if self._refresh_on_any_speech:
+            logger.warning(
+                "interaction.refresh_on_any_speech is ON (test mode): any "
+                "VAD-confirmed speech refreshes the idle timer, even without "
+                "a non-empty ASR result. Production must keep it false."
+            )
+        if self._max_interaction_duration <= 0.0:
+            logger.warning(
+                "interaction.max_duration_sec is disabled (test mode): the "
+                "session has no absolute cap and may never end while speech "
+                "continues. Production must restore a positive value."
+            )
         self._init_providers()
         self._wire_speaker_enrollment()
         self._sync_speaker_registry()
@@ -216,6 +247,8 @@ class VoiceInteractionNode(Node):
             enrollment_topic=enrollment_topic,
             service=service_name if self._service is not None else "unavailable",
             idle_timeout_sec=self._idle_timeout,
+            max_duration_sec=self._max_interaction_duration,
+            refresh_on_any_speech=self._refresh_on_any_speech,
             speaker_api=self._speaker_api_status,
             command_lexicon=self._command_lexicon_status,
             object_target_routing=self._object_target_status,
@@ -244,6 +277,31 @@ class VoiceInteractionNode(Node):
         config = kws.get("config", {}) if isinstance(kws, dict) else {}
         if not isinstance(config, dict):
             config = {}
+        priority_command_keys = config.get("priority_command_keys", [])
+        if not isinstance(priority_command_keys, list):
+            raise ValueError(
+                "providers.kws.config.priority_command_keys must be a list"
+            )
+        priority_asr_aliases = config.get("priority_asr_aliases", {})
+        if not isinstance(priority_asr_aliases, dict):
+            raise ValueError(
+                "providers.kws.config.priority_asr_aliases must be a mapping"
+            )
+        normalized_priority_aliases: dict[str, tuple[str, ...]] = {}
+        for raw_key, raw_aliases in priority_asr_aliases.items():
+            if not isinstance(raw_aliases, list):
+                raise ValueError(
+                    "providers.kws.config.priority_asr_aliases values "
+                    "must be lists"
+                )
+            key = str(raw_key).strip().upper()
+            if not key:
+                continue
+            normalized_priority_aliases[key] = tuple(dict.fromkeys(
+                self._clean_text(str(alias))
+                for alias in raw_aliases
+                if self._clean_text(str(alias))
+            ))
         policy = {
             "publish_mode": str(
                 config.get("publish_mode", "deferred")
@@ -255,7 +313,10 @@ class VoiceInteractionNode(Node):
                 config.get("asr_long_text_wins", True)
             ),
             "kws_fallback_on_asr_empty": bool(
-                config.get("kws_fallback_on_asr_empty", True)
+                config.get("kws_fallback_on_asr_empty", False)
+            ),
+            "short_requires_asr_agreement": bool(
+                config.get("short_requires_asr_agreement", True)
             ),
             "short_max_chars_zh": max(
                 1, int(config.get("short_max_chars_zh", 2))
@@ -263,6 +324,12 @@ class VoiceInteractionNode(Node):
             "short_max_words_en": max(
                 1, int(config.get("short_max_words_en", 2))
             ),
+            "priority_command_keys": tuple(dict.fromkeys(
+                str(value).strip().upper()
+                for value in priority_command_keys
+                if str(value).strip()
+            )),
+            "priority_asr_aliases": normalized_priority_aliases,
         }
         if policy["publish_mode"] != "deferred":
             raise ValueError(
@@ -277,9 +344,16 @@ class VoiceInteractionNode(Node):
     def _init_command_lexicon(self) -> None:
         config = self._config.get("command_lexicon", {})
         enabled = bool(config.get("enabled", False))
+        # Homophone-tolerant fallback for ASR near-miss characters.  Defaults
+        # to on, but stays switchable because a wrong fuzzy match executes a
+        # wrong action on the robot.
+        self._command_fuzzy_matching = bool(
+            config.get("fuzzy_matching", True)
+        )
         self._command_lexicon_status = {
             "enabled": enabled,
             "ready": False,
+            "fuzzy_matching": self._command_fuzzy_matching,
         }
         if not enabled:
             return
@@ -299,6 +373,7 @@ class VoiceInteractionNode(Node):
                 "expansion_enabled": lexicon.expansion_enabled,
                 "variants_per_phrase": lexicon.variants_per_phrase,
                 "expanded_phrase_count": lexicon.expanded_phrase_count,
+                "variant_phrase_count": lexicon.variant_phrase_count,
                 "total_match_phrase_count": lexicon.total_match_phrase_count,
                 "expansion_profile_count": lexicon.expansion_profile_count,
                 "reference_phrase_count": lexicon.reference_phrase_count,
@@ -308,13 +383,15 @@ class VoiceInteractionNode(Node):
             })
             logger.info(
                 "Command lexicon ready: version=%s commands=%d core=%d "
-                "phrases=%d expanded=%d total=%d",
+                "phrases=%d expanded=%d variants=%d total=%d fuzzy=%s",
                 lexicon.version,
                 lexicon.command_count,
                 lexicon.core_command_count,
                 lexicon.phrase_count,
                 lexicon.expanded_phrase_count,
+                lexicon.variant_phrase_count,
                 lexicon.total_match_phrase_count,
+                self._command_fuzzy_matching,
             )
         except Exception as exc:
             self._command_lexicon = None
@@ -367,15 +444,7 @@ class VoiceInteractionNode(Node):
             return
         try:
             from marsdog_voice_interaction.api import SpeakerApiServer
-            from marsdog_voice_interaction.utils.uploaded_audio import (
-                UploadedAudioVAD,
-            )
-
-            audio_config = self._config.get("providers", {}).get(
-                "audio",
-                {},
-            ).get("config", {})
-            self._upload_vad = UploadedAudioVAD(audio_config)
+            self._get_speaker_audio_vad()
             self._speaker_api = SpeakerApiServer(
                 config,
                 self._enroll_uploaded_speaker,
@@ -386,6 +455,9 @@ class VoiceInteractionNode(Node):
                     self._replace_speaker_sample_for_api
                 ),
                 sample_delete_handler=self._delete_speaker_sample_for_api,
+                batch_upload_handler=self._enroll_uploaded_speaker_batch,
+                speaker_delete_handler=self._delete_speaker_for_api,
+                delete_all_handler=self._delete_all_speakers_for_api,
             )
             ready = self._speaker_api.start()
             self._speaker_api_status = {
@@ -393,6 +465,11 @@ class VoiceInteractionNode(Node):
                 "ready": ready,
                 "address": self._speaker_api.address,
                 "docs": f"{self._speaker_api.address}/docs",
+                "max_batch_files": int(config.get("max_batch_files", 5)),
+                "cross_identity_similarity_threshold": config.get(
+                    "cross_identity_similarity_threshold",
+                    0.75,
+                ),
             }
         except Exception as exc:
             self._speaker_api = None
@@ -403,6 +480,16 @@ class VoiceInteractionNode(Node):
                 "error": str(exc),
             }
             logger.error("Speaker FastAPI unavailable: %s", exc, exc_info=True)
+
+    def _get_speaker_audio_vad(self) -> Any:
+        """Share speaker audio validation even when HTTP is disabled."""
+        if self._upload_vad is None:
+            from marsdog_voice_interaction.utils.uploaded_audio import UploadedAudioVAD
+            audio_config = (
+                self._config.get("providers", {}).get("audio", {}).get("config", {})
+            )
+            self._upload_vad = UploadedAudioVAD(audio_config)
+        return self._upload_vad
 
     def _enroll_uploaded_speaker(
         self,
@@ -428,6 +515,9 @@ class VoiceInteractionNode(Node):
             shots=int(result.get("shots", 0)),
             sample_id=int(result.get("sample_id", 0)),
             sample_key=str(result.get("sample_key", "")),
+            code=str(result.get("code", "")),
+            source_sample_rate=int(result.get("source_sample_rate", 0)),
+            stored_sample_rate=int(result.get("stored_sample_rate", 0)),
             source_duration_ms=float(result.get("source_duration_ms", 0.0)),
             speech_duration_ms=float(result.get("speech_duration_ms", 0.0)),
             segment_count=int(result.get("segment_count", 0)),
@@ -435,6 +525,46 @@ class VoiceInteractionNode(Node):
             has_effective_speech=bool(
                 result.get("has_effective_speech", False)
             ),
+            conflicting_speaker=str(
+                result.get("conflicting_speaker", "")
+            ),
+            similarity=float(result.get("similarity", 0.0)),
+            latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
+            error=str(result.get("error", "")),
+        )
+        return result
+
+    def _enroll_uploaded_speaker_batch(
+        self,
+        name: str,
+        audio_items: list[bytes],
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        if self._upload_vad is None:
+            result = {"ok": False, "error": "上传音频 VAD 不可用"}
+        else:
+            with self._speaker_operation_lock:
+                result = self._enrollment.enroll_speaker_batch_from_audio(
+                    name,
+                    audio_items,
+                    vad=self._upload_vad,
+                )
+                if result.get("ok"):
+                    self._sync_speaker_registry()
+        self._trace(
+            "speaker_api_upload",
+            operation="batch_add",
+            result="success" if result.get("ok") else "failure",
+            speaker_name=str(result.get("name", name)),
+            requested_count=len(audio_items),
+            added_count=int(result.get("added_count", 0)),
+            shots=int(result.get("shots", 0)),
+            sample_ids=list(result.get("sample_ids", [])),
+            code=str(result.get("code", "")),
+            conflicting_speaker=str(
+                result.get("conflicting_speaker", "")
+            ),
+            similarity=float(result.get("similarity", 0.0)),
             latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
             error=str(result.get("error", "")),
         )
@@ -514,6 +644,9 @@ class VoiceInteractionNode(Node):
             speaker_name=str(result.get("name", name)),
             sample_id=int(result.get("sample_id", sample_id)),
             shots=int(result.get("shots", 0)),
+            code=str(result.get("code", "")),
+            source_sample_rate=int(result.get("source_sample_rate", 0)),
+            stored_sample_rate=int(result.get("stored_sample_rate", 0)),
             source_duration_ms=float(result.get("source_duration_ms", 0.0)),
             speech_duration_ms=float(result.get("speech_duration_ms", 0.0)),
             segment_count=int(result.get("segment_count", 0)),
@@ -521,6 +654,10 @@ class VoiceInteractionNode(Node):
             has_effective_speech=bool(
                 result.get("has_effective_speech", False)
             ),
+            conflicting_speaker=str(
+                result.get("conflicting_speaker", "")
+            ),
+            similarity=float(result.get("similarity", 0.0)),
             latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
             error=str(result.get("error", "")),
         )
@@ -544,6 +681,42 @@ class VoiceInteractionNode(Node):
             sample_id=int(result.get("deleted_sample_id", sample_id)),
             shots=int(result.get("shots", 0)),
             speaker_removed=bool(result.get("speaker_removed", False)),
+            latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
+            error=str(result.get("error", "")),
+        )
+        return result
+
+    def _delete_speaker_for_api(self, name: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        with self._speaker_operation_lock:
+            result = self._enrollment.delete_speaker(name)
+            if result.get("ok"):
+                self._sync_speaker_registry()
+        self._trace(
+            "speaker_management",
+            operation="speaker_delete_all_samples",
+            result="success" if result.get("ok") else "failure",
+            speaker_name=str(result.get("name", name)),
+            deleted_count=int(result.get("deleted_count", 0)),
+            latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
+            error=str(result.get("error", "")),
+        )
+        return result
+
+    def _delete_all_speakers_for_api(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        with self._speaker_operation_lock:
+            result = self._enrollment.delete_all_speakers()
+            if result.get("ok"):
+                self._sync_speaker_registry()
+        self._trace(
+            "speaker_management",
+            operation="delete_all_speakers",
+            result="success" if result.get("ok") else "failure",
+            deleted_speaker_count=int(
+                result.get("deleted_speaker_count", 0)
+            ),
+            deleted_sample_count=int(result.get("deleted_sample_count", 0)),
             latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
             error=str(result.get("error", "")),
         )
@@ -699,8 +872,9 @@ class VoiceInteractionNode(Node):
             )
             provider: BaseProvider = SpeakerSherpaProvider(config)
             provider.start()
-            if provider.is_available():
-                return provider
+            return provider
+        if section.get("type", "sherpa") != "mock":
+            raise ValueError("Unsupported speaker provider type")
         from marsdog_voice_interaction.providers.mock_speaker import (
             MockSpeakerProvider,
         )
@@ -721,7 +895,9 @@ class VoiceInteractionNode(Node):
             self._interaction_id = interaction_id or uuid.uuid4().hex
             self._interaction_active = True
             self._interaction_holds.clear()
-            self._last_interaction_time = time.monotonic()
+            started_monotonic = time.monotonic()
+            self._interaction_started_time = started_monotonic
+            self._last_interaction_time = started_monotonic
             self._last_interaction_activity_reason = "interaction_start"
             self._state_machine.trigger(Trigger.WAKEUP)
             started_id = self._interaction_id
@@ -773,6 +949,10 @@ class VoiceInteractionNode(Node):
         with self._interaction_lock:
             if not self._interaction_active:
                 return ""
+            started = getattr(self, "_interaction_started_time", 0.0)
+            max_duration = getattr(self, "_max_interaction_duration", 0.0)
+            if started and max_duration and now - started > max_duration:
+                return self._interaction_id
             self._prune_interaction_holds_locked(now)
             if self._interaction_holds:
                 return ""
@@ -785,7 +965,7 @@ class VoiceInteractionNode(Node):
         event = direct_mock.poll_event()  # type: ignore[attr-defined]
         if event is not None:
             event_type = str(event.get("event_type", ""))
-            if event_type == EVT_VOICE_CALL_NAME:
+            if event_type == EVT_VOICE_WAKEUP:
                 self._begin_interaction(source="mock_event")
                 self._publish(event)
             elif not self._is_interaction_active():
@@ -810,8 +990,13 @@ class VoiceInteractionNode(Node):
                     self._state_machine.previous_state.value
                 )
                 event.setdefault("utterance_id", uuid.uuid4().hex)
-                self._refresh_interaction_activity(reason="mock_event")
                 self._publish(event)
+                if getattr(self, "_refresh_on_any_speech", False):
+                    # Test mode: every mock interaction event counts as
+                    # activity, even without ASR text.
+                    self._refresh_interaction_activity(reason="mock_event")
+                else:
+                    self._refresh_for_asr_result(event.get("asr_text"))
 
         timed_out_id = self._timeout_interaction_id(time.monotonic())
         if timed_out_id:
@@ -843,10 +1028,19 @@ class VoiceInteractionNode(Node):
                     if result is not None:
                         self._poll_kws_events()
                         self._finish_kws_utterance()
-                        if self._command_tracker.utterance_id:
-                            result["utterance_id"] = (
-                                self._command_tracker.utterance_id
-                            )
+                        if not result.get("utterance_id"):
+                            # A provider that reports its own utterance ID is
+                            # authoritative. A refused start advances the
+                            # tracker while the previous worker keeps
+                            # capturing; relabelling that audio with the new
+                            # ID would misattribute it in traces, debug audio
+                            # and downstream events.
+                            tracker_id = self._command_tracker.utterance_id
+                            if tracker_id:
+                                result["utterance_id"] = tracker_id
+                        utterance_id = (
+                            str(result.get("utterance_id") or "") or None
+                        )
                         self._latest_audio = result
                         has_voice = bool(result.get("has_voice", True))
                         capture_started = getattr(
@@ -863,7 +1057,7 @@ class VoiceInteractionNode(Node):
                             stage="vad_capture",
                             result="voice" if has_voice else "silence",
                             interaction_id=self._interaction_id,
-                            utterance_id=self._command_tracker.utterance_id,
+                            utterance_id=utterance_id,
                             latency_ms=round(capture_latency_ms, 2),
                             audio_duration_ms=round(
                                 float(result.get("duration_ms", 0.0)),
@@ -873,14 +1067,17 @@ class VoiceInteractionNode(Node):
                         if enrollment_active:
                             self._process_enrollment_audio(result)
                         elif has_voice:
-                            # VAD-confirmed speech is user activity even when
-                            # ASR returns empty and KWS has no candidate.
-                            self._refresh_interaction_activity(
-                                reason="vad_voice"
-                            )
+                            if getattr(self, "_refresh_on_any_speech", False):
+                                # Test mode: any VAD-confirmed speech keeps the
+                                # session alive, even when ASR yields nothing.
+                                # A later non-empty ASR result overwrites the reason
+                                # with a more precise one.
+                                self._refresh_interaction_activity(
+                                    reason="vad_speech"
+                                )
                             self._process_speech(
                                 result,
-                                self._command_tracker.utterance_id or None,
+                                utterance_id,
                             )
                         else:
                             logger.debug(
@@ -921,11 +1118,44 @@ class VoiceInteractionNode(Node):
         event = wakeup.poll_event()  # type: ignore[attr-defined]
         if event is None:
             return
-        event["event_type"] = EVT_VOICE_CALL_NAME
+        event["event_type"] = EVT_VOICE_WAKEUP
         self._begin_interaction(source="wakeup")
         self._publish(event)
         if audio is not None and hasattr(audio, "start_capture"):
+            is_capturing = getattr(audio, "is_capturing", None)
+            if callable(is_capturing) and is_capturing():
+                # A wakeup that lands while a capture is still running
+                # supersedes it: the capture belongs to the previous
+                # utterance, whose session has just been replaced. Cancel it
+                # first — start_capture() refuses while the old worker holds
+                # the device, and the stale audio would then be processed as
+                # if it were the new utterance (the wake word itself included).
+                self._cancel_audio_capture(audio)
             self._start_interaction_capture(audio)
+
+    @staticmethod
+    def _resolve_max_interaction_duration(
+        idle_timeout: float,
+        raw: Any,
+    ) -> float:
+        """Return the absolute session cap in seconds; 0 disables it.
+
+        A non-positive configured value means "no absolute cap" and stays 0.0
+        so the truthiness check in _timeout_interaction_id skips it. Any
+        positive value is clamped to at least the idle timeout, so the hard
+        deadline can never fire before the idle deadline would. Unparsable or
+        non-finite values fall back to the production default — a bad value
+        must not silently disable the cap.
+        """
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 120.0
+        if not math.isfinite(value):
+            value = 120.0
+        if value <= 0.0:
+            return 0.0
+        return max(idle_timeout, value)
 
     @staticmethod
     def _audio_speech_active(audio: BaseProvider | None) -> bool:
@@ -944,9 +1174,12 @@ class VoiceInteractionNode(Node):
                     "publish_mode": "deferred",
                     "arbitration_mode": "exclusive",
                     "asr_long_text_wins": True,
-                    "kws_fallback_on_asr_empty": True,
+                    "kws_fallback_on_asr_empty": False,
+                    "short_requires_asr_agreement": True,
                     "short_max_chars_zh": 2,
                     "short_max_words_en": 2,
+                    "priority_command_keys": (),
+                    "priority_asr_aliases": {},
                 },
             )
         )
@@ -979,9 +1212,9 @@ class VoiceInteractionNode(Node):
     ) -> tuple[dict[str, Any] | None, str]:
         """Select one deferred KWS result or explain why ASR owns the turn.
 
-        Division of labor: long ASR text owns the turn; a short utterance
-        with a single KWS candidate lets KWS win, overriding a conflicting
-        catalog match.
+        Division of labor: long ASR text owns the turn.  A short KWS candidate
+        needs an agreeing catalog event, except for exact configured ASR-error
+        aliases.
         """
 
         candidates = [
@@ -999,20 +1232,36 @@ class VoiceInteractionNode(Node):
             return None, "empty_asr_fallback_disabled"
 
         candidate_event_type = str(candidate.get("event_type", ""))
+        candidate_command_key = str(candidate.get("action", "")).strip().upper()
+        priority_aliases = policy.get("priority_asr_aliases", {})
+        allowed_aliases = priority_aliases.get(candidate_command_key, ())
+        if (
+            candidate_command_key in policy.get("priority_command_keys", ())
+            and text in allowed_aliases
+        ):
+            return candidate, "configured_kws_priority_alias"
         if (
             policy["asr_long_text_wins"]
             and not self._is_short_asr_text(raw_text, language)
         ):
             return None, "long_asr_text"
-        # 短命令走 KWS：即使 ASR 词库命中与 KWS 冲突，也以 KWS 为准。
         if (
             direct_match is not None
             and direct_match.event_type != candidate_event_type
         ):
-            return candidate, "short_kws_overrides_asr_conflict"
+            return None, "short_asr_catalog_conflict"
         if direct_match is not None:
             return candidate, "short_asr_catalog_agrees"
+        if policy.get("short_requires_asr_agreement", True):
+            return None, "short_asr_unconfirmed_kws"
         return candidate, "short_asr_kws_preferred"
+
+    def _refresh_for_asr_result(self, text: Any) -> bool:
+        """Refresh on non-blank ASR text, before semantic routing or rejection."""
+        if not isinstance(text, str) or not text.strip():
+            return False
+        self._refresh_interaction_activity(reason="asr_result")
+        return True
 
     def _trace_recognition_arbitration(
         self,
@@ -1185,7 +1434,8 @@ class VoiceInteractionNode(Node):
             asr_result = {}
             asr_failed = True
         asr_latency_ms = (time.perf_counter() - asr_started) * 1000.0
-        raw_text = str(asr_result.get("asr_text", ""))
+        raw_text = str(asr_result.get("asr_text") or "")
+        self._refresh_for_asr_result(raw_text)
         self._trace(
             "stage_complete",
             stage="asr",
@@ -1225,6 +1475,8 @@ class VoiceInteractionNode(Node):
             latency_ms=round(speaker_latency_ms, 2),
             speaker_id=speaker_id,
             speaker_confidence=confidence,
+            reason=str(speaker_result.get("reason", "")),
+            score_margin=speaker_result.get("score_margin"),
         )
         self._publish({
             "event_type": speaker_to_voice_event(speaker_id),
@@ -1286,10 +1538,12 @@ class VoiceInteractionNode(Node):
         })
 
         lexicon_started = time.perf_counter()
-        direct_match = (
-            self._command_lexicon.match(text)
-            if self._command_lexicon is not None else None
-        )
+        if self._command_lexicon is None:
+            direct_match = None
+        elif getattr(self, "_command_fuzzy_matching", True):
+            direct_match = self._command_lexicon.match_fuzzy(text)
+        else:
+            direct_match = self._command_lexicon.match(text)
         lexicon_latency_ms = (
             time.perf_counter() - lexicon_started
         ) * 1000.0
@@ -1432,6 +1686,8 @@ class VoiceInteractionNode(Node):
             completion_result = (
                 "published_known_and_specific"
                 if direct_match.emit_known_event
+                else "published_social_reaction"
+                if direct_event.get("dispatch_role") == "social_reaction"
                 else "published_direct_command"
                 if direct_event.get("should_trigger_behavior_tree")
                 else "published_catalog_event"
@@ -1585,11 +1841,24 @@ class VoiceInteractionNode(Node):
         set_utterance_id = getattr(audio, "set_utterance_id", None)
         if callable(set_utterance_id):
             set_utterance_id(utterance_id)
-        audio.start_capture()  # type: ignore[attr-defined]
+        started = audio.start_capture()  # type: ignore[attr-defined]
+        if started is False:
+            logger.error(
+                "VAD capture refused to start; the microphone stays closed "
+                "for utterance_id=%s",
+                utterance_id,
+            )
+            # This utterance never opened a capture, so drop its ID rather
+            # than leave it claiming the audio of whichever worker still
+            # holds the device. poll_result() now reports that worker's own
+            # utterance ID, and an empty tracker keeps this refused attempt
+            # from being treated as the active utterance.
+            self._command_tracker.finish()
+            self._utterance_started_monotonic = 0.0
         self._trace(
             "stage_start",
             stage="vad_capture",
-            result="started",
+            result="ignored" if started is False else "started",
             interaction_id=self._interaction_id,
             utterance_id=utterance_id,
         )
@@ -1604,8 +1873,8 @@ class VoiceInteractionNode(Node):
             try:
                 if cancel_capture() is False:
                     logger.error(
-                        "Audio capture cancellation timed out; "
-                        "wakeup recovery may be delayed"
+                        "Audio capture cancellation timed out; the worker "
+                        "was detached and is still shutting down"
                     )
             except Exception as exc:
                 logger.error("Audio capture cancellation failed: %s", exc)
@@ -1646,8 +1915,8 @@ class VoiceInteractionNode(Node):
                 "",
             )
             self._interaction_active = False
+            self._interaction_started_time = 0.0
             self._interaction_holds.clear()
-            self._cancel_audio_capture()
             self._finish_kws_utterance()
             self._command_tracker.finish()
             self._state_machine.trigger(Trigger.TIMEOUT)
@@ -1657,6 +1926,9 @@ class VoiceInteractionNode(Node):
                 "state": "idle",
                 "state_reason": reason,
             })
+            # Cancel after the idle state is out: teardown can wait on the
+            # worker's join budget, and nothing should delay wakeup recovery.
+            self._cancel_audio_capture()
             self._interaction_id = ""
         direct_mock = self._providers.get("mock_event")
         complete = getattr(direct_mock, "complete_interaction", None)
@@ -1851,6 +2123,7 @@ class VoiceInteractionNode(Node):
                     dtype=np.float32,
                 ),
                 int(audio_data.get("sample_rate", 16000)),
+                vad=self._get_speaker_audio_vad(),
             )
             if result.get("done"):
                 self._sync_speaker_registry()
@@ -2035,6 +2308,10 @@ class VoiceInteractionNode(Node):
                 max(0.0, now_monotonic - self._last_interaction_time)
                 if self._interaction_active else 0.0
             )
+            active_elapsed = (
+                max(0.0, now_monotonic - self._interaction_started_time)
+                if self._interaction_active else 0.0
+            )
             return {
                 "ok": True,
                 "listening": self._interaction_active,
@@ -2042,7 +2319,18 @@ class VoiceInteractionNode(Node):
                 "interaction_id": self._interaction_id,
                 "state": self._state_machine.state.value,
                 "idle_timeout_sec": self._idle_timeout,
+                "refresh_on_any_speech": getattr(
+                    self,
+                    "_refresh_on_any_speech",
+                    False,
+                ),
                 "idle_elapsed_sec": idle_elapsed,
+                "max_duration_sec": getattr(
+                    self,
+                    "_max_interaction_duration",
+                    0.0,
+                ),
+                "active_elapsed_sec": active_elapsed,
                 "last_activity_reason": getattr(
                     self,
                     "_last_interaction_activity_reason",
@@ -2055,6 +2343,16 @@ class VoiceInteractionNode(Node):
     def _run_task(self, task_type: str, params: dict[str, Any]) -> dict[str, Any]:
         if task_type == "start_speaker_enrollment":
             with self._speaker_operation_lock:
+                speaker = self._providers.get("speaker")
+                if (
+                    speaker is None or not speaker.is_available()
+                    or getattr(speaker, "_extractor", None) is None
+                ):
+                    return {"ok": False, "error": "speaker extractor unavailable"}
+                try:
+                    self._get_speaker_audio_vad()
+                except Exception as exc:
+                    return {"ok": False, "error": f"speaker VAD unavailable: {exc}"}
                 result = self._enrollment.start_speaker(
                     str(params.get("name", "")),
                     int(params.get("required_shots", 3)),
@@ -2069,10 +2367,30 @@ class VoiceInteractionNode(Node):
                 return self._enrollment.cancel_speaker()
         if task_type == "verify_speaker":
             speaker = self._providers.get("speaker")
-            audio_data = self._decode_audio_params(params) or self._latest_audio
-            if speaker is None or audio_data is None:
+            if speaker is None:
                 return {"ok": False, "error": "speaker or audio unavailable"}
             with self._speaker_operation_lock:
+                if "audio_base64" in params:
+                    try:
+                        audio_data = self._decode_audio_params(params)
+                        if audio_data is None:
+                            raise ValueError("audio_base64 is empty")
+                        from marsdog_voice_interaction.utils.uploaded_audio import encode_pcm16_wav
+                        trimmed = self._get_speaker_audio_vad().trim_wav(
+                            encode_pcm16_wav(
+                                audio_data["audio_samples"], audio_data["sample_rate"],
+                            )
+                        )
+                        audio_data = {
+                            "audio_samples": trimmed.samples,
+                            "sample_rate": trimmed.sample_rate, "has_voice": True,
+                        }
+                    except (ValueError, RuntimeError) as exc:
+                        return {"ok": False, "code": "invalid_audio", "error": str(exc)}
+                else:
+                    audio_data = self._latest_audio
+                if audio_data is None:
+                    return {"ok": False, "error": "speaker or audio unavailable"}
                 result = speaker.verify(audio_data)  # type: ignore[attr-defined]
             return {"ok": True, **result}
         if task_type == "hold_interaction":
@@ -2126,15 +2444,12 @@ class VoiceInteractionNode(Node):
         if not encoded:
             return None
         payload = base64.b64decode(encoded, validate=True)
-        with wave.open(io.BytesIO(payload), "rb") as source:
-            sample_rate = source.getframerate()
-            samples = np.frombuffer(
-                source.readframes(source.getnframes()), dtype=np.int16
-            ).astype(np.float32) / 32768.0
+        from marsdog_voice_interaction.utils.uploaded_audio import normalize_pcm16_wav
+        samples, sample_rate, _ = normalize_pcm16_wav(payload)
         return {
             "audio_samples": samples,
             "sample_rate": sample_rate,
-            "has_voice": True,
+            "has_voice": True,  # The caller applies VAD before verification.
         }
 
     def _wire_speaker_enrollment(self) -> None:

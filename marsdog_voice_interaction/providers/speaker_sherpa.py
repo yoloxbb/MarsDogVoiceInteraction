@@ -45,6 +45,11 @@ class SpeakerSherpaProvider(BaseProvider):
 
         self._model_path = config.get("speaker_model", "")
         self._match_threshold = float(config.get("match_threshold", 0.5))
+        self._min_score_margin = float(config.get("min_score_margin", 0.05))
+        if not 0.0 <= self._match_threshold <= 1.0:
+            raise ValueError("match_threshold must be finite and between 0 and 1")
+        if not 0.0 <= self._min_score_margin <= 2.0:
+            raise ValueError("min_score_margin must be finite and between 0 and 2")
         self._min_samples = int(config.get("min_samples", 8000))
         self._num_threads = int(config.get("num_threads", 2))
 
@@ -145,9 +150,25 @@ class SpeakerSherpaProvider(BaseProvider):
             return {"speaker_id": "unknown", "confidence": 0.0,
                     "matched": False, "reason": "no_templates"}
 
-        best_name, best_score = self._best_match(embedding)
+        scores = sorted(
+            (
+                (name, max(self._cosine(embedding, t) for t in templates))
+                for name, templates in self._templates.items() if templates
+            ),
+            key=lambda item: item[1], reverse=True,
+        )
+        best_name, best_score = scores[0] if scores else ("", -1.0)
+        runner_up_score = scores[1][1] if len(scores) > 1 else None
+        margin = best_score - runner_up_score if runner_up_score is not None else None
         matched = bool(best_name) and best_score >= self._match_threshold
+        ambiguous = matched and margin is not None and (
+            margin <= 0.0 or margin < self._min_score_margin
+        )
+        matched = matched and not ambiguous
         speaker_id = best_name if matched else "unknown"
+        reason = "matched" if matched else "below_threshold"
+        if ambiguous:
+            reason = "ambiguous_identity"
 
         logger.debug(
             "Speaker verify: id=%s score=%.4f matched=%s",
@@ -158,7 +179,11 @@ class SpeakerSherpaProvider(BaseProvider):
             "speaker_id": speaker_id,
             "confidence": round(best_score, 4),
             "matched": matched,
-            "reason": "matched" if matched else "below_threshold",
+            "reason": reason,
+            "runner_up_score": (
+                round(runner_up_score, 4) if runner_up_score is not None else None
+            ),
+            "score_margin": round(margin, 4) if margin is not None else None,
         }
 
     # ── Service interface ────────────────────────────────────────
@@ -267,6 +292,12 @@ class SpeakerSherpaProvider(BaseProvider):
         """Cosine similarity between two embeddings."""
         left = np.asarray(a, dtype=np.float32).reshape(-1)
         right = np.asarray(b, dtype=np.float32).reshape(-1)
+        if (
+            left.shape != right.shape
+            or not np.isfinite(left).all()
+            or not np.isfinite(right).all()
+        ):
+            return -1.0
         left_norm = float(np.linalg.norm(left))
         right_norm = float(np.linalg.norm(right))
         if left_norm == 0.0 or right_norm == 0.0:
@@ -295,6 +326,8 @@ class SpeakerSherpaProvider(BaseProvider):
 
         if waveform.size == 0:
             return None, "empty_audio"
+        if not np.isfinite(waveform).all() or sample_rate <= 0:
+            return None, "invalid_audio"
 
         rate = int(sample_rate) if sample_rate else 16000
         if rate != 16000:
@@ -307,17 +340,20 @@ class SpeakerSherpaProvider(BaseProvider):
         if waveform.size < self._min_samples:
             return None, "audio_too_short"
 
-        stream = self._extractor.create_stream()
-        stream.accept_waveform(sample_rate=16000, waveform=waveform)
-        stream.input_finished()
-
-        if not self._extractor.is_ready(stream):
-            return None, "extractor_not_ready"
-
         try:
-            return (
-                np.asarray(self._extractor.compute(stream), dtype=np.float32),
-                "ok",
-            )
+            stream = self._extractor.create_stream()
+            stream.accept_waveform(sample_rate=16000, waveform=waveform)
+            stream.input_finished()
+            if not self._extractor.is_ready(stream):
+                return None, "extractor_not_ready"
+            embedding = np.asarray(
+                self._extractor.compute(stream), dtype=np.float32,
+            ).reshape(-1)
+            if (
+                not embedding.size or not np.isfinite(embedding).all()
+                or np.linalg.norm(embedding) == 0
+            ):
+                return None, "invalid_embedding"
+            return embedding, "ok"
         except Exception:
             return None, "compute_failed"

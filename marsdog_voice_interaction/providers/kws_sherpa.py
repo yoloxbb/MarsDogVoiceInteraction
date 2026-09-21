@@ -68,6 +68,11 @@ class KWSSherpaProvider(BaseProvider):
         self._events: deque[dict[str, Any]] = deque()
         self._event_lock = threading.Lock()
         self._seen_actions: set[str] = set()
+        # Per-utterance counters.  They exist so the keywords_threshold can be
+        # tuned from field logs: a threshold that is too high shows up as many
+        # decode steps with zero detections.
+        self._utterance_decodes = 0
+        self._utterance_hits = 0
 
     def start(self) -> None:
         try:
@@ -104,10 +109,11 @@ class KWSSherpaProvider(BaseProvider):
             self.available = True
             logger.info(
                 "KWSSherpaProvider started — model=%s keywords=%s "
-                "threshold=%.2f",
+                "threshold=%.2f keyword_count=%d",
                 self._encoder,
                 self._keywords_file,
                 self._keywords_threshold,
+                self._count_keywords(),
             )
         except FileNotFoundError as exc:
             self.available = False
@@ -130,6 +136,20 @@ class KWSSherpaProvider(BaseProvider):
         self.available = False
         logger.info("KWSSherpaProvider stopped")
 
+    def _count_keywords(self) -> int:
+        """Number of non-comment keyword lines actually handed to sherpa-onnx."""
+
+        try:
+            lines = Path(self._keywords_file).read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except OSError:
+            return 0
+        return sum(
+            1 for line in lines
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+
     def start_utterance(self) -> None:
         """Start a fresh KWS stream for an upcoming VAD capture."""
         if not self.available or self._spotter is None:
@@ -137,6 +157,8 @@ class KWSSherpaProvider(BaseProvider):
         with self._stream_lock:
             self._stream = self._spotter.create_stream()
             self._seen_actions.clear()
+            self._utterance_decodes = 0
+            self._utterance_hits = 0
         with self._event_lock:
             self._events.clear()
 
@@ -144,6 +166,20 @@ class KWSSherpaProvider(BaseProvider):
         """Discard the current stream after all captured chunks were consumed."""
         with self._stream_lock:
             self._stream = None
+            decodes = self._utterance_decodes
+            hits = self._utterance_hits
+            self._utterance_decodes = 0
+            self._utterance_hits = 0
+        if decodes:
+            # Zero hits after many decode steps is the fingerprint of a
+            # keywords_threshold that is too high for this room/microphone.
+            logger.info(
+                "KWS utterance summary: decode_steps=%d detections=%d "
+                "threshold=%.2f",
+                decodes,
+                hits,
+                self._keywords_threshold,
+            )
 
     def accept_waveform(
         self,
@@ -164,10 +200,12 @@ class KWSSherpaProvider(BaseProvider):
                     return
                 stream.accept_waveform(int(sample_rate), waveform)
                 while self._spotter.is_ready(stream):
+                    self._utterance_decodes += 1
                     self._spotter.decode_stream(stream)
                     keyword = str(self._spotter.get_result(stream)).strip()
                     if not keyword:
                         continue
+                    self._utterance_hits += 1
                     self._spotter.reset_stream(stream)
                     self._queue_keyword(keyword)
         except Exception as exc:

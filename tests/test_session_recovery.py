@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
+from pathlib import Path
 import sys
 import threading
+import time
 import types
 from types import SimpleNamespace
 from typing import Any
@@ -64,12 +66,18 @@ class _FakeEnrollment:
 
 
 class _FakeAudio:
-    def __init__(self, result: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        result: dict[str, Any] | None = None,
+        *,
+        start_result: bool = True,
+    ) -> None:
         self.result = result
         self.capturing = result is not None
         self.start_count = 0
         self.cancel_count = 0
         self.speech_active = False
+        self.start_result = start_result
 
     def is_capturing(self) -> bool:
         return self.capturing
@@ -81,9 +89,12 @@ class _FakeAudio:
             self.capturing = False
         return result
 
-    def start_capture(self) -> None:
+    def start_capture(self) -> bool:
         self.start_count += 1
+        if not self.start_result:
+            return False
         self.capturing = True
+        return True
 
     def cancel_capture(self) -> bool:
         self.cancel_count += 1
@@ -126,6 +137,12 @@ class _NodeHarness:
     _audio_speech_active = staticmethod(
         VoiceInteractionNode._audio_speech_active
     )
+    _resolve_max_interaction_duration = staticmethod(
+        VoiceInteractionNode._resolve_max_interaction_duration
+    )
+    _refresh_for_asr_result = (
+        VoiceInteractionNode._refresh_for_asr_result
+    )
     _run_task = VoiceInteractionNode._run_task
     _hold_interaction = VoiceInteractionNode._hold_interaction
     _release_interaction_hold = VoiceInteractionNode._release_interaction_hold
@@ -144,12 +161,16 @@ class _NodeHarness:
         self._interaction_lock = threading.RLock()
         self._interaction_active = True
         self._interaction_id = "interaction-test"
+        self._interaction_started_time = 100.0
         self._last_interaction_time = 100.0
         self._last_interaction_activity_reason = "interaction_start"
         self._interaction_holds: dict[str, dict[str, Any]] = {}
         self._idle_timeout = 10.0
+        self._max_interaction_duration = 120.0
+        self._refresh_on_any_speech = False
         self._hold_max_lease_sec = 30.0
         self._latest_audio = None
+        self._utterance_started_monotonic = 0.0
         self.published: list[dict[str, Any]] = []
 
     def _publish(self, event: dict[str, Any]) -> None:
@@ -199,9 +220,11 @@ def test_silence_does_not_refresh_idle_timer_and_wakeup_recovers(
     assert wakeup.poll_count == 1
     assert node._interaction_active
     assert audio.start_count == 2
+    assert node.published[-1]["event_type"] == "EVT_VOICE_WAKEUP"
+    assert not node.published[-1].get("utterance_id")
 
 
-def test_latest_voice_result_refreshes_timeout_before_expiry_check(
+def test_accepted_voice_result_refreshes_timeout_before_expiry_check(
     monkeypatch: Any,
 ) -> None:
     audio = _FakeAudio({"has_voice": True, "audio_samples": [0.1]})
@@ -212,6 +235,7 @@ def test_latest_voice_result_refreshes_timeout_before_expiry_check(
         result: dict[str, Any], _utterance_id: str | None = None,
     ) -> bool:
         processed.append(result)
+        node._refresh_interaction_activity(reason="accepted_test_utterance")
         return True
 
     node._process_speech = process_valid  # type: ignore[method-assign]
@@ -221,13 +245,105 @@ def test_latest_voice_result_refreshes_timeout_before_expiry_check(
 
     assert processed == [{"has_voice": True, "audio_samples": [0.1]}]
     assert node._last_interaction_time == 111.0
-    assert node._last_interaction_activity_reason == "vad_voice"
+    assert node._last_interaction_activity_reason == "accepted_test_utterance"
     assert node._interaction_active
     assert not node.published
     assert audio.start_count == 1
 
 
-def test_empty_asr_refreshes_idle_timeout_after_vad_voice(
+def test_provider_utterance_id_is_not_relabelled_by_the_tracker(
+    monkeypatch: Any,
+) -> None:
+    """A provider that reports its own ID wins over the node's tracker.
+
+    On 2026-09-20 14:33 a wakeup arrived mid-capture; the new start was
+    refused while the previous worker kept recording. Relabelling that
+    audio with the refused utterance's ID misattributed it in traces,
+    debug audio and downstream events.
+    """
+    audio = _FakeAudio(
+        {
+            "has_voice": True,
+            "audio_samples": [0.1],
+            "utterance_id": "worker-utterance",
+        }
+    )
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._command_tracker.begin("refused-utterance")
+    seen: list[str | None] = []
+
+    def process_valid(
+        _result: dict[str, Any], utterance_id: str | None = None,
+    ) -> bool:
+        seen.append(utterance_id)
+        return True
+
+    node._process_speech = process_valid  # type: ignore[method-assign]
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+
+    node._poll()
+
+    assert seen == ["worker-utterance"]
+    assert node._latest_audio is not None
+    assert node._latest_audio["utterance_id"] == "worker-utterance"
+
+
+def test_refused_capture_start_drops_the_new_utterance_id(
+    monkeypatch: Any,
+) -> None:
+    """A refused start must not leave its ID claiming the device."""
+    audio = _FakeAudio(start_result=False)
+    wakeup = _FakeWakeup()
+    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1"})
+    node = _NodeHarness(audio, wakeup)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+
+    node._poll()
+
+    assert audio.start_count == 1
+    assert node._command_tracker.utterance_id == ""
+    assert node._utterance_started_monotonic == 0.0
+
+
+def test_wakeup_during_capture_cancels_the_stale_worker_first(
+    monkeypatch: Any,
+) -> None:
+    """A wakeup mid-capture supersedes the utterance already recording.
+
+    start_capture() refuses while the old worker still holds the device,
+    so the node must cancel it first — otherwise the stale audio (the
+    wake word included) is later processed as the new utterance.
+    """
+    audio = _FakeAudio()
+    audio.capturing = True
+    wakeup = _FakeWakeup()
+    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1"})
+    node = _NodeHarness(audio, wakeup)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+
+    node._poll()
+
+    assert audio.cancel_count == 1
+    assert audio.start_count == 1
+    assert node.published[-1]["event_type"] == "EVT_VOICE_WAKEUP"
+
+
+def test_wakeup_without_an_active_capture_does_not_cancel(
+    monkeypatch: Any,
+) -> None:
+    audio = _FakeAudio()
+    wakeup = _FakeWakeup()
+    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1"})
+    node = _NodeHarness(audio, wakeup)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+
+    node._poll()
+
+    assert audio.cancel_count == 0
+    assert audio.start_count == 1
+
+
+def test_vad_voice_with_empty_asr_does_not_refresh_idle_timeout(
     monkeypatch: Any,
 ) -> None:
     audio = _FakeAudio({"has_voice": True, "audio_samples": [0.1]})
@@ -237,8 +353,28 @@ def test_empty_asr_refreshes_idle_timeout_after_vad_voice(
 
     node._poll()
 
+    assert node._last_interaction_time == 100.0
+    assert node._last_interaction_activity_reason == "interaction_start"
+    assert not node._interaction_active
+    assert node.published[-1]["state_reason"] == "interaction_timeout"
+    assert audio.start_count == 0
+
+
+def test_refresh_on_any_speech_keeps_session_alive_without_semantic_result(
+    monkeypatch: Any,
+) -> None:
+    """Test mode: VAD speech refreshes the session even with no ASR result."""
+
+    audio = _FakeAudio({"has_voice": True, "audio_samples": [0.1]})
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._refresh_on_any_speech = True
+    node._process_speech = lambda *_args: False  # type: ignore[method-assign]
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 111.0)
+
+    node._poll()
+
     assert node._last_interaction_time == 111.0
-    assert node._last_interaction_activity_reason == "vad_voice"
+    assert node._last_interaction_activity_reason == "vad_speech"
     assert node._interaction_active
     assert not node.published
     assert audio.start_count == 1
@@ -256,6 +392,57 @@ def test_active_speech_is_not_cut_off_by_idle_timeout(monkeypatch: Any) -> None:
     assert node._interaction_active
     assert audio.cancel_count == 0
     assert not node.published
+
+
+def test_absolute_session_deadline_cannot_be_extended_by_activity_or_hold(
+    monkeypatch: Any,
+) -> None:
+    audio = _FakeAudio()
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._max_interaction_duration = 20.0
+    node._last_interaction_time = 120.5
+    node._interaction_holds["lease"] = {
+        "reason": "downstream_work",
+        "deadline_monotonic": 130.0,
+    }
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 121.0)
+
+    node._poll()
+
+    assert not node._interaction_active
+    assert node.published[-1]["state_reason"] == "interaction_timeout"
+
+
+def test_zero_max_duration_never_triggers_absolute_timeout() -> None:
+    """Test mode: 0 means no absolute cap, so only the idle rule can end."""
+
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._max_interaction_duration = 0.0
+    node._interaction_started_time = 100.0
+    node._last_interaction_time = 490.0
+
+    assert node._timeout_interaction_id(500.0) == ""
+
+
+def test_max_duration_non_positive_disables_absolute_cap() -> None:
+    resolve = VoiceInteractionNode._resolve_max_interaction_duration
+
+    assert resolve(20.0, 0.0) == 0.0
+    assert resolve(20.0, 0) == 0.0
+    assert resolve(20.0, -5.0) == 0.0
+
+
+def test_max_duration_positive_or_invalid_values_keep_a_cap() -> None:
+    resolve = VoiceInteractionNode._resolve_max_interaction_duration
+
+    assert resolve(20.0, 120.0) == 120.0
+    # A cap below the idle timeout is clamped, so the hard deadline can never
+    # fire before the idle deadline would.
+    assert resolve(20.0, 5.0) == 20.0
+    # A bad value must not silently disable the cap.
+    assert resolve(20.0, "abc") == 120.0
+    assert resolve(20.0, float("nan")) == 120.0
+    assert resolve(20.0, float("inf")) == 120.0
 
 
 def test_stop_listening_cancels_capture_immediately() -> None:
@@ -569,7 +756,7 @@ def test_direct_mock_uses_one_id_until_idle_timeout(monkeypatch: Any) -> None:
     node._poll()
 
     assert interaction_id
-    assert node.published[0]["event_type"] == "EVT_VOICE_CALL_NAME"
+    assert node.published[0]["event_type"] == "EVT_VOICE_WAKEUP"
     assert node.published[0]["interaction_id"] == interaction_id
     assert node.published[1]["interaction_id"] == interaction_id
 
@@ -587,7 +774,7 @@ def test_direct_mock_uses_one_id_until_idle_timeout(monkeypatch: Any) -> None:
 
     assert second_interaction_id
     assert second_interaction_id != interaction_id
-    assert node.published[-1]["event_type"] == "EVT_VOICE_CALL_NAME"
+    assert node.published[-1]["event_type"] == "EVT_VOICE_WAKEUP"
     assert node.published[-1]["interaction_id"] == second_interaction_id
 
 
@@ -600,6 +787,7 @@ def test_direct_mock_non_executable_event_returns_to_attention(
     node = _NodeHarness(_FakeAudio(), _FakeWakeup())
     node._providers = {"mock_event": provider, "audio": _FakeAudio()}
     monkeypatch.setattr(node_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 100.0)
 
     node._poll_direct_mock(provider)
     state = node._run_task("get_interaction_state", {})
@@ -608,6 +796,63 @@ def test_direct_mock_non_executable_event_returns_to_attention(
     assert node.published[-1]["state"] == "attention"
     assert node.published[-1]["previous_state"] == "interaction"
     assert state["state"] == node.published[-1]["state"]
+
+
+def test_mock_neutral_event_refreshes_when_any_speech_enabled(
+    monkeypatch: Any,
+) -> None:
+    """Test mode: mock interaction events refresh even when NEUTRAL."""
+
+    provider = MockEventProvider({"enabled": True})
+    event = provider.build_event("EVT_VOICE_NEUTRAL")
+    provider.poll_event = lambda: event  # type: ignore[method-assign]
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._providers = {"mock_event": provider, "audio": _FakeAudio()}
+    node._refresh_on_any_speech = True
+    monkeypatch.setattr(node_module.time, "time", lambda: 111.0)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 111.0)
+
+    node._poll_direct_mock(provider)
+
+    assert node.published[-1]["event_type"] == "EVT_VOICE_NEUTRAL"
+    assert node._last_interaction_time == 111.0
+    assert node._last_interaction_activity_reason == "mock_event"
+    assert node._interaction_active
+
+
+def test_mock_event_without_asr_does_not_refresh_when_switch_is_off(
+    monkeypatch: Any,
+) -> None:
+    """An event without ASR text does not extend a session."""
+
+    provider = MockEventProvider({"enabled": True})
+    event = provider.build_event("EVT_VOICE_NEUTRAL")
+    event["asr_text"] = ""
+    provider.poll_event = lambda: event  # type: ignore[method-assign]
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._providers = {"mock_event": provider, "audio": _FakeAudio()}
+    node._refresh_on_any_speech = False
+    monkeypatch.setattr(node_module.time, "time", lambda: 111.0)
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 111.0)
+
+    node._poll_direct_mock(provider)
+
+    assert node._last_interaction_time == 100.0
+    assert not node._interaction_active
+    assert node.published[-1]["state_reason"] == "interaction_timeout"
+
+
+def test_mock_neutral_asr_refreshes_without_semantic_acceptance(monkeypatch: Any) -> None:
+    provider = MockEventProvider({"enabled": True})
+    event = provider.build_event("EVT_VOICE_NEUTRAL")
+    event["asr_text"] = "今天随便聊聊"
+    provider.poll_event = lambda: event
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 111.0)
+    node._poll_direct_mock(provider)
+    assert node._last_interaction_time == 111.0
+    assert node._last_interaction_activity_reason == "asr_result"
+    assert node._interaction_active
 
 
 def test_xfyun_wakeup_score_is_normalized_and_raw_score_is_preserved() -> None:
@@ -673,6 +918,200 @@ def test_capture_timeout_log_includes_backend_phase_and_worker_age(
 
     release_worker.set()
     assert provider.cancel_capture(timeout=0.5)
+
+
+def test_capture_timeout_detaches_worker_so_next_capture_starts() -> None:
+    """A worker that outlived its join budget must not refuse the next capture."""
+    release_worker = threading.Event()
+    provider = AudioSherpaProvider({})
+    provider.available = True
+
+    def ignore_cancel(
+        _cancel_event: threading.Event,
+    ) -> dict[str, Any]:
+        release_worker.wait(2.0)
+        return {"has_voice": False, "audio_samples": np.array([], np.float32)}
+
+    provider._stream_vad = ignore_cancel  # type: ignore[method-assign]
+    assert provider.start_capture() is True
+    assert not provider.cancel_capture(timeout=0.01)
+
+    # The stalled worker is detached, not left registered as the active one.
+    assert provider._capture_thread is None
+    assert len(provider._orphan_workers) == 1
+    assert provider.start_capture() is True
+
+    release_worker.set()
+    provider.stop()
+    assert not provider._orphan_workers
+
+
+def test_start_capture_reports_refusal_instead_of_faking_success(
+    caplog: Any,
+) -> None:
+    release_worker = threading.Event()
+    provider = AudioSherpaProvider({})
+    provider.available = True
+
+    def ignore_cancel(
+        _cancel_event: threading.Event,
+    ) -> dict[str, Any]:
+        release_worker.wait(2.0)
+        return {"has_voice": False, "audio_samples": np.array([], np.float32)}
+
+    provider._stream_vad = ignore_cancel  # type: ignore[method-assign]
+    assert provider.start_capture() is True
+    assert provider.start_capture() is False  # already capturing
+
+    # A still-registered worker is a refusal, not a silent no-op: the node
+    # must not trace result="started" while the microphone stays closed.
+    provider._capturing = False
+    assert provider.start_capture() is False
+    assert "VAD capture start ignored" in caplog.text
+
+    release_worker.set()
+    assert provider.cancel_capture(timeout=0.5)
+    provider.stop()
+
+
+def _wait_for_result(
+    provider: AudioSherpaProvider,
+    timeout: float = 2.0,
+) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = provider.poll_result()
+        if result is not None:
+            return result
+        time.sleep(0.01)
+    return None
+
+
+def test_refused_start_does_not_relabel_the_running_capture() -> None:
+    """The 2026-09-20 14:33 case: a wakeup mid-capture, refused start.
+
+    The worker still holding the device belongs to the previous utterance.
+    Its result must carry its own ID, so traces, debug audio and downstream
+    events are not misattributed to the utterance that never started.
+    """
+    release_worker = threading.Event()
+    provider = AudioSherpaProvider({})
+    provider.available = True
+
+    def hold(_cancel_event: threading.Event) -> dict[str, Any]:
+        release_worker.wait(2.0)
+        return {"has_voice": True, "audio_samples": np.array([], np.float32)}
+
+    provider._stream_vad = hold  # type: ignore[method-assign]
+    provider.set_utterance_id("utterance-a")
+    assert provider.start_capture() is True
+
+    # The node advances to a new utterance and is refused, exactly as the
+    # wakeup path did before it learned to cancel the stale worker.
+    provider.set_utterance_id("utterance-b")
+    assert provider.start_capture() is False
+
+    release_worker.set()
+    result = _wait_for_result(provider)
+
+    assert result is not None
+    assert result["utterance_id"] == "utterance-a"
+    provider.stop()
+
+
+def test_dead_orphans_are_pruned_so_the_set_does_not_grow() -> None:
+    """Only stop() drains orphans; exited ones must not pile up meanwhile."""
+    provider = AudioSherpaProvider({})
+    provider.available = True
+
+    finished = threading.Thread(target=lambda: None)
+    finished.start()
+    finished.join()
+
+    release_worker = threading.Event()
+    stalled = threading.Thread(target=release_worker.wait)
+    stalled.start()
+    try:
+        provider._orphan_workers.update({finished, stalled})
+        provider._prune_dead_orphans()
+        assert provider._orphan_workers == {stalled}
+    finally:
+        release_worker.set()
+        stalled.join(timeout=2.0)
+
+
+def test_cancelled_capture_skips_debug_audio(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A cancelled capture must not spend its exit path on debug WAV writes."""
+    wait_started = threading.Event()
+
+    class SilentInputStream:
+        def __init__(self, **_kwargs: Any) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        @property
+        def read_available(self) -> int:
+            wait_started.set()
+            return 0
+
+        def read(self, frames: int) -> tuple[np.ndarray, None]:
+            del frames
+            raise AssertionError("read() must not block when no frames are ready")
+
+        def stop(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeVad:
+        is_speech_detected = False
+
+        def reset(self) -> None:
+            return None
+
+        def empty(self) -> bool:
+            return True
+
+    from marsdog_voice_interaction.providers import audio_sherpa as audio_module
+
+    monkeypatch.setattr(audio_module, "_HAS_AUDIO_CAPTURE", True)
+    monkeypatch.setattr(
+        audio_module.sd,
+        "InputStream",
+        SilentInputStream,
+    )
+    provider = AudioSherpaProvider({
+        "sample_rate": 16000,
+        "audio_debug": {
+            "enabled": True,
+            "output_dir": str(tmp_path),
+            "save_raw_capture": True,
+            "save_vad_segment": True,
+            "save_asr_input": True,
+        },
+    })
+    provider._vad = FakeVad()
+    provider.available = True
+
+    saved: list[str] = []
+    monkeypatch.setattr(
+        provider._audio_debug,
+        "save",
+        lambda _utterance_id, audio_type, *_a, **_k: saved.append(audio_type),
+    )
+
+    assert provider.start_capture() is True
+    assert wait_started.wait(0.5)
+    assert provider.cancel_capture(timeout=0.5)
+
+    assert saved == []
+    assert not list(tmp_path.iterdir())
 
 
 def test_sounddevice_wait_is_cancelled_without_cross_thread_abort(

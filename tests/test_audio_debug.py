@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 import sys
 import time
@@ -292,3 +293,41 @@ def test_asr_compare_reuses_loaded_recognizer_for_all_three_wavs(
         "ASR_INPUT": "samples=3",
     }
     assert "ASR_COMPARE utterance_id=utterance-4" in caplog.text
+
+
+def test_audio_debug_prunes_oldest_utterances_beyond_limit(
+    tmp_path: Path,
+    caplog: Any,
+) -> None:
+    caplog.set_level(logging.INFO)
+    recorder = AudioDebugRecorder({
+        **_debug_config(tmp_path),
+        "max_utterances": 3,
+    })
+    samples = np.ones(4, np.float32)
+
+    for index in range(6):
+        path = recorder.save(f"utterance-{index}", "raw", samples, 16000)
+        assert path is not None
+        # ext4 timestamps are too coarse to order saves within one test, so
+        # give each utterance directory an explicit age.
+        os.utime(path.parent, (1000 + index, 1000 + index))
+
+    remaining = sorted(entry.name for entry in tmp_path.iterdir())
+    assert remaining == ["utterance-3", "utterance-4", "utterance-5"]
+    assert "pruned" in caplog.text
+
+
+def test_audio_debug_keeps_every_utterance_when_limit_is_disabled(
+    tmp_path: Path,
+) -> None:
+    recorder = AudioDebugRecorder({
+        **_debug_config(tmp_path),
+        "max_utterances": 0,
+    })
+    samples = np.ones(4, np.float32)
+
+    for index in range(5):
+        recorder.save(f"utterance-{index}", "raw", samples, 16000)
+
+    assert len(list(tmp_path.iterdir())) == 5

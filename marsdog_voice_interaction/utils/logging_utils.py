@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from marsdog_voice_interaction.utils.time_utils import now_ms
+
 
 _log_initialized: bool = False
 _log_dir: str = "log"
@@ -154,7 +156,7 @@ def log_trace(
     object keeps field names and values unambiguous for test evidence parsers.
     Empty optional values are omitted to keep one event on one concise line.
     """
-    payload = {"record": record}
+    payload = {"record": record, "timestamp_ms": now_ms()}
     payload.update({key: value for key, value in fields.items() if value != ""})
     logger.info(
         "VOICE_TRACE %s",

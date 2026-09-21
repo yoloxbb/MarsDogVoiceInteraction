@@ -166,6 +166,55 @@ _STAY_HOLD_POSITION_MARKERS = (
     "stopmoving",
 )
 
+# A valid RKLLM label is only a semantic candidate.  It may authorize a
+# concrete physical command only when the ASR text independently contains
+# intent-specific evidence.  This blocks protocol-valid but semantically
+# wrong outputs such as ``去睡觉 -> GO|DO``.
+_MODEL_ACTION_EVIDENCE: dict[tuple[str, str], tuple[str, ...]] = {
+    ("GO", "DO"): (
+        "走吧", "走开", "走一走", "去走", "散步", "溜达", "前进", "往前",
+        "出发", "walk", "forward",
+    ),
+    ("COME", "DO"): ("过来", "回来", "来这", "到我这", "comehere", "comeback"),
+    ("FOLLOW", "DO"): ("跟着", "跟我", "跟随", "follow"),
+    ("GO_OUT", "DO"): ("出去", "出门", "外面", "goout"),
+    ("GO_HOME", "DO"): ("回家", "回去", "gohome"),
+    ("APPROACH", "DO"): ("靠近", "近一点", "贴近", "closer", "approach"),
+    ("BACK", "DO"): ("后退", "退后", "往后", "倒退", "backup", "backward"),
+    ("SIT", "DO"): ("坐下", "坐好", "请坐", "坐吧", "蹲下", "sit"),
+    ("LIE", "DO"): ("趴下", "趴好", "躺下", "躺好", "liedown"),
+    ("PLAY_DEAD", "DO"): ("装死", "biu", "playdead"),
+    ("STAND", "DO"): ("站起来", "起立", "起来", "standup"),
+    ("SHAKE", "DO"): ("握手", "抬手", "shakehands"),
+    ("HIGH_FIVE", "DO"): ("击掌", "拍手", "highfive"),
+    ("SPIN", "DO"): ("转圈", "旋转", "转一圈", "spin", "turnaround"),
+    ("ROLL", "DO"): ("翻滚", "打滚", "rollover"),
+    ("DROP", "DO"): ("放下", "松开", "松口", "吐出来", "张嘴", "drop", "letgo"),
+    ("BARK", "STOP"): ("安静", "闭嘴", "别叫", "不要叫", "不许叫", "quiet"),
+    ("TOILET", "DO"): (
+        "去尿", "尿尿", "便便", "去厕所", "如厕", "potty", "toilet",
+    ),
+    ("CLEAN", "DO"): ("擦一下", "擦擦", "清洁", "洗干净", "洗一下", "clean", "wipe"),
+    ("SLEEP", "DO"): ("睡觉", "睡吧", "去睡", "休息", "sleep", "rest"),
+    ("FETCH", "DO"): ("拿", "取", "叼", "捡", "给我", "fetch", "bring"),
+    ("FIND_TOY", "DO"): ("找", "寻找", "find"),
+    ("FIND_TOY", "QUERY"): ("找", "哪里", "哪儿", "在哪", "find", "where"),
+}
+_NEGATED_DO_MARKERS = (
+    "不要",
+    "别",
+    "不用",
+    "不许",
+    "不准",
+    "不想",
+    "不能",
+    "donot",
+    "dont",
+    "donotwant",
+)
+_NON_COMMAND_SUBJECT_PREFIXES = ("我", "他", "她", "它", "爸爸", "妈妈")
+_QUESTION_SUFFIXES = ("吗", "呢", "么", "嘛")
+
 
 def _slot_value(slots: list[dict[str, str]], key: str) -> str:
     for slot in slots:
@@ -219,6 +268,41 @@ def _model_command_route(
                 EVT_VOICE_COMMAND_FETCH,
             )
     return None
+
+
+def _model_action_evidence(
+    intent: str,
+    control: str,
+    *,
+    asr_text: str,
+    object_name: str = "",
+) -> tuple[bool, str]:
+    """Require text evidence before an RKLLM label can execute an action."""
+
+    route = _model_command_route(intent, control, object_name, asr_text)
+    if route is None:
+        return False, "not_specific_allowlist"
+    normalized_text = _ROUTE_TEXT_SEPARATORS.sub(
+        "", str(asr_text)
+    ).lower()
+    if not normalized_text:
+        return False, "empty_asr_text"
+    if control == "DO" and normalized_text.startswith(
+        _NON_COMMAND_SUBJECT_PREFIXES
+    ):
+        return False, "statement_subject_prefix"
+    if control == "DO" and normalized_text.endswith(_QUESTION_SUFFIXES):
+        return False, "question_text"
+    if control == "DO" and intent != "STAY" and any(
+        marker in normalized_text for marker in _NEGATED_DO_MARKERS
+    ):
+        return False, "negated_action_text"
+    if intent == "STAY":
+        return True, "stay_text_resolved"
+    markers = _MODEL_ACTION_EVIDENCE.get((intent, control), ())
+    if any(marker in normalized_text for marker in markers):
+        return True, "intent_text_evidence"
+    return False, "missing_intent_text_evidence"
 
 
 def derive_intent_routes(
@@ -287,12 +371,30 @@ def route_classification_events(
     )
     events: list[dict[str, Any]] = []
     object_name = _slot_value(base["slots"], "object_name")
-    command_route = _model_command_route(
+    potential_command_route = _model_command_route(
         intent,
         control,
         object_name,
         asr_text,
     )
+    command_route = potential_command_route
+    if source == "rkllm" and potential_command_route is not None:
+        gate_allowed, gate_reason = _model_action_evidence(
+            intent,
+            control,
+            asr_text=asr_text,
+            object_name=object_name,
+        )
+        base["slots"] = [
+            *base["slots"],
+            {
+                "key": "model_action_gate",
+                "value": "accepted" if gate_allowed else "rejected",
+            },
+            {"key": "model_action_gate_reason", "value": gate_reason},
+        ]
+        if not gate_allowed:
+            command_route = None
     for event_type, derived_axis in derive_intent_routes(
         social,
         intent,
@@ -300,6 +402,8 @@ def route_classification_events(
         object_name=object_name,
         asr_text=asr_text,
     ):
+        if derived_axis == "specific_command" and command_route is None:
+            continue
         event = dict(base)
         event["event_type"] = event_type
         event["slots"] = [
@@ -320,7 +424,7 @@ def route_classification_events(
                     {"key": "command_key", "value": command_key},
                     {
                         "key": "model_dispatch_policy",
-                        "value": "explicit_allowlist",
+                        "value": "allowlist_and_text_evidence",
                     },
                 ],
             })

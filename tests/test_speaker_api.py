@@ -84,6 +84,15 @@ class _Extractor:
         return [float(np.mean(np.abs(stream.waveform))), 1.0]
 
 
+class _SequenceExtractor(_Extractor):
+    def __init__(self, embeddings: list[list[float]]) -> None:
+        self._embeddings = list(embeddings)
+
+    def compute(self, stream: _Stream) -> list[float]:
+        del stream
+        return self._embeddings.pop(0)
+
+
 class _SpeakerProvider:
     def __init__(self) -> None:
         self.templates: dict[str, list[np.ndarray]] = {}
@@ -199,6 +208,88 @@ def test_uploaded_wav_without_vad_speech_is_rejected() -> None:
         _vad(_Detector(length=0)).trim_wav(_wav())
 
 
+def test_padding_does_not_count_as_effective_speech() -> None:
+    vad = UploadedAudioVAD(
+        {"sample_rate": 16000, "pre_roll_sec": 0.3,
+         "upload_post_roll_sec": 0.2, "upload_min_speech_sec": 0.5},
+        detector=_Detector(length=4000),
+    )
+    with pytest.raises(ValueError, match="有效语音过短"):
+        vad.trim_wav(_wav())
+
+
+def test_upload_preserves_unpadded_speech_duration(isolated_speaker_storage: Path) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+    vad = UploadedAudioVAD(
+        {"sample_rate": 16000, "pre_roll_sec": 0.3, "upload_post_roll_sec": 0.2},
+        detector=_Detector(length=8000),
+    )
+    result = manager.enroll_speaker_from_audio("owner", _wav(), vad=vad)
+    assert result["ok"]
+    assert result["speech_duration_ms"] == 500
+    samples, rate = decode_pcm16_wav(Path(result["audio_path"]).read_bytes())
+    assert len(samples) / rate == 1.0
+
+
+def test_live_enrollment_cannot_bypass_cross_identity_check(isolated_speaker_storage: Path) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+    assert manager.enroll_speaker_from_audio("owner", _wav())["ok"]
+    assert manager.start_speaker("family_member_1", 1)["ok"]
+    samples, rate = decode_pcm16_wav(_wav())
+    result = manager.process_speaker_audio(samples, rate)
+    assert result["code"] == "speaker_identity_conflict"
+    assert manager.speaker_session.shots_collected == 0
+    assert not (isolated_speaker_storage / "speakers/family_member_1").exists()
+
+
+def test_live_enrollment_appends_matching_audio_and_embedding(isolated_speaker_storage: Path) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+    first = manager.enroll_speaker_from_audio("owner", _wav())
+    original_wav = Path(first["audio_path"]).read_bytes()
+    original_embedding = Path(first["embedding_path"]).read_bytes()
+    assert manager.start_speaker("owner", 1)["ok"]
+    samples, rate = decode_pcm16_wav(_wav(amplitude=0.3))
+    result = manager.process_speaker_audio(samples, rate, vad=_vad())
+    assert result["ok"] and result["done"]
+    assert result["sample_ids"] == [2]
+    assert Path(first["audio_path"]).read_bytes() == original_wav
+    assert Path(first["embedding_path"]).read_bytes() == original_embedding
+    new_sample = result["samples"][0]
+    stored, rate = decode_pcm16_wav(Path(new_sample["audio_path"]).read_bytes())
+    expected = manager._extract_embedding(stored, rate)
+    np.testing.assert_allclose(np.load(new_sample["embedding_path"]), expected, atol=1e-4)
+
+
+def test_live_enrollment_respects_remaining_capacity(isolated_speaker_storage: Path) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+    assert manager.enroll_speaker_batch_from_audio("owner", [_wav()] * 4)["ok"]
+    assert manager.start_speaker("owner", 2)["code"] == "speaker_sample_limit_reached"
+
+
+def test_inconsistent_same_identity_batch_leaves_no_samples(isolated_speaker_storage: Path) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_SequenceExtractor([[1., 0.], [0., 1.]]))
+    result = manager.enroll_speaker_batch_from_audio("owner", [_wav(), _wav()])
+    assert result["code"] == "speaker_sample_inconsistent"
+    assert result["failed_file_index"] == 2
+    assert not (isolated_speaker_storage / "speakers/owner").exists()
+
+
+def test_inconsistent_replacement_preserves_sample(isolated_speaker_storage: Path) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_SequenceExtractor([[1., 0.], [1., 0.], [0., 1.]]))
+    added = manager.enroll_speaker_batch_from_audio("owner", [_wav(), _wav()])
+    target = Path(added["samples"][0]["embedding_path"])
+    before = target.read_bytes()
+    result = manager.replace_speaker_sample("owner", 1, _wav())
+    assert result["code"] == "speaker_sample_inconsistent"
+    assert target.read_bytes() == before
+
+
 def test_truncated_or_non_wav_audio_is_rejected_before_storage(
     isolated_speaker_storage: Path,
 ) -> None:
@@ -248,10 +339,107 @@ def test_upload_appends_audio_and_embedding_under_fixed_identity(
     assert len(provider.templates["owner"]) == 2
 
 
-def test_storage_exposes_exactly_five_identity_slots_and_sample_delete_releases_one(
+def test_upload_normalizes_48khz_audio_to_mono_pcm16_16khz(
     isolated_speaker_storage: Path,
 ) -> None:
     manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(_Extractor())
+
+    result = manager.enroll_speaker_from_audio(
+        "owner",
+        _wav(sample_rate=48000),
+        vad=_vad(),
+    )
+    stored, stored_rate = decode_pcm16_wav(
+        (
+            isolated_speaker_storage / "speakers" / "owner" / "001.wav"
+        ).read_bytes()
+    )
+
+    assert result["ok"] is True
+    assert result["source_sample_rate"] == 48000
+    assert result["stored_sample_rate"] == 16000
+    assert result["stored_channels"] == 1
+    assert result["stored_sample_width_bits"] == 16
+    assert stored_rate == 16000
+    assert stored.dtype == np.float32
+
+
+def test_cross_identity_high_similarity_is_rejected_but_same_identity_is_allowed(
+    isolated_speaker_storage: Path,
+) -> None:
+    manager = SpeakerEnrollmentManager(
+        cross_identity_similarity_threshold=0.8,
+    )
+    manager.set_speaker_extractor(
+        _SequenceExtractor([[1.0, 0.0], [0.99, 0.01], [1.0, 0.0]])
+    )
+
+    owner = manager.enroll_speaker_from_audio("owner", _wav(), vad=_vad())
+    conflict = manager.enroll_speaker_from_audio(
+        "family_member_1",
+        _wav(),
+        vad=_vad(),
+    )
+    same_identity = manager.enroll_speaker_from_audio(
+        "owner",
+        _wav(),
+        vad=_vad(),
+    )
+
+    assert owner["ok"] is True
+    assert conflict["status"] == 409
+    assert conflict["code"] == "speaker_identity_conflict"
+    assert conflict["conflicting_speaker"] == "owner"
+    assert conflict["conflicting_sample_id"] == 1
+    assert conflict["similarity"] >= conflict["similarity_threshold"]
+    assert same_identity["ok"] is True
+    assert same_identity["shots"] == 2
+    assert not (
+        isolated_speaker_storage / "speakers" / "family_member_1"
+    ).exists()
+
+
+def test_batch_upload_is_validation_atomic_and_assigns_stable_ids(
+    isolated_speaker_storage: Path,
+) -> None:
+    manager = SpeakerEnrollmentManager()
+    manager.set_speaker_extractor(
+        _SequenceExtractor([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+    )
+
+    rejected = manager.enroll_speaker_batch_from_audio(
+        "owner",
+        [_wav(), b"RIFF-invalid-wav"],
+        vad=_vad(),
+    )
+
+    assert rejected["ok"] is False
+    assert rejected["failed_file_index"] == 2
+    assert not (isolated_speaker_storage / "speakers" / "owner").exists()
+
+    accepted = manager.enroll_speaker_batch_from_audio(
+        "owner",
+        [_wav(), _wav()],
+        vad=_vad(),
+    )
+
+    assert accepted["ok"] is True
+    assert accepted["added_count"] == 2
+    assert accepted["sample_ids"] == [1, 2]
+    assert accepted["shots"] == 2
+    assert [item["stored_sample_rate"] for item in accepted["samples"]] == [
+        16000,
+        16000,
+    ]
+
+
+def test_storage_exposes_exactly_five_identity_slots_and_sample_delete_releases_one(
+    isolated_speaker_storage: Path,
+) -> None:
+    manager = SpeakerEnrollmentManager(
+        cross_identity_similarity_threshold=None,
+    )
     manager.set_speaker_extractor(_Extractor())
 
     for identity in ALLOWED_SPEAKER_IDENTITIES:
@@ -465,6 +653,33 @@ def test_deleting_last_sample_releases_identity_and_runtime_index(
     assert manager.list_speaker_records()["count"] == 0
 
 
+def test_delete_one_identity_and_delete_all_fixed_identities(
+    isolated_speaker_storage: Path,
+) -> None:
+    manager = SpeakerEnrollmentManager(
+        cross_identity_similarity_threshold=None,
+    )
+    manager.set_speaker_extractor(_Extractor())
+    manager.enroll_speaker_from_audio("owner", _wav(), vad=_vad())
+    manager.enroll_speaker_from_audio(
+        "family_member_1",
+        _wav(),
+        vad=_vad(),
+    )
+
+    owner_deleted = manager.delete_speaker("owner")
+    all_deleted = manager.delete_all_speakers()
+
+    assert owner_deleted["ok"] is True
+    assert owner_deleted["deleted_sample_ids"] == [1]
+    assert owner_deleted["deleted_count"] == 1
+    assert all_deleted["deleted_speakers"] == ["family_member_1"]
+    assert all_deleted["deleted_speaker_count"] == 1
+    assert all_deleted["deleted_sample_count"] == 1
+    assert manager.list_speaker_records()["speakers"] == []
+    assert list((isolated_speaker_storage / "speakers").iterdir()) == []
+
+
 def test_live_enrollment_required_shots_cannot_exceed_five(
     isolated_speaker_storage: Path,
 ) -> None:
@@ -589,7 +804,7 @@ def test_fastapi_maps_five_person_limit_to_http_409() -> None:
     response = _post(server, name="family_member_4")
 
     assert response.status_code == 409
-    assert "上限 5 人" in response.json()["detail"]
+    assert "上限 5 人" in response.json()["detail"]["error"]
 
 
 def test_fastapi_maps_five_sample_limit_to_http_409() -> None:
@@ -606,7 +821,7 @@ def test_fastapi_maps_five_sample_limit_to_http_409() -> None:
     response = _post(server, name="owner")
 
     assert response.status_code == 409
-    assert "上限 5 个" in response.json()["detail"]
+    assert "上限 5 个" in response.json()["detail"]["error"]
 
 
 def test_fastapi_rejects_non_wav_and_accepts_lan_host() -> None:
@@ -651,6 +866,105 @@ def test_fastapi_lists_speakers_and_omits_removed_legacy_routes() -> None:
     assert listed.json()["max_samples_per_speaker"] == 5
     assert "post" not in schema_paths["/api/v1/speakers"]
     assert "/api/v1/speakers/{name}" not in schema_paths
+
+
+def test_fastapi_batch_upload_and_delete_all_routes() -> None:
+    batch_calls: list[tuple[str, list[bytes]]] = []
+    deleted_names: list[str] = []
+    delete_all_calls = 0
+
+    def batch_upload(
+        name: str,
+        payloads: list[bytes],
+    ) -> dict[str, object]:
+        batch_calls.append((name, payloads))
+        return {
+            "ok": True,
+            "name": name,
+            "added_count": len(payloads),
+            "sample_ids": list(range(1, len(payloads) + 1)),
+            "samples": [],
+        }
+
+    def delete_all() -> dict[str, object]:
+        nonlocal delete_all_calls
+        delete_all_calls += 1
+        return {
+            "ok": True,
+            "deleted_speaker_count": 1,
+            "deleted_sample_count": 2,
+        }
+
+    server = SpeakerApiServer(
+        {},
+        lambda name, payload: {"ok": True, "name": name},
+        batch_upload_handler=batch_upload,
+        speaker_delete_handler=lambda name: (
+            deleted_names.append(name)
+            or {"ok": True, "name": name, "deleted_count": 2}
+        ),
+        delete_all_handler=delete_all,
+    )
+    batch = _request(
+        server,
+        "POST",
+        "/api/v1/speakers/owner/samples/batch",
+        files=[
+            ("audios", ("one.wav", _wav(), "audio/wav")),
+            ("audios", ("two.wav", _wav(amplitude=0.3), "audio/wav")),
+        ],
+    )
+    one_deleted = _request(
+        server,
+        "DELETE",
+        "/api/v1/speakers/owner/samples",
+    )
+    not_confirmed = _request(server, "DELETE", "/api/v1/speakers")
+    all_deleted = _request(
+        server,
+        "DELETE",
+        "/api/v1/speakers?confirm=true",
+    )
+
+    assert batch.status_code == 201
+    assert batch.json()["added_count"] == 2
+    assert len(batch_calls) == 1
+    assert batch_calls[0][0] == "owner"
+    assert len(batch_calls[0][1]) == 2
+    assert one_deleted.status_code == 200
+    assert deleted_names == ["owner"]
+    assert not_confirmed.status_code == 400
+    assert not_confirmed.json()["detail"]["code"] == (
+        "delete_all_confirmation_required"
+    )
+    assert all_deleted.status_code == 200
+    assert delete_all_calls == 1
+
+
+def test_fastapi_exposes_structured_similarity_conflict() -> None:
+    server = SpeakerApiServer(
+        {},
+        lambda name, payload: {
+            "ok": False,
+            "status": 409,
+            "code": "speaker_identity_conflict",
+            "error": "不能注册到不同身份",
+            "conflicting_speaker": "owner",
+            "similarity": 0.93,
+            "similarity_threshold": 0.75,
+        },
+    )
+
+    response = _post(server, name="family_member_1")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "speaker_identity_conflict",
+        "error": "不能注册到不同身份",
+        "conflicting_speaker": "owner",
+        "similarity": 0.93,
+        "similarity_threshold": 0.75,
+    }
 
 
 def test_fastapi_manages_and_downloads_individual_samples(
