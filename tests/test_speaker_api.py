@@ -203,6 +203,29 @@ def test_uploaded_wav_is_trimmed_to_vad_speech() -> None:
     assert result.segment_count == 1
 
 
+def test_uploaded_wav_vad_analysis_reports_editable_crop() -> None:
+    analysis = _vad().analyze_wav(_wav())
+
+    assert analysis["ok"] is True
+    assert analysis["source_duration_ms"] == 2000.0
+    assert analysis["speech_duration_ms"] == 500.0
+    assert analysis["speech_ranges_ms"] == [
+        {"start_ms": 500.0, "end_ms": 1000.0}
+    ]
+    assert analysis["suggested_crop_ms"] == {
+        "start_ms": 500.0, "end_ms": 1000.0,
+    }
+    assert analysis["valid_for_enrollment"] is True
+
+
+def test_vad_analysis_leaves_speechless_recording_unsavable() -> None:
+    analysis = _vad(_Detector(length=0)).analyze_wav(_wav())
+
+    assert analysis["speech_ranges_ms"] == []
+    assert analysis["suggested_crop_ms"] is None
+    assert analysis["valid_for_enrollment"] is False
+
+
 def test_uploaded_wav_without_vad_speech_is_rejected() -> None:
     with pytest.raises(ValueError, match="未检测到有效语音"):
         _vad(_Detector(length=0)).trim_wav(_wav())
@@ -712,6 +735,53 @@ def test_fastapi_accepts_selected_identity_and_wav() -> None:
     assert response.json()["name"] == "owner"
     assert len(response.json()["request_id"]) == 32
     assert calls == [("owner", _wav())]
+
+
+def test_enrollment_page_and_vad_preview_use_same_service() -> None:
+    uploaded: list[bytes] = []
+    server = SpeakerApiServer(
+        {},
+        lambda name, payload: uploaded.append(payload) or {"ok": True},
+        vad_handler=lambda payload: _vad().analyze_wav(payload),
+    )
+
+    page = _request(server, "GET", "/speaker-enrollment")
+    script = _request(
+        server, "GET", "/speaker-enrollment/assets/app.js"
+    )
+    preview = _request(
+        server, "POST", "/api/v1/recordings/vad",
+        files={"audio": ("recording.wav", _wav(), "audio/wav")},
+    )
+
+    assert page.status_code == 200
+    assert "声纹录制" in page.text
+    assert script.status_code == 200
+    assert "/api/v1/recordings/vad" in script.text
+    assert preview.status_code == 200
+    assert preview.json()["valid_for_enrollment"] is True
+    assert uploaded == []
+
+
+def test_vad_preview_rejects_invalid_wav_without_enrollment() -> None:
+    def analyze(payload: bytes) -> dict[str, object]:
+        try:
+            return _vad().analyze_wav(payload)
+        except ValueError as exc:
+            return {"ok": False, "status": 422, "error": str(exc)}
+
+    server = SpeakerApiServer({}, lambda *_: {"ok": True}, vad_handler=analyze)
+    invalid = _request(
+        server, "POST", "/api/v1/recordings/vad",
+        files={"audio": ("recording.wav", b"invalid", "audio/wav")},
+    )
+    unsupported = _request(
+        server, "POST", "/api/v1/recordings/vad",
+        files={"audio": ("recording.webm", b"invalid", "audio/webm")},
+    )
+
+    assert invalid.status_code == 422
+    assert unsupported.status_code == 415
 
 
 def test_fastapi_rejects_free_form_name_and_documents_enum() -> None:

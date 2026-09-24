@@ -94,6 +94,11 @@ class AudioSherpaProvider(BaseProvider):
         self._read_timeout_sec = float(config.get("read_timeout_sec", 2.0))
         self._continuous_capture = bool(config.get("continuous_capture", False))
         self._capture_buffer_sec = float(config.get("capture_buffer_sec", 6.0))
+        self._wake_history_sec = float(config.get("wake_history_sec", 0.0))
+        if not math.isfinite(self._wake_history_sec) or self._wake_history_sec < 0:
+            raise ValueError("wake_history_sec must be finite and non-negative")
+        if self._wake_history_sec and not self._continuous_capture:
+            raise ValueError("wake_history_sec requires continuous_capture")
         for value in (self._max_duration_sec, self._max_speech_duration_sec,
                       self._read_timeout_sec, self._capture_buffer_sec):
             if not math.isfinite(value) or value <= 0:
@@ -165,6 +170,8 @@ class AudioSherpaProvider(BaseProvider):
                 )
 
             self.available = True
+            if self._wake_history_sec:
+                self._ensure_buffered_capture()
             logger.info(
                 "AudioSherpaProvider (streaming VAD) started — "
                 "model=%s sr=%d chunk=%dms threshold=%.2f "
@@ -196,7 +203,7 @@ class AudioSherpaProvider(BaseProvider):
             logger.warning("AudioSherpaProvider unavailable: %s", exc, exc_info=True)
 
     def stop(self) -> None:
-        self.cancel_capture()
+        self.cancel_capture(preserve_microphone=False)
         self._drain_orphan_workers()
         # Set _vad to None after capture cancellation so the worker cannot use
         # a released detector.
@@ -258,7 +265,9 @@ class AudioSherpaProvider(BaseProvider):
         if self._continuous_capture and self._orphan_workers:
             logger.error("Capture refused: a cancelled worker still owns the VAD")
             return False
-        if self._buffered_capture is not None and self._buffered_capture.stopping:
+        if self._buffered_capture is not None and getattr(
+            self._buffered_capture, "stopping", False
+        ):
             if not self._buffered_capture.close(timeout=0):
                 return False
             self._buffered_capture = None
@@ -276,6 +285,9 @@ class AudioSherpaProvider(BaseProvider):
                 self._active_utterance_id,
             )
             return False
+
+        if self._buffered_capture is not None and not self._buffered_capture.delivery_active:
+            self._buffered_capture.start_delivery(time.monotonic())
 
         cancel_event = threading.Event()
         with self._capture_lock:
@@ -304,7 +316,8 @@ class AudioSherpaProvider(BaseProvider):
         )
         return True
 
-    def cancel_capture(self, timeout: float = 2.0) -> bool:
+    def cancel_capture(self, timeout: float = 2.0, *,
+                       preserve_microphone: bool = False) -> bool:
         """Cancel an active capture and discard any pending result.
 
         Returns:
@@ -392,10 +405,13 @@ class AudioSherpaProvider(BaseProvider):
                 )
         self._prune_dead_orphans()
         if self._buffered_capture is not None:
-            microphone_stopped = self._buffered_capture.close(timeout=timeout)
-            if microphone_stopped:
-                self._buffered_capture = None
-            worker_stopped = worker_stopped and microphone_stopped
+            if preserve_microphone and worker_stopped and self._wake_history_sec:
+                self._buffered_capture.stop_delivery()
+            else:
+                microphone_stopped = self._buffered_capture.close(timeout=timeout)
+                if microphone_stopped:
+                    self._buffered_capture = None
+                worker_stopped = worker_stopped and microphone_stopped
         if worker_stopped:
             self._resync_required = False
         return worker_stopped
@@ -444,6 +460,38 @@ class AudioSherpaProvider(BaseProvider):
         """Return whether VAD currently sees an unfinished speech segment."""
         with self._capture_lock:
             return self._speech_active
+
+    def _ensure_buffered_capture(self) -> BufferedAudioCapture:
+        if self._buffered_capture is not None and getattr(
+            self._buffered_capture, "stopping", False
+        ):
+            if not self._buffered_capture.close(timeout=0):
+                raise RuntimeError("previous microphone capture is still stopping")
+            self._buffered_capture = None
+        if self._buffered_capture is None:
+            self._buffered_capture = BufferedAudioCapture(
+                self._sample_rate, self._device, sd if _HAS_AUDIO_CAPTURE else None,
+                self._capture_buffer_sec, self._read_timeout_sec,
+                history_sec=self._wake_history_sec,
+            )
+            self._buffered_capture.start()
+        return self._buffered_capture
+
+    def wake_audio_snapshot(self, end_monotonic: float,
+                            duration_sec: float) -> dict[str, Any]:
+        """Return wake-word audio from the single shared microphone stream."""
+        if not self.available or not self._wake_history_sec:
+            return {"audio_samples": np.array([], dtype=np.float32),
+                    "sample_rate": self._sample_rate, "has_voice": False}
+        capture = self._ensure_buffered_capture()
+        samples = capture.snapshot(end_monotonic, min(duration_sec, self._wake_history_sec))
+        return {"audio_samples": samples, "sample_rate": self._sample_rate,
+                "has_voice": bool(samples.size)}
+
+    def prepare_for_wakeup(self, received_monotonic: float) -> None:
+        """Drop the wake word from the command stream before the next VAD turn."""
+        if self._wake_history_sec and self.available:
+            self._ensure_buffered_capture().start_delivery(received_monotonic)
 
     def _refresh_speech_active(self) -> None:
         detected = getattr(self._vad, "is_speech_detected", False)
@@ -1171,13 +1219,7 @@ class AudioSherpaProvider(BaseProvider):
 
     def _stream_vad_buffered(self, cancel_event: threading.Event) -> dict[str, Any]:
         """Consume one utterance while the microphone keeps buffering the next."""
-        if self._buffered_capture is None:
-            self._buffered_capture = BufferedAudioCapture(
-                self._sample_rate, self._device, sd if _HAS_AUDIO_CAPTURE else None,
-                self._capture_buffer_sec, self._read_timeout_sec,
-            )
-            self._buffered_capture.start()
-        capture = self._buffered_capture
+        capture = self._ensure_buffered_capture()
         self._vad.reset()
         with self._capture_lock:
             utterance_id = self._active_utterance_id

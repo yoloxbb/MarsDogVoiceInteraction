@@ -29,8 +29,8 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
   KWS/ASR 仲裁，避免长句中包含短关键词时提前误触发动作。
 - 使用当前配置的 SenseVoice INT8 ONNX 完成整句 ASR，优先精确匹配
   完整产品词库。当前目录覆盖
-  116 条源数据（其中 19 组为核心指令），归并为 81 个路由组、155 条标准
-  中文词/句；每条另有 10 个受控扩展，再加 70 条人工登记的变体，共 1775 个精确匹配入口。词库和 KWS 命中后
+  116 条源数据及新增词条“自己去玩吧”（其中 19 组为核心指令），共 82 个路由组、156 条标准
+  中文词/句；每条另有 10 个受控扩展，再加 70 条人工登记的变体，共 1786 个精确匹配入口。词库和 KWS 命中后
   只发布目录指定的 `EVT_VOICE_*` 特殊事件，不额外发布
   `EVT_VOICE_COMMAND_KNOWN`。所有目录命中均跳过意图模型。
 - 目录外文本使用 Model Intent `SOCIAL|INTENT|CONTROL` 三轴协议。模型结果先发布业务
@@ -68,8 +68,13 @@ KWS 与 ASR 采用延迟发布、唯一来源仲裁。普通短指令的唯一 K
 
 跨项目交接语义见 [docs/HANDOFF.md](docs/HANDOFF.md)，完整 ROS2 消息字段和
 Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)，测试执行、日志
-字段和报告模板见 [docs/TESTING_LOG_GUIDE.md](docs/TESTING_LOG_GUIDE.md)，词库中
-155 条标准中文词/句、扩展规则与期望事件见
+字段和报告模板见 [docs/TESTING_LOG_GUIDE.md](docs/TESTING_LOG_GUIDE.md)。
+
+“自己去玩吧”发布独立特殊事件 `EVT_VOICE_COMMAND_PLAY_ALONE`，命令 ID 为
+`CMD_PLAY_ALONE`，语义为“去随机位置自己玩”。Voice 设置
+`should_trigger_behavior_tree=true`；实际行为需要下游接入该事件。
+
+156 条标准中文词/句、扩展规则与期望事件见
 [docs/COMMAND_CATALOG_TEST_MATRIX.md](docs/COMMAND_CATALOG_TEST_MATRIX.md)。
 
 ## 运行环境
@@ -170,8 +175,8 @@ uv run marsdog-voice-interaction \
 | `command_lexicon` | 完整产品词库、19 组核心子集及每标准词/句 10 个受控精确匹配扩展 |
 | `speaker_api` | 声纹上传 API 的开关、监听地址、端口和大小限制 |
 | `topics` | ROS2 Topic 和 Service 名称 |
-| `interaction.idle_timeout_sec` | 非空 ASR 后的空闲超时；`<=0` 禁用。正式配置为 `0`，唤醒后持续监听 |
-| `interaction.max_duration_sec` | 单次唤醒会话总时长上限；`<=0` 禁用。正式配置为 `0`，由 `stop_listening` 主动结束 |
+| `interaction.idle_timeout_sec` | 非空 ASR 后的空闲超时；`<=0` 禁用。正式配置为 `20` 秒，静默超时即结束会话 |
+| `interaction.max_duration_sec` | 单次唤醒会话总时长上限；`<=0` 禁用。正式配置为 `0`，由空闲超时或 `stop_listening` 结束 |
 | `interaction.hold_max_lease_sec` | 外部会话保持租约的单次最长秒数 |
 | `interaction.refresh_on_any_speech` | 测试专用：`true` 时 VAD 检测到语音即刷新空闲计时器；生产为 `false` 时要求 ASR 返回非空文本，不要求语义接受。见 `docs/TESTING_LOG_GUIDE.md` 的「测试模式」小节 |
 | `providers.wakeup` | 讯飞串口和唤醒事件类型 |
@@ -247,11 +252,15 @@ ASR，`false` 为额外 `pre_roll_sec` 加 VAD segment；其他 VAD/ASR 参数�
 
 ## 声纹上传 API
 
-正式配置默认启动 FastAPI：`http://127.0.0.1:8091`，交互文档位于
-`http://127.0.0.1:8091/docs`。接口接收 `multipart/form-data`，无需把音频转换成
-Base64：
-
-Swagger `/docs` 当前只提供文件选择和接口调试，不提供浏览器麦克风录音。
+正式配置随语音节点启动 FastAPI。本机打开
+`http://localhost:8091/speaker-enrollment` 可选择主人或家人槽位、用浏览器麦克风录音、
+调用服务端 Silero VAD 获取建议范围、手动调整起止点并试听，最后保存为声纹样本。
+页面和 API 同时启动，不需要单独启动前端。页面最长录制 60 秒；分析接口
+`POST /api/v1/recordings/vad` 只返回语音时间范围，不保存音频。点击保存后仍走原有
+`POST /api/v1/speakers/{name}/samples`，再次执行 VAD、声纹提取和身份冲突校验。
+浏览器需允许麦克风权限；从其他设备打开时应使用 HTTPS 或把服务转发到浏览器本机的
+`localhost`。交互文档在 `http://localhost:8091/docs`。接口接收
+`multipart/form-data`，无需把音频转换成 Base64：
 
 ```bash
 curl -X POST http://127.0.0.1:8091/api/v1/speakers/owner/samples \
@@ -412,7 +421,7 @@ ros2 service call /perception/voice/task \
 
 同一 `hold_token` 重复申请是幂等续租。租约只暂停空闲终止，不暂停录音、KWS
 或 STOP；到达目标后用 `reset_idle_timer=true` 释放，会从释放时重新等待当前配置的
-`idle_timeout_sec`（正式配置为 0，空闲超时已禁用）。
+`idle_timeout_sec`（正式配置为 20 秒）。
 
 ## Mock 联调
 
@@ -596,8 +605,9 @@ MarsDogVoiceInteraction/
 - 非空 ASR 文本刷新会话活动时间，与是否接受语义无关；纯 VAD、空 ASR 和
   缓存中的 KWS 候选不刷新。
 - 会话静默时长使用单调时钟计算，不受 NTP、RTC 或人工调整系统时间影响。
-- 正式配置的空闲超时和总时长上限均为 0，唤醒后永久监听直到 `stop_listening`
-  或节点关闭。若配置正数，总时长上限仍不能被活动或 hold 租约延长。
+- 正式配置的空闲超时为 20 秒：最后一次非空 ASR 后静默超过该时长即结束会话；总时长
+  上限为 0（不设硬上限），也可用 `stop_listening` 主动结束。若配置正数，总时长上限
+  仍不能被活动或 hold 租约延长。
 - 活跃 VAD 采集不能被会话静默超时截断。
 - 新增确定性命令时应同步修改 `command_catalog.yaml`、事件类型、测试、ROS2 契约
   以及下游行为树和 Action 行为映射；Voice 不直接调用动作系统。

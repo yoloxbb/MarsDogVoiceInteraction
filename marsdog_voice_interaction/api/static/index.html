@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MarsDog 声纹录制</title>
+  <link rel="stylesheet" href="/speaker-enrollment/assets/style.css">
+  <script src="/speaker-enrollment/assets/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">MARSDOG · VOICE</p>
+        <h1>声纹录制</h1>
+        <p class="intro">选择身份，录一段自然说话的声音，用 VAD 找到语音，再调整截取范围并保存。</p>
+      </div>
+      <span id="service-status" class="service-status">连接中…</span>
+    </header>
+
+    <section class="panel" aria-labelledby="identity-title">
+      <div class="section-heading">
+        <div><span class="step">01</span><h2 id="identity-title">选择身份</h2></div>
+        <button id="refresh-button" class="text-button" type="button">刷新样本数</button>
+      </div>
+      <label for="speaker-name">注册到</label>
+      <select id="speaker-name">
+        <option value="owner">主人</option>
+        <option value="family_member_1">家人 1</option>
+        <option value="family_member_2">家人 2</option>
+        <option value="family_member_3">家人 3</option>
+        <option value="family_member_4">家人 4</option>
+      </select>
+      <p id="speaker-count" class="muted">正在读取已注册样本…</p>
+    </section>
+
+    <section class="panel" aria-labelledby="record-title">
+      <div class="section-heading"><div><span class="step">02</span><h2 id="record-title">录制声音</h2></div></div>
+      <p class="muted">建议在安静环境下用同一个人的自然语速说话。单段录音最长 60 秒。</p>
+      <label class="option-row" for="raw-capture">
+        <input id="raw-capture" type="checkbox">
+        诊断模式：请求关闭浏览器回声消除、降噪和自动增益（仍由浏览器编码）
+      </label>
+      <div class="record-row">
+        <button id="record-button" class="primary-button" type="button">开始录音</button>
+        <button id="stop-button" class="secondary-button" type="button" disabled>停止录音</button>
+        <span id="record-time" class="timer" aria-live="polite">00:00</span>
+      </div>
+      <p id="record-status" class="muted" role="status">等待录音</p>
+      <p id="capture-details" class="muted" role="status">录制后显示浏览器实际选择的麦克风与处理设置。</p>
+    </section>
+
+    <section id="edit-panel" class="panel" aria-labelledby="edit-title" hidden>
+      <div class="section-heading"><div><span class="step">03</span><h2 id="edit-title">截取与试听</h2></div></div>
+      <p id="vad-summary" class="vad-summary" role="status">正在分析 VAD…</p>
+      <div class="crop-row">
+        <label for="crop-start">起点 <strong id="crop-start-label">0.00 秒</strong></label>
+        <input id="crop-start" type="range" min="0" step="10" value="0">
+      </div>
+      <div class="crop-row">
+        <label for="crop-end">终点 <strong id="crop-end-label">0.00 秒</strong></label>
+        <input id="crop-end" type="range" min="0" step="10" value="0">
+      </div>
+      <p id="crop-duration" class="muted">截取时长：0.00 秒</p>
+      <div class="edit-actions">
+        <button id="suggest-button" class="secondary-button" type="button" disabled>采用 VAD 建议</button>
+        <button id="preview-button" class="secondary-button" type="button">试听所选片段</button>
+        <button id="download-button" class="secondary-button" type="button">下载所选 WAV</button>
+      </div>
+      <audio id="preview-audio" controls preload="none" aria-label="截取片段试听"></audio>
+      <div class="save-row">
+        <button id="save-button" class="primary-button" type="button" disabled>保存为声纹样本</button>
+        <span class="muted">保存时会再次运行 VAD 和声纹身份校验。</span>
+      </div>
+    </section>
+
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+    <footer>录音仅在点击“保存为声纹样本”后提交注册；VAD 分析不落盘。</footer>
+  </main>
+</body>
+</html>

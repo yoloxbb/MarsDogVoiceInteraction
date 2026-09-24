@@ -29,15 +29,18 @@ _TRANSITIONS = {
         Trigger.WAKEUP: State.ATTENTION,
     },
     State.ATTENTION: {
+        Trigger.WAKEUP: State.ATTENTION,
         Trigger.SPEECH_START: State.INTERACTION,
         Trigger.TIMEOUT: State.IDLE,
     },
     State.INTERACTION: {
+        Trigger.WAKEUP: State.ATTENTION,
         Trigger.INTENT_PARSED: State.EXECUTION,
         Trigger.SPEECH_END: State.ATTENTION,
         Trigger.TIMEOUT: State.IDLE,
     },
     State.EXECUTION: {
+        Trigger.WAKEUP: State.ATTENTION,
         Trigger.SPEECH_START: State.INTERACTION,
         Trigger.COMMAND_DONE: State.ATTENTION,
         Trigger.TIMEOUT: State.IDLE,

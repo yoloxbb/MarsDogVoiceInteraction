@@ -7,6 +7,7 @@ from marsdog_voice_interaction.messages.speaker_identity import (
 # Hardware/Mock wake lifecycle event. It is intentionally separate from the
 # Model Intent CALL event and every deterministic catalog command.
 EVT_VOICE_WAKEUP = "EVT_VOICE_WAKEUP"
+EVT_VOICE_WAKE_SPEAKER_RESULT = "EVT_VOICE_WAKE_SPEAKER_RESULT"
 
 # Stable Model Intent business events already consumed by downstream systems.
 EVT_VOICE_CALL_NAME = "EVT_VOICE_CALL_NAME"
@@ -67,6 +68,7 @@ EVT_VOICE_COMMAND_TOILET = "EVT_VOICE_COMMAND_TOILET"
 EVT_VOICE_COMMAND_CLEAN = "EVT_VOICE_COMMAND_CLEAN"
 EVT_VOICE_COMMAND_SLEEP = "EVT_VOICE_COMMAND_SLEEP"
 EVT_VOICE_COMMAND_PLAY = "EVT_VOICE_COMMAND_PLAY"
+EVT_VOICE_COMMAND_PLAY_ALONE = "EVT_VOICE_COMMAND_PLAY_ALONE"
 EVT_VOICE_COMMAND_EAT_CANNED_FOOD = "EVT_VOICE_COMMAND_EAT_CANNED_FOOD"
 EVT_VOICE_COMMAND_GO_GET_IT = "EVT_VOICE_COMMAND_GO_GET_IT"
 

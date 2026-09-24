@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 import threading
 from typing import Any
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -72,9 +73,9 @@ def test_catalog_covers_all_19_core_command_groups(
 
     match = lexicon.match(text)
 
-    assert lexicon.command_count == 81
+    assert lexicon.command_count == 82
     assert lexicon.core_command_count == 19
-    assert lexicon.phrase_count == 155
+    assert lexicon.phrase_count == 156
     assert lexicon.source_row_count == 116
     assert lexicon.covered_source_row_count == 116
     assert match is not None
@@ -97,7 +98,7 @@ def test_catalog_special_events_are_unique_and_share_only_reviewed_actions() -> 
     command_ids = [command["command_id"] for command in commands]
     event_types = [command["event_type"] for command in commands]
 
-    assert len(commands) == 81
+    assert len(commands) == 82
     assert len(command_keys) == len(set(command_keys))
     assert len(command_ids) == len(set(command_ids))
     assert len(event_types) == len(set(event_types))
@@ -221,8 +222,8 @@ def test_phrase_variants_match_without_changing_catalog_counts() -> None:
 
     assert lexicon.variant_phrase_count > 0
     # The reviewed product catalog contract is untouched.
-    assert lexicon.phrase_count == 155
-    assert lexicon.expanded_phrase_count == 1550
+    assert lexicon.phrase_count == 156
+    assert lexicon.expanded_phrase_count == 1560
 
     for text, command_key in [
         ("往后退一点点", "BACK_UP"),
@@ -367,14 +368,14 @@ def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
     assert lexicon.expansion_enabled
     assert lexicon.variants_per_phrase == 10
     assert lexicon.expansion_profile_count == 5
-    assert lexicon.expanded_phrase_count == 1550
+    assert lexicon.expanded_phrase_count == 1560
     # phrase_count/expanded_phrase_count describe the reviewed product catalog
     # only; natural-speech variants are counted separately.
     variant_count = sum(
         len(phrases) for phrases in raw.get("phrase_variants", {}).values()
     )
     assert lexicon.variant_phrase_count == variant_count
-    assert lexicon.total_match_phrase_count == 1705 + variant_count
+    assert lexicon.total_match_phrase_count == 1716 + variant_count
 
     command_profiles = expansion["command_profiles"]
     phrase_profiles = expansion["phrase_profiles"]
@@ -400,7 +401,7 @@ def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
                 assert match.expansion_rule == rule["id"]
                 checked += 1
 
-    assert checked == 1550
+    assert checked == 1560
 
 
 @pytest.mark.parametrize(
@@ -510,7 +511,7 @@ def test_every_configured_phrase_matches_its_declared_command() -> None:
             assert match.event_type == command["event_type"]
             checked += 1
 
-    assert checked == 155
+    assert checked == 156
 
 
 def test_reference_english_phrases_are_metadata_not_runtime_triggers() -> None:
@@ -579,6 +580,7 @@ class _FakeSpeaker:
 
 class _DirectRouteHarness:
     _process_speech = VoiceInteractionNode._process_speech
+    _wakeup_supersedes_utterance = VoiceInteractionNode._wakeup_supersedes_utterance
     _clean_text = staticmethod(VoiceInteractionNode._clean_text)
     _effective_kws_arbitration = (
         VoiceInteractionNode._effective_kws_arbitration
@@ -640,6 +642,7 @@ class _DirectRouteHarness:
 class _KwsRouteHarness:
     _poll_kws_events = VoiceInteractionNode._poll_kws_events
     _process_speech = VoiceInteractionNode._process_speech
+    _wakeup_supersedes_utterance = VoiceInteractionNode._wakeup_supersedes_utterance
     _clean_text = staticmethod(VoiceInteractionNode._clean_text)
     _effective_kws_arbitration = (
         VoiceInteractionNode._effective_kws_arbitration
@@ -713,6 +716,26 @@ class _KwsRouteHarness:
             asr_text=text,
             source="rkllm",
         )
+
+
+def test_hardware_wake_arriving_during_asr_discards_old_command() -> None:
+    node = _DirectRouteHarness("坐下")
+    node._latest_wake_id = "wake-1"
+    wake_events = iter([{"wake_word": "ni2 hao3 wang4 cai2"}])
+    node._providers["wakeup"] = SimpleNamespace(
+        poll_event=lambda: next(wake_events, None)
+    )
+
+    def accept_wake(_event: dict[str, Any], _audio: Any) -> bool:
+        node._latest_wake_id = "wake-2"
+        return True
+
+    node._handle_wakeup = accept_wake
+    assert not node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000}, "utterance-1"
+    )
+    assert node.published == []
+    assert node.activity_reasons == []
 
 
 def test_core_kws_is_cached_without_publishing_before_arbitration() -> None:
@@ -809,6 +832,53 @@ def test_direct_catalog_match_publishes_event_and_skips_intent_model() -> None:
         ]
         for record, fields in node.traces
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_asr_text"),
+    [
+        ("自己去玩吧", "自己去玩吧"),
+        ("自己去玩吧！", "自己去玩吧"),
+        ("小狗，自己去玩吧", "小狗自己去玩吧"),
+    ],
+)
+def test_play_alone_publishes_unique_special_event(
+    text: str, expected_asr_text: str,
+) -> None:
+    node = _DirectRouteHarness(text=text)
+
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000},
+        "utterance-play-alone",
+    )
+
+    assert not node.intent_called
+    events = [event for event in node.published if event.get("intent_source")]
+    assert [event["event_type"] for event in events] == [
+        "EVT_VOICE_COMMAND_PLAY_ALONE",
+    ]
+    event = events[0]
+    assert event["command_id"] == "CMD_PLAY_ALONE"
+    assert event["specific_event_type"] == event["event_type"]
+    assert event["dispatch_role"] == "specific_command"
+    assert event["intent_source"] == "command_lexicon"
+    assert event["control"] == "DO"
+    assert event["is_executable"] is True
+    assert event["should_trigger_behavior_tree"] is True
+    assert event["asr_text"] == expected_asr_text
+    slots = {slot["key"]: slot["value"] for slot in event["slots"]}
+    assert slots["command_key"] == "PLAY_ALONE"
+    assert slots["catalog_phrase"] == "自己去玩吧"
+    assert slots["action_name"] == "ACT_PLAY_ALONE"
+    assert slots["behavior"] == "去随机位置自己玩"
+    assert "catalog_source_rows" not in slots
+
+
+@pytest.mark.parametrize("text", ["不要自己去玩吧", "别自己去玩吧", "我说的是自己去玩吧吗"])
+def test_play_alone_does_not_match_negation_or_embedded_phrase(text: str) -> None:
+    lexicon = CommandLexicon(CATALOG_PATH)
+    assert lexicon.match(text) is None
+    assert lexicon.match_fuzzy(text) is None
 
 
 def test_expanded_catalog_match_publishes_event_and_skips_intent_model() -> None:

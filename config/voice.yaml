@@ -55,15 +55,20 @@ topics:
 
 interaction:
   # ASR 返回非空文本即刷新空闲计时，不要求命中命令或通过语义校验。
-  # 0 = 不因空闲退出；唤醒后持续监听，直到显式 stop_listening 或节点关闭。
-  idle_timeout_sec: 0.0
+  # 正式配置 20 秒；正数时静默超过该时长即结束会话，0 或负数 = 不因空闲退出。
+  idle_timeout_sec: 20.0
   hold_max_lease_sec: 20.0
-  # 0 = 不设会话总时长上限。
+  # 0 = 不设会话总时长上限，由空闲超时、stop_listening 或节点关闭结束。
   max_duration_sec: 0.0
   # ⚠️ 测试专用：true 时 VAD 检测到任何语音即刷新空闲计时器，不再要求
   # 「ASR 返回非空文本」。仅 VAD 有声音、ASR 为空也会续期 —— 生产保持 false。
-  # 开启方法：本项设 true，并把上面的 max_duration_sec 设为 0。
+  # 开启方法：本项设 true 即可（max_duration_sec 正式配置已为 0）。
   refresh_on_any_speech: false
+  # 会话内再次收到硬件唤醒时刷新 idle 计时，并用唤醒词音频单独识别说话人。
+  wake_speaker_enabled: true
+  wake_audio_window_sec: 2.5
+  wake_event_max_age_sec: 8.0
+  wake_debounce_sec: 0.8
 
 providers:
   wakeup:
@@ -89,6 +94,8 @@ providers:
       # 会话内持续录音，识别期间最多缓存 6 秒；溢出/过期丢弃，不执行残句。
       continuous_capture: true
       capture_buffer_sec: 6.0
+      # 单麦克风待机时仅在内存保留最近 3 秒，供唤醒声纹识别。
+      wake_history_sec: 3.0
       vad_threshold: 0.5
       min_silence_dur: 0.5
       min_speech_dur: 0.25

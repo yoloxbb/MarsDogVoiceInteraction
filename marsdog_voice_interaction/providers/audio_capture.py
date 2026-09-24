@@ -9,6 +9,7 @@ import select
 import subprocess
 import threading
 import time
+from collections import deque
 from typing import Any
 
 import numpy as np
@@ -31,19 +32,25 @@ class BufferedAudioCapture:
     """Keep the device open across ASR calls; never deliver unbounded backlog."""
 
     def __init__(self, sample_rate: int, device: Any, sounddevice: Any,
-                 buffer_sec: float, read_timeout_sec: float) -> None:
+                 buffer_sec: float, read_timeout_sec: float,
+                 history_sec: float = 0.0) -> None:
         self.sample_rate = sample_rate
         self.device = device
         self.sounddevice = sounddevice
         self.chunk_samples = int(sample_rate * 0.02)
         self.buffer_sec = buffer_sec
         self.read_timeout_sec = read_timeout_sec
+        self.history_sec = max(0.0, float(history_sec))
         self._queue: queue.Queue[tuple[float, np.ndarray]] = queue.Queue(
             maxsize=max(1, int(buffer_sec / 0.02)),
         )
         self._stop = threading.Event()
         self._gap = threading.Event()
         self._error: Exception | None = None
+        self._history: deque[tuple[float, np.ndarray]] = deque()
+        self._history_lock = threading.Lock()
+        self._delivery_active = self.history_sec <= 0.0
+        self._deliver_after = 0.0
         self._thread = threading.Thread(target=self._run, name="voice-microphone", daemon=True)
 
     def start(self) -> None:
@@ -52,6 +59,11 @@ class BufferedAudioCapture:
     @property
     def stopping(self) -> bool:
         return self._stop.is_set()
+
+    @property
+    def delivery_active(self) -> bool:
+        with self._history_lock:
+            return self._delivery_active
 
     def close(self, timeout: float = 2.0) -> bool:
         self._stop.set()
@@ -69,11 +81,51 @@ class BufferedAudioCapture:
     def _push(self, samples: np.ndarray) -> None:
         if self._stop.is_set():
             return
-        try:
-            self._queue.put_nowait((time.monotonic(), samples.copy()))
-        except queue.Full:
-            self._gap.set()
+        captured_at = time.monotonic()
+        with self._history_lock:
+            if self.history_sec > 0.0:
+                self._history.append((captured_at, samples.copy()))
+                cutoff = captured_at - self.history_sec
+                while self._history and self._history[0][0] < cutoff:
+                    self._history.popleft()
+            if self._delivery_active and captured_at >= self._deliver_after:
+                try:
+                    self._queue.put_nowait((captured_at, samples.copy()))
+                except queue.Full:
+                    self._gap.set()
+                    self._discard()
+
+    def snapshot(self, end_monotonic: float, duration_sec: float) -> np.ndarray:
+        """Copy bounded microphone history ending at a hardware wake event."""
+        start = end_monotonic - max(0.0, duration_sec)
+        with self._history_lock:
+            chunks = [samples.copy() for captured_at, samples in self._history
+                      if start <= captured_at <= end_monotonic]
+        return (np.concatenate(chunks) if chunks
+                else np.array([], dtype=np.float32))
+
+    def start_delivery(self, after_monotonic: float) -> None:
+        """Start a fresh utterance after a wake without replaying its audio."""
+        with self._history_lock:
+            self._delivery_active = False
             self._discard()
+            self._gap.clear()
+            for captured_at, samples in self._history:
+                if captured_at >= after_monotonic:
+                    try:
+                        self._queue.put_nowait((captured_at, samples.copy()))
+                    except queue.Full:
+                        self._gap.set()
+                        self._discard()
+                        break
+            self._delivery_active = True
+            self._deliver_after = after_monotonic
+
+    def stop_delivery(self) -> None:
+        with self._history_lock:
+            self._delivery_active = False
+            self._discard()
+            self._gap.clear()
 
     def read(self) -> np.ndarray | None:
         if self._gap.is_set():

@@ -87,10 +87,14 @@ class WakeupXFYunSerialProvider(BaseProvider):
 
         try:
             assert self.reader is not None
-            raw_msg = self.reader.get_message(block=False)
-            if raw_msg is None:
-                return None
-            return self._parse_event(raw_msg)
+            for _ in range(32):
+                raw_msg = self.reader.get_message(block=False)
+                if raw_msg is None:
+                    return None
+                event = self._parse_event(raw_msg)
+                if event is not None:
+                    return event
+            return None
 
         except Exception as exc:
             logger.error("Poll error: %s", exc)
@@ -213,6 +217,7 @@ class WakeupXFYunSerialProvider(BaseProvider):
         wake_angle = 0.0
         wake_confidence = 1.0
         wake_score_raw = 1.0
+        wake_duration_sec = 0.0
 
         info_str = content.get("info", "")
         if info_str and isinstance(info_str, str):
@@ -226,6 +231,10 @@ class WakeupXFYunSerialProvider(BaseProvider):
                         wake_score_raw
                     )
                     wake_angle = float(ivw.get("angle", 0.0))
+                    start_ms = float(ivw.get("start_ms", 0.0))
+                    end_ms = float(ivw.get("end_ms", 0.0))
+                    if math.isfinite(start_ms) and math.isfinite(end_ms):
+                        wake_duration_sec = max(0.0, (end_ms - start_ms) / 1000.0)
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 logger.debug("Failed to parse info JSON: %s", exc)
 
@@ -256,6 +265,10 @@ class WakeupXFYunSerialProvider(BaseProvider):
             "wake_angle": wake_angle,
             "wake_confidence": wake_confidence,
             "wake_score_raw": wake_score_raw,
+            "wake_duration_sec": wake_duration_sec,
+            "received_monotonic": float(
+                raw.get("_received_monotonic", time.monotonic())
+            ),
             "latency_ms": latency_ms,
         }
 

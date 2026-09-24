@@ -8,4 +8,5 @@ recursive-include lib *
 recursive-include launch *.py
 recursive-include resource *
 recursive-include scripts *
+recursive-include marsdog_voice_interaction/api/static *
 recursive-include srv *.srv

@@ -71,6 +71,24 @@ def test_audio_contract_preserves_interaction_id() -> None:
     assert value["interaction_id"] == "session-1"
 
 
+def test_wake_identity_result_keeps_wake_correlation_and_role() -> None:
+    value = normalize_audio_event({
+        "event_type": "EVT_VOICE_WAKE_SPEAKER_RESULT",
+        "interaction_id": "session-1",
+        "wake_id": "wake-2",
+        "speaker_id": "family_member_1",
+        "speaker_confidence": 0.82,
+        "speaker_role": "family",
+        "speaker_status": "matched",
+    })
+    assert (value["interaction_id"], value["wake_id"]) == (
+        "session-1", "wake-2"
+    )
+    assert value["speaker_role"] == "family"
+    assert value["speaker_status"] == "matched"
+    assert value["should_trigger_behavior_tree"] is False
+
+
 def test_audio_contract_bounds_wake_confidence_and_preserves_raw_score() -> None:
     value = normalize_audio_event({
         "event_type": EVT_VOICE_WAKEUP,

@@ -27,6 +27,25 @@ def test_speech_has_its_own_deadline():
     assert provider._capture_deadline_reached(15.5, 7.5)
 
 
+def test_wake_history_replays_only_audio_after_wake_boundary(monkeypatch):
+    clock = [1.0]
+    monkeypatch.setattr("marsdog_voice_interaction.providers.audio_capture.time.monotonic",
+                        lambda: clock[0])
+    capture = BufferedAudioCapture(10, None, None, 6.0, 2.0, history_sec=3.0)
+    for when in (1.0, 2.0, 3.0):
+        clock[0] = when
+        capture._push(np.full(2, when, dtype=np.float32))
+    assert capture.snapshot(3.0, 2.5).tolist() == [1.0] * 2 + [2.0] * 2 + [3.0] * 2
+
+    capture.start_delivery(2.5)
+    assert capture.read().tolist() == [3.0, 3.0]
+    clock[0] = 4.0
+    capture._push(np.full(2, 4.0, dtype=np.float32))
+    assert capture.read().tolist() == [4.0, 4.0]
+    capture.stop_delivery()
+    assert capture.read() is None
+
+
 def test_speech_started_near_wait_deadline_finishes_normally():
     class LateVad:
         def reset(self):

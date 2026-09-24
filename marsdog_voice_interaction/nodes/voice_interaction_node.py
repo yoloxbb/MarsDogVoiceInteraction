@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import math
 import re
@@ -39,6 +40,7 @@ from marsdog_voice_interaction.core.utterance_command_tracker import (
     UtteranceCommandTracker,
 )
 from marsdog_voice_interaction.messages.audio_event import normalize_audio_event
+from marsdog_voice_interaction.messages.speaker_identity import speaker_identity_role
 from marsdog_voice_interaction.messages.intent_event_router import (
     route_classification_events,
 )
@@ -49,6 +51,7 @@ from marsdog_voice_interaction.messages.voice_event_types import (
     EVT_VOICE_COMMAND_UNKNOWN,
     EVT_VOICE_NEUTRAL,
     EVT_VOICE_WAKEUP,
+    EVT_VOICE_WAKE_SPEAKER_RESULT,
     speaker_to_voice_event,
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
@@ -179,6 +182,24 @@ class VoiceInteractionNode(Node):
         self._refresh_on_any_speech = bool(
             interaction.get("refresh_on_any_speech", False)
         )
+        self._wake_speaker_enabled = bool(interaction.get("wake_speaker_enabled", False))
+        self._wake_audio_window_sec = max(
+            0.5, float(interaction.get("wake_audio_window_sec", 2.5))
+        )
+        self._wake_event_max_age_sec = max(
+            0.1, float(interaction.get("wake_event_max_age_sec", 8.0))
+        )
+        self._wake_debounce_sec = max(
+            0.0, float(interaction.get("wake_debounce_sec", 0.8))
+        )
+        self._last_wake_received = 0.0
+        self._last_wake_word = ""
+        self._latest_wake_id = ""
+        self._wake_identity_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="wake-speaker"
+        )
+        self._pending_wake_identity: tuple[str, str, Future[dict[str, Any]]] | None = None
+        self._last_capture_retry = 0.0
         self._max_interaction_duration = self._resolve_max_interaction_duration(
             self._idle_timeout,
             interaction.get("max_duration_sec", 120.0),
@@ -458,6 +479,7 @@ class VoiceInteractionNode(Node):
                 batch_upload_handler=self._enroll_uploaded_speaker_batch,
                 speaker_delete_handler=self._delete_speaker_for_api,
                 delete_all_handler=self._delete_all_speakers_for_api,
+                vad_handler=self._analyze_speaker_recording_for_api,
             )
             ready = self._speaker_api.start()
             self._speaker_api_status = {
@@ -465,6 +487,9 @@ class VoiceInteractionNode(Node):
                 "ready": ready,
                 "address": self._speaker_api.address,
                 "docs": f"{self._speaker_api.address}/docs",
+                "enrollment_page": (
+                    f"{self._speaker_api.address}/speaker-enrollment"
+                ),
                 "max_batch_files": int(config.get("max_batch_files", 5)),
                 "cross_identity_similarity_threshold": config.get(
                     "cross_identity_similarity_threshold",
@@ -490,6 +515,17 @@ class VoiceInteractionNode(Node):
             )
             self._upload_vad = UploadedAudioVAD(audio_config)
         return self._upload_vad
+
+    def _analyze_speaker_recording_for_api(
+        self, audio_bytes: bytes
+    ) -> dict[str, Any]:
+        try:
+            return self._get_speaker_audio_vad().analyze_wav(audio_bytes)
+        except ValueError as exc:
+            return {"ok": False, "status": 422, "error": str(exc)}
+        except Exception as exc:
+            logger.error("Speaker recording VAD failed: %s", exc, exc_info=True)
+            return {"ok": False, "status": 503, "error": "录音 VAD 不可用"}
 
     def _enroll_uploaded_speaker(
         self,
@@ -968,8 +1004,25 @@ class VoiceInteractionNode(Node):
         if event is not None:
             event_type = str(event.get("event_type", ""))
             if event_type == EVT_VOICE_WAKEUP:
+                was_active = self._is_interaction_active()
                 self._begin_interaction(source="mock_event")
+                if was_active:
+                    self._state_machine.trigger(Trigger.WAKEUP)
+                    self._refresh_interaction_activity(reason="wakeup")
+                self._latest_wake_id = uuid.uuid4().hex
+                event["wake_id"] = self._latest_wake_id
+                event["speaker_status"] = (
+                    "pending" if self._wake_speaker_enabled else "unavailable"
+                )
+                event["speaker_role"] = "undetermined"
                 self._publish(event)
+                if self._wake_speaker_enabled:
+                    self._publish_wake_identity_result(
+                        self._interaction_id, self._latest_wake_id,
+                        {"speaker_id": "unknown", "confidence": 0.0,
+                         "speaker_status": "unavailable", "speaker_role": "undetermined",
+                         "reason": "mock_has_no_wake_audio"},
+                    )
             elif not self._is_interaction_active():
                 logger.debug(
                     "Ignoring direct mock event outside an interaction: %s",
@@ -1014,6 +1067,12 @@ class VoiceInteractionNode(Node):
             return
 
         audio = self._providers.get("audio")
+        wakeup = self._providers.get("wakeup")
+        if wakeup is not None:
+            wake_event = wakeup.poll_event()  # type: ignore[attr-defined]
+            if wake_event is not None and self._handle_wakeup(wake_event, audio):
+                return
+        self._poll_wake_identity_result()
         if audio is not None and hasattr(audio, "poll_result"):
             if audio.is_capturing():  # type: ignore[attr-defined]
                 session = self._enrollment.speaker_session
@@ -1023,7 +1082,9 @@ class VoiceInteractionNode(Node):
                 if not self._is_interaction_active() and not enrollment_active:
                     # A timeout or stop request must not leave a stale capture
                     # starving the wakeup provider at the end of this method.
-                    self._cancel_audio_capture(audio)
+                    self._cancel_audio_capture(
+                        audio, preserve_microphone=self._wake_speaker_enabled
+                    )
                 else:
                     self._poll_kws_events()
                     result = audio.poll_result()  # type: ignore[attr-defined]
@@ -1070,6 +1131,7 @@ class VoiceInteractionNode(Node):
                         if enrollment_active:
                             self._process_enrollment_audio(result)
                         elif has_voice:
+                            wake_before_speech = self._latest_wake_id
                             if getattr(self, "_refresh_on_any_speech", False):
                                 # Test mode: any VAD-confirmed speech keeps the
                                 # session alive, even when ASR yields nothing.
@@ -1082,6 +1144,10 @@ class VoiceInteractionNode(Node):
                                 result,
                                 utterance_id,
                             )
+                            if self._latest_wake_id != wake_before_speech:
+                                # A hardware wake arrived during ASR/speaker
+                                # processing and already started a new turn.
+                                return
                         else:
                             logger.debug(
                                 "VAD silence result; idle timer remains at %.3f",
@@ -1100,7 +1166,9 @@ class VoiceInteractionNode(Node):
                             self._start_interaction_capture(audio)
                         elif not (self._enrollment.speaker_session is not None
                                   and not self._enrollment.speaker_session.done):
-                            self._cancel_audio_capture(audio)
+                            self._cancel_audio_capture(
+                                audio, preserve_microphone=self._wake_speaker_enabled
+                            )
                         return
                     if enrollment_active:
                         return
@@ -1118,26 +1186,204 @@ class VoiceInteractionNode(Node):
             )
             return
 
+        if (
+            audio is not None and hasattr(audio, "start_capture")
+            and self._is_interaction_active()
+            and not audio.is_capturing()  # type: ignore[attr-defined]
+        ):
+            now = time.monotonic()
+            if now - self._last_capture_retry >= 0.5:
+                self._last_capture_retry = now
+                self._start_interaction_capture(audio)
+
+    def _handle_wakeup(self, event: dict[str, Any], audio: BaseProvider | None) -> bool:
+        """Accept one fresh hardware wake, including during an active VAD turn."""
+        now = time.monotonic()
+        try:
+            received = float(event.get("received_monotonic", now))
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(received) or received > now + 0.2:
+            return False
+        if now - received > self._wake_event_max_age_sec:
+            self._trace("wakeup_ignored", result="stale", age_sec=now - received)
+            return False
+        session = self._enrollment.speaker_session
+        if session is not None and not session.done:
+            self._trace("wakeup_ignored", result="speaker_enrollment_active")
+            return False
+        wake_word = str(event.get("wake_word", ""))
+        if (wake_word == self._last_wake_word
+                and received - self._last_wake_received < self._wake_debounce_sec):
+            self._trace("wakeup_ignored", result="debounced")
+            return False
+        self._last_wake_received = received
+        self._last_wake_word = wake_word
+        was_active = self._is_interaction_active()
+        interaction_id = self._begin_interaction(source="wakeup")
+        if was_active:
+            self._state_machine.trigger(Trigger.WAKEUP)
+            self._refresh_interaction_activity(now=now, reason="wakeup")
+        wake_id = uuid.uuid4().hex
+        self._latest_wake_id = wake_id
+        self._latest_audio = None
+        if self._pending_wake_identity is not None:
+            self._pending_wake_identity[2].cancel()
+            self._pending_wake_identity = None
+        event = dict(event)
+        event.update({
+            "event_type": EVT_VOICE_WAKEUP, "wake_id": wake_id,
+            "speaker_id": "unknown", "speaker_role": "undetermined",
+            "speaker_status": (
+                "pending" if self._wake_speaker_enabled else "unavailable"
+            ),
+        })
+        self._publish(event)
+        wake_audio: dict[str, Any] | None = None
+        if self._wake_speaker_enabled and audio is not None:
+            snapshot = getattr(audio, "wake_audio_snapshot", None)
+            if callable(snapshot):
+                try:
+                    duration = float(event.get("wake_duration_sec", 0.0) or 0.0)
+                    if not math.isfinite(duration) or duration < 0.0:
+                        duration = 0.0
+                    window = min(self._wake_audio_window_sec,
+                                 max(1.5, duration + 0.35))
+                    wake_audio = snapshot(received, window)
+                except Exception as exc:
+                    logger.warning("Wake audio snapshot unavailable: %s", exc)
+        if audio is not None and hasattr(audio, "start_capture"):
+            if audio.is_capturing():  # type: ignore[attr-defined]
+                self._cancel_audio_capture(audio, preserve_microphone=True)
+            self._finish_kws_utterance()
+            self._command_tracker.finish()
+            prepare = getattr(audio, "prepare_for_wakeup", None)
+            if callable(prepare):
+                try:
+                    prepare(received)
+                except Exception as exc:
+                    logger.warning("Wake audio handoff failed: %s", exc)
+            self._start_interaction_capture(audio)
+        if self._wake_speaker_enabled and wake_audio is not None:
+            future = self._wake_identity_executor.submit(
+                self._identify_wake_speaker, wake_audio
+            )
+            self._pending_wake_identity = (interaction_id, wake_id, future)
+        elif self._wake_speaker_enabled:
+            self._publish_wake_identity_result(
+                interaction_id, wake_id,
+                {"speaker_id": "unknown", "confidence": 0.0,
+                 "speaker_role": "undetermined", "speaker_status": "unavailable",
+                 "reason": "wake_audio_unavailable"},
+            )
+        self._trace(
+            "wakeup_accepted", result="refreshed" if was_active else "started",
+            interaction_id=interaction_id, wake_id=wake_id,
+        )
+        return True
+
+    def _wakeup_supersedes_utterance(self, wake_id: str) -> bool:
+        """Check serial wake notifications before publishing an old turn."""
+        if getattr(self, "_latest_wake_id", "") != wake_id:
+            return True
         wakeup = self._providers.get("wakeup")
         if wakeup is None:
-            return
+            return False
         event = wakeup.poll_event()  # type: ignore[attr-defined]
         if event is None:
+            return False
+        return self._handle_wakeup(event, self._providers.get("audio"))
+
+    def _identify_wake_speaker(self, audio_data: dict[str, Any]) -> dict[str, Any]:
+        samples = audio_data.get("audio_samples")
+        if samples is None or len(samples) == 0:
+            return {"speaker_id": "unknown", "confidence": 0.0,
+                    "speaker_role": "undetermined", "speaker_status": "insufficient_audio",
+                    "reason": "no_wake_audio"}
+        speaker = self._providers.get("speaker")
+        if speaker is None or not speaker.is_available():
+            return {"speaker_id": "unknown", "confidence": 0.0,
+                    "speaker_role": "undetermined", "speaker_status": "unavailable",
+                    "reason": "speaker_unavailable"}
+        try:
+            from marsdog_voice_interaction.utils.uploaded_audio import encode_pcm16_wav
+            trimmed = self._get_speaker_audio_vad().trim_wav(
+                encode_pcm16_wav(samples, int(audio_data.get("sample_rate", 16000)))
+            )
+            if trimmed.segment_count != 1:
+                return {"speaker_id": "unknown", "confidence": 0.0,
+                        "speaker_role": "undetermined", "speaker_status": "ambiguous",
+                        "reason": "multiple_wake_speech_segments"}
+        except ValueError as exc:
+            return {"speaker_id": "unknown", "confidence": 0.0,
+                    "speaker_role": "undetermined", "speaker_status": "insufficient_audio",
+                    "reason": str(exc)}
+        except Exception as exc:
+            logger.warning("Wake speaker VAD unavailable: %s", exc)
+            return {"speaker_id": "unknown", "confidence": 0.0,
+                    "speaker_role": "undetermined", "speaker_status": "unavailable",
+                    "reason": "wake_vad_unavailable"}
+        try:
+            with self._speaker_operation_lock:
+                result = speaker.verify({
+                    "audio_samples": trimmed.samples,
+                    "sample_rate": trimmed.sample_rate,
+                    "has_voice": True,
+                })  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.warning("Wake speaker verification failed: %s", exc)
+            result = {"speaker_id": "unknown", "confidence": 0.0,
+                      "reason": "speaker_error"}
+        speaker_id = str(result.get("speaker_id", "unknown"))
+        reason = str(result.get("reason", ""))
+        role = speaker_identity_role(speaker_id)
+        if role in {"owner", "family"} and bool(result.get("matched")):
+            speaker_role, status = role, "matched"
+        elif reason == "below_threshold":
+            speaker_role, status = "stranger", "no_match"
+        else:
+            speaker_role = "undetermined"
+            status = "ambiguous" if reason == "ambiguous_identity" else "unavailable"
+            speaker_id = "unknown"
+        return {
+            "speaker_id": speaker_id,
+            "confidence": float(result.get("confidence", 0.0)),
+            "speaker_role": speaker_role,
+            "speaker_status": status,
+            "reason": reason,
+        }
+
+    def _poll_wake_identity_result(self) -> None:
+        pending = self._pending_wake_identity
+        if pending is None or not pending[2].done():
             return
-        event["event_type"] = EVT_VOICE_WAKEUP
-        self._begin_interaction(source="wakeup")
-        self._publish(event)
-        if audio is not None and hasattr(audio, "start_capture"):
-            is_capturing = getattr(audio, "is_capturing", None)
-            if callable(is_capturing) and is_capturing():
-                # A wakeup that lands while a capture is still running
-                # supersedes it: the capture belongs to the previous
-                # utterance, whose session has just been replaced. Cancel it
-                # first — start_capture() refuses while the old worker holds
-                # the device, and the stale audio would then be processed as
-                # if it were the new utterance (the wake word itself included).
-                self._cancel_audio_capture(audio)
-            self._start_interaction_capture(audio)
+        self._pending_wake_identity = None
+        interaction_id, wake_id, future = pending
+        try:
+            result = future.result()
+        except Exception as exc:
+            logger.warning("Wake identity worker failed: %s", exc)
+            result = {"speaker_id": "unknown", "confidence": 0.0,
+                      "speaker_role": "undetermined", "speaker_status": "unavailable",
+                      "reason": "wake_identity_error"}
+        self._publish_wake_identity_result(interaction_id, wake_id, result)
+
+    def _publish_wake_identity_result(
+        self, interaction_id: str, wake_id: str, result: dict[str, Any],
+    ) -> None:
+        if (not self._is_interaction_active()
+                or interaction_id != self._interaction_id
+                or wake_id != self._latest_wake_id):
+            return
+        self._publish({
+            "event_type": EVT_VOICE_WAKE_SPEAKER_RESULT,
+            "interaction_id": interaction_id, "wake_id": wake_id,
+            "speaker_id": result.get("speaker_id", "unknown"),
+            "speaker_confidence": result.get("confidence", 0.0),
+            "speaker_role": result.get("speaker_role", "undetermined"),
+            "speaker_status": result.get("speaker_status", "unavailable"),
+            "speaker_reason": result.get("reason", ""),
+        })
 
     @staticmethod
     def _resolve_max_interaction_duration(
@@ -1424,6 +1670,7 @@ class VoiceInteractionNode(Node):
         utterance_id: str | None = None,
     ) -> bool:
         pipeline_started = time.perf_counter()
+        utterance_wake_id = getattr(self, "_latest_wake_id", "")
         self._state_machine.trigger(Trigger.SPEECH_START)
         utterance_id = utterance_id or uuid.uuid4().hex
         asr = self._providers.get("asr")
@@ -1441,6 +1688,8 @@ class VoiceInteractionNode(Node):
             asr_failed = True
         asr_latency_ms = (time.perf_counter() - asr_started) * 1000.0
         raw_text = str(asr_result.get("asr_text") or "")
+        if self._wakeup_supersedes_utterance(utterance_wake_id):
+            return False
         self._refresh_for_asr_result(raw_text)
         self._trace(
             "stage_complete",
@@ -1468,6 +1717,8 @@ class VoiceInteractionNode(Node):
         speaker_latency_ms = (time.perf_counter() - speaker_started) * 1000.0
         speaker_id = str(speaker_result.get("speaker_id", "unknown"))
         confidence = float(speaker_result.get("confidence", 0))
+        if self._wakeup_supersedes_utterance(utterance_wake_id):
+            return False
         self._trace(
             "stage_complete",
             stage="speaker",
@@ -1715,6 +1966,8 @@ class VoiceInteractionNode(Node):
 
         intent_started = time.perf_counter()
         parsed_intent = self._parse_intent(text)
+        if self._wakeup_supersedes_utterance(utterance_wake_id):
+            return False
         if parsed_intent is None:
             routed_events = [dict(_UNKNOWN_INTENT)]
             result = "fallback_unknown"
@@ -1869,7 +2122,9 @@ class VoiceInteractionNode(Node):
             utterance_id=utterance_id,
         )
 
-    def _cancel_audio_capture(self, audio: BaseProvider | None = None) -> None:
+    def _cancel_audio_capture(
+        self, audio: BaseProvider | None = None, *, preserve_microphone: bool = False,
+    ) -> None:
         """Stop an in-flight capture without shutting down the provider."""
         audio = audio or self._providers.get("audio")
         if audio is None:
@@ -1877,7 +2132,11 @@ class VoiceInteractionNode(Node):
         cancel_capture = getattr(audio, "cancel_capture", None)
         if callable(cancel_capture):
             try:
-                if cancel_capture() is False:
+                try:
+                    stopped = cancel_capture(preserve_microphone=preserve_microphone)
+                except TypeError:
+                    stopped = cancel_capture()
+                if stopped is False:
                     logger.error(
                         "Audio capture cancellation timed out; the worker "
                         "was detached and is still shutting down"
@@ -1922,6 +2181,10 @@ class VoiceInteractionNode(Node):
             )
             self._interaction_active = False
             self._interaction_started_time = 0.0
+            self._latest_wake_id = ""
+            if self._pending_wake_identity is not None:
+                self._pending_wake_identity[2].cancel()
+                self._pending_wake_identity = None
             self._interaction_holds.clear()
             self._finish_kws_utterance()
             self._command_tracker.finish()
@@ -1934,7 +2197,9 @@ class VoiceInteractionNode(Node):
             })
             # Cancel after the idle state is out: teardown can wait on the
             # worker's join budget, and nothing should delay wakeup recovery.
-            self._cancel_audio_capture()
+            self._cancel_audio_capture(
+                preserve_microphone=self._wake_speaker_enabled
+            )
             self._interaction_id = ""
         direct_mock = self._providers.get("mock_event")
         complete = getattr(direct_mock, "complete_interaction", None)
@@ -2058,6 +2323,7 @@ class VoiceInteractionNode(Node):
         value = dict(partial)
         with self._interaction_lock:
             value.setdefault("interaction_id", self._interaction_id)
+            value.setdefault("wake_id", getattr(self, "_latest_wake_id", ""))
         value.setdefault("state", self._state_machine.state.value)
         value.setdefault(
             "previous_state", self._state_machine.previous_state.value
@@ -2078,6 +2344,7 @@ class VoiceInteractionNode(Node):
             event_type=str(event.get("event_type", "")),
             interaction_id=str(event.get("interaction_id", "")),
             utterance_id=str(event.get("utterance_id", "")),
+            wake_id=str(event.get("wake_id", "")),
             state=str(event.get("state", "")),
             previous_state=str(event.get("previous_state", "")),
             state_reason=str(event.get("state_reason", "")),
@@ -2088,6 +2355,8 @@ class VoiceInteractionNode(Node):
                 3,
             ),
             speaker_id=str(event.get("speaker_id", "")),
+            speaker_role=str(event.get("speaker_role", "")),
+            speaker_status=str(event.get("speaker_status", "")),
             speaker_confidence=round(
                 float(event.get("speaker_confidence", 0.0)),
                 3,
@@ -2470,6 +2739,7 @@ class VoiceInteractionNode(Node):
             self._enrollment.sync_to_provider(speaker)
 
     def destroy_node(self) -> None:
+        self._wake_identity_executor.shutdown(wait=True, cancel_futures=True)
         if self._speaker_api is not None:
             self._speaker_api.stop()
             self._speaker_api = None

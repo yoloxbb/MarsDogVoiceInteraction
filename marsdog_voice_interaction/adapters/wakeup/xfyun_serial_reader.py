@@ -193,7 +193,11 @@ class XFYunSerialReader:
             return
 
         with self._lock:
-            self._message_queue.append(msg)
+            stamped = dict(msg)
+            stamped["_received_monotonic"] = time.monotonic()
+            if len(self._message_queue) >= 128:
+                self._message_queue.pop(0)
+            self._message_queue.append(stamped)
             self._message_event.set()
 
     # ── Consumer API (thread-safe) ───────────────────────────

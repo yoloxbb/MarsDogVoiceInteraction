@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import Future
 from pathlib import Path
 import sys
 import threading
@@ -120,6 +121,10 @@ class _NodeHarness:
     _trace = VoiceInteractionNode._trace
     _poll = VoiceInteractionNode._poll
     _poll_direct_mock = VoiceInteractionNode._poll_direct_mock
+    _handle_wakeup = VoiceInteractionNode._handle_wakeup
+    _poll_wake_identity_result = VoiceInteractionNode._poll_wake_identity_result
+    _publish_wake_identity_result = VoiceInteractionNode._publish_wake_identity_result
+    _identify_wake_speaker = VoiceInteractionNode._identify_wake_speaker
     _begin_interaction = VoiceInteractionNode._begin_interaction
     _refresh_interaction_activity = (
         VoiceInteractionNode._refresh_interaction_activity
@@ -164,6 +169,15 @@ class _NodeHarness:
         self._interaction_started_time = 100.0
         self._last_interaction_time = 100.0
         self._last_interaction_activity_reason = "interaction_start"
+        self._wake_speaker_enabled = False
+        self._wake_audio_window_sec = 2.5
+        self._wake_event_max_age_sec = 2.0
+        self._wake_debounce_sec = 0.8
+        self._last_wake_received = 0.0
+        self._last_wake_word = ""
+        self._latest_wake_id = ""
+        self._pending_wake_identity = None
+        self._last_capture_retry = 0.0
         self._interaction_holds: dict[str, dict[str, Any]] = {}
         self._idle_timeout = 10.0
         self._max_interaction_duration = 120.0
@@ -200,7 +214,7 @@ def test_silence_does_not_refresh_idle_timer_and_wakeup_recovers(
     assert node._last_interaction_time == 100.0
     assert node._interaction_active
     assert audio.start_count == 1
-    assert wakeup.poll_count == 0
+    assert wakeup.poll_count == 1
 
     clock[0] = 111.0
     node._poll()
@@ -217,7 +231,7 @@ def test_silence_does_not_refresh_idle_timer_and_wakeup_recovers(
     clock[0] = 112.0
     node._poll()
 
-    assert wakeup.poll_count == 1
+    assert wakeup.poll_count == 3
     assert node._interaction_active
     assert audio.start_count == 2
     assert node.published[-1]["event_type"] == "EVT_VOICE_WAKEUP"
@@ -341,6 +355,123 @@ def test_wakeup_without_an_active_capture_does_not_cancel(
 
     assert audio.cancel_count == 0
     assert audio.start_count == 1
+
+
+def test_rewake_during_capture_keeps_session_and_refreshes_idle(
+    monkeypatch: Any,
+) -> None:
+    audio = _FakeAudio()
+    audio.capturing = True
+    wakeup = _FakeWakeup()
+    node = _NodeHarness(audio, wakeup)
+    clock = [105.0]
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: clock[0])
+    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2"})
+
+    node._poll()
+
+    assert node._interaction_id == "interaction-test"
+    assert node._last_interaction_time == 105.0
+    assert node._last_interaction_activity_reason == "wakeup"
+    assert node._state_machine.state.value == "attention"
+    assert audio.cancel_count == 1
+    assert audio.start_count == 1
+    assert node.published[-1]["event_type"] == "EVT_VOICE_WAKEUP"
+    first_wake_id = node.published[-1]["wake_id"]
+    assert first_wake_id
+
+    clock[0] = 105.2
+    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2"})
+    node._poll()
+    assert audio.cancel_count == 1
+    assert node._latest_wake_id == first_wake_id
+
+    clock[0] = 106.0
+    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2"})
+    node._poll()
+    assert node._interaction_id == "interaction-test"
+    assert node._last_interaction_time == 106.0
+    assert node._latest_wake_id != first_wake_id
+    assert audio.cancel_count == 2
+
+
+def test_wake_identity_result_is_correlated_and_stale_result_is_dropped() -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._latest_wake_id = "wake-new"
+    old: Future[dict[str, Any]] = Future()
+    old.set_result({"speaker_id": "owner", "confidence": 0.9,
+                    "speaker_role": "owner", "speaker_status": "matched"})
+    node._pending_wake_identity = ("interaction-test", "wake-old", old)
+    node._poll_wake_identity_result()
+    assert not node.published
+
+    current: Future[dict[str, Any]] = Future()
+    current.set_result({"speaker_id": "family_member_1", "confidence": 0.8,
+                        "speaker_role": "family", "speaker_status": "matched"})
+    node._pending_wake_identity = ("interaction-test", "wake-new", current)
+    node._poll_wake_identity_result()
+    assert node.published == [{
+        "event_type": "EVT_VOICE_WAKE_SPEAKER_RESULT",
+        "interaction_id": "interaction-test", "wake_id": "wake-new",
+        "speaker_id": "family_member_1", "speaker_confidence": 0.8,
+        "speaker_role": "family", "speaker_status": "matched",
+        "speaker_reason": "",
+    }]
+
+
+def test_wake_during_speech_processing_keeps_the_new_capture() -> None:
+    audio = _FakeAudio({"has_voice": True, "audio_samples": [0.1]})
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._latest_wake_id = "wake-old"
+
+    def supersede(_result: dict[str, Any], _utterance_id: str | None = None) -> bool:
+        node._latest_wake_id = "wake-new"
+        node._start_interaction_capture(audio)
+        return False
+
+    node._process_speech = supersede  # type: ignore[method-assign]
+    node._poll()
+
+    assert audio.start_count == 1
+    assert audio.is_capturing()
+    assert node._command_tracker.utterance_id
+
+
+@pytest.mark.parametrize(
+    ("verified", "expected_role", "expected_status"),
+    [
+        ({"speaker_id": "owner", "confidence": 0.9, "matched": True,
+          "reason": "matched"}, "owner", "matched"),
+        ({"speaker_id": "family_member_2", "confidence": 0.8, "matched": True,
+          "reason": "matched"}, "family", "matched"),
+        ({"speaker_id": "unknown", "confidence": 0.2, "matched": False,
+          "reason": "below_threshold"}, "stranger", "no_match"),
+        ({"speaker_id": "unknown", "confidence": 0.7, "matched": False,
+          "reason": "ambiguous_identity"}, "undetermined", "ambiguous"),
+        ({"speaker_id": "unknown", "confidence": 0.0, "matched": False,
+          "reason": "no_templates"}, "undetermined", "unavailable"),
+    ],
+)
+def test_wake_speaker_classification_requires_valid_voice(
+    verified: dict[str, Any], expected_role: str, expected_status: str,
+) -> None:
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._speaker_operation_lock = threading.RLock()
+    node._providers["speaker"] = SimpleNamespace(
+        is_available=lambda: True, verify=lambda _: verified,
+    )
+    node._get_speaker_audio_vad = lambda: SimpleNamespace(
+        trim_wav=lambda _: SimpleNamespace(
+            samples=np.ones(16000, dtype=np.float32), sample_rate=16000,
+            segment_count=1,
+        ),
+    )
+    result = node._identify_wake_speaker({
+        "audio_samples": np.ones(16000, dtype=np.float32), "sample_rate": 16000,
+    })
+    assert (result["speaker_role"], result["speaker_status"]) == (
+        expected_role, expected_status,
+    )
 
 
 def test_vad_voice_with_empty_asr_does_not_refresh_idle_timeout(

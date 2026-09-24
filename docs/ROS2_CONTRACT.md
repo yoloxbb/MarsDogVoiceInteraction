@@ -24,6 +24,7 @@ header.frame_id                             str            原始阵列角坐标
 event_type                                  str            事件类型（见下方枚举）
 interaction_id                              str            一次唤醒到会话结束共享的会话 ID
 utterance_id                                str            单次语音的唯一 ID（同一句话的所有事件共享）
+wake_id                                     str            每次有效硬件唤醒的唯一 ID；会话内再次唤醒会更新
 
 wake_word                                   str            唤醒词原文（如 "xiao3 wei1 xiao3 wei1"）
 wake_angle                                  float          XFYun 原始唤醒源方向角（度），未做安装标定
@@ -34,7 +35,10 @@ asr_text                                    str            ASR 转写文本
 language                                    str            语言标签：zh / en / ja / ko / yue
 
 speaker_id                                  str            `owner`、`family_member_1`～`family_member_4`；`unknown` 表示未匹配
-speaker_confidence                          float          声纹匹配置信度
+speaker_confidence                          float          声纹余弦匹配分数，不是校准后的身份概率
+speaker_role                                str            唤醒身份：owner / family / stranger / undetermined
+speaker_status                              str            唤醒声纹状态：pending / matched / no_match / ambiguous / insufficient_audio / unavailable
+speaker_reason                              str            声纹拒识或不可用原因；诊断用
 
 social                                      str            Model Intent SOCIAL 标签
 intent                                      str            Model Intent INTENT 标签
@@ -75,7 +79,8 @@ latency_ms                                  float          处理延迟（ms）
 #### 唤醒
 | event_type | 说明 |
 |---|---|
-| `EVT_VOICE_WAKEUP` | 硬件或 pipeline Mock 唤醒，携带 `wake_word` / `wake_angle` / `wake_confidence`；不表示呼名语义 |
+| `EVT_VOICE_WAKEUP` | 硬件或 pipeline Mock 唤醒，携带 `wake_id`、`wake_word` / `wake_angle` / `wake_confidence`；声纹未完成时 `speaker_status=pending`，不表示呼名语义 |
+| `EVT_VOICE_WAKE_SPEAKER_RESULT` | 同一 `interaction_id` + `wake_id` 的唤醒声纹最终结果；不执行命令 |
 
 #### 声纹识别
 | event_type | 说明 |
@@ -87,6 +92,16 @@ latency_ms                                  float          处理延迟（ms）
 `EVT_VOICE_STRANGER_ID` 仅保留为旧代码兼容常量，新运行时不再发布。上述三个身份
 事件都通过 `/perception/audio_event` 交给行为树等下游消费，Voice 不直接调用动作
 系统。
+
+这三个身份事件仍针对**每一句后续语音**。唤醒身份使用
+`EVT_VOICE_WAKE_SPEAKER_RESULT`：有效语音明确低于匹配阈值才是
+`speaker_role=stranger`；没有音频、多个语音片段、声纹分差不足或模型不可用均为
+`undetermined`，不能当成陌生人。正式配置在待机时使用同一麦克风保留最近 3 秒的
+内存音频，串口唤醒消息本身不含 PCM。唤醒事件先于声纹结果发布；下游应以
+`wake_id` 关联并忽略过期结果。
+Tree 对同一 `interaction_id` 的新 `wake_id` 更新声源和身份关联，但保留现有
+会话及正在执行的动作；它只将声纹结果记录到当前会话，不自动选择新的动作。
+主人、家人、陌生人的差异化行为需要另行确定具体映射。
 
 #### ASR 转写
 | event_type | 说明 |
@@ -213,20 +228,26 @@ Tree、Vision 或 Action，不能把 Voice 发布成功视为这些下游已经�
 
 | 值 | 说明 |
 |---|---|
-| `interaction_timeout` | 仅在对应阈值为正数时触发空闲/总时长超时；非空 ASR 刷新空闲计时。正式配置两项均为 0，禁用自动超时 |
+| `interaction_timeout` | 空闲或总时长阈值触发；非空 ASR 刷新空闲计时。正式配置空闲超时 20 秒、总时长上限 0（禁用） |
 | `stop_listening` | 外部通过 `/perception/voice/task` 主动停止 |
 
 ### 完整确定性产品词库
 
 ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短语精确匹配。
-当前目录覆盖产品表 116 条源数据（不含表头），归并为 81 个路由组和 155 条
-标准中文词/句；每条标准词/句通过五类受控规则生成 10 条扩展，共 1550 条扩展，
+当前目录覆盖产品表 116 条源数据（不含表头），加上新增“自己去玩吧”，共 82 个路由组和 156 条
+标准中文词/句；每条标准词/句通过五类受控规则生成 10 条扩展，共 1560 条扩展，
 另有 70 条人工登记的变体（用于 ASR 稳定错写与自然口语说法），合计
-1775 条运行时精确匹配入口。19 组核心训练指令是这个完整目录的子集。产品表中 138 条英文
+1786 条运行时精确匹配入口。19 组核心训练指令是这个完整目录的子集。产品表中 138 条英文
 参考短语只作元数据，当前不进入直接匹配，避免跨分类重复表达产生错误事件。
+新增词条“自己去玩吧”的契约为 `command_key=PLAY_ALONE`、
+`command_id=CMD_PLAY_ALONE`、`event_type=specific_event_type=EVT_VOICE_COMMAND_PLAY_ALONE`，
+`dispatch_role=specific_command`、`control=DO`、`is_executable=true`、
+`should_trigger_behavior_tree=true`；slots 包含 `action_name=ACT_PLAY_ALONE` 和
+`behavior=去随机位置自己玩`，不含产品表行号 `catalog_source_rows`。该事件需下游单独映射。
+
 匹配成功时：
 
-- 81 个启用路由组均必须声明非空且唯一的 `command_key/command_id/event_type`；目录
+- 82 个启用路由组均必须声明非空且唯一的 `command_key/command_id/event_type`；目录
   禁止使用 `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的
   `EVT_VOICE_INTENT_*`。缺失、重复或越界时节点启动失败；
 - 所有目录条目只发布自身的具体特殊事件，不额外发布
@@ -292,6 +313,8 @@ DOG_PREFERENCE / DOG_CAPABILITY
 │   （wake_word / wake_angle / wake_confidence）         │
 │                          ▼                             │
 │   state: idle → attention                             │
+│   会话内再次唤醒：保持 interaction_id，更新 wake_id、idle 计时；│
+│   被打断话语的旧录音丢弃，唤醒声纹结果随后异步发布。       │
 │                          │                             │
 │   ┌─ 开始麦克风捕获 ──────────────────────────────────┐│
 │   │  同一次唤醒内可持续进行多轮语音                    ││
@@ -312,7 +335,7 @@ DOG_PREFERENCE / DOG_CAPABILITY
 │   │  ①-③ 共享同一个 utterance_id                       ││
 │   └────────────────────────────────────────────────────┘│
 │                          │                             │
-│   EVT_STATE_CHANGED      │  交互结束（超时 / 轮次用尽） │
+│   EVT_STATE_CHANGED      │  交互结束（超时 / 主动停止） │
 │   state_reason           │                             │
 │   state: → idle                                       │
 └───────────────────────────────────────────────────────┘
@@ -469,7 +492,13 @@ float64 latency_ms     # 处理耗时
 会话空闲计时在 ASR 返回非空文本时立即刷新，发生在声纹和语义处理之前。
 不要求命中词库或触发行为，NEUTRAL、UNKNOWN、语义拒识文本同样续期；
 空字符串、纯空白、ASR 异常以及只有 KWS 候选的情况不刷新。
-正式配置 `idle_timeout_sec=0`、`max_duration_sec=0`，唤醒后永久监听，静音也不退出。
+正式配置 `idle_timeout_sec=20`，最后一次非空 ASR 后静默 20 秒结束会话；
+`max_duration_sec=0` 不设绝对上限。
+每次通过去重和时效检查的硬件再次唤醒也刷新 idle 计时，不重置会话开始时间、
+`interaction_id` 或有效 hold；其 `wake_id` 更新。`wake_debounce_sec=0.8` 过滤
+硬件重报，`wake_event_max_age_sec=8` 拒绝过旧唤醒（覆盖同步识别期间的排队）。
+后续 ASR 指令仍逐句核验
+声纹，不能继承唤醒身份作为执行授权。
 可调用 `stop_listening` 主动结束。ASR 活动仍记录为 `last_activity_reason=asr_result`。
 
 跳过唤醒环节，直接开始录音。用于外部触发（如视觉模块联动）。
@@ -523,10 +552,38 @@ ID 对应会话已经结束，返回失败且不得复活旧会话。
 
 ## 声纹上传 FastAPI
 
-节点按 `speaker_api` 配置启动独立 HTTP 服务。正式配置默认地址为
-`http://127.0.0.1:8091`，OpenAPI 页面为 `/docs`。
-Swagger 页面中的 `name` 是枚举选择，不是自由文本；页面只支持选择文件上传，不包含
-麦克风录音控件。
+节点按 `speaker_api` 配置启动独立 HTTP 服务。正式配置本机访问地址为
+`http://localhost:8091`，OpenAPI 页面为 `/docs`。`GET /speaker-enrollment`
+提供浏览器录音页，与声纹服务一同启动。该页把浏览器录音转成 PCM16 WAV，调用
+`POST /api/v1/recordings/vad` 获取语音范围和建议截取起止时间；用户可以调整起止点、
+试听后再提交原有样本新增接口。VAD 预览不落盘；提交时重新执行完整的上传校验。
+浏览器麦克风权限需要安全上下文，本机用 `localhost`；远程使用时需要 HTTPS 或本地转发。
+
+### `POST /api/v1/recordings/vad`
+
+请求类型为 `multipart/form-data`，字段 `audio` 是未压缩的 16-bit PCM WAV；文件大小
+受 `speaker_api.max_upload_mb` 限制，时长受 `upload_max_duration_sec` 限制。
+响应示例：
+
+```json
+{
+  "ok": true,
+  "source_sample_rate": 48000,
+  "source_duration_ms": 3000.0,
+  "speech_duration_ms": 1200.0,
+  "min_speech_duration_ms": 500.0,
+  "segment_count": 1,
+  "speech_ranges_ms": [{"start_ms": 800.0, "end_ms": 2000.0}],
+  "suggested_crop_ms": {"start_ms": 500.0, "end_ms": 2200.0},
+  "valid_for_enrollment": true
+}
+```
+
+时间以原始录音起点为零，单位毫秒。`speech_ranges_ms` 不含前后补白；
+`suggested_crop_ms` 包含 VAD 配置的前后补白。当未检测到语音时，范围为空、建议为
+`null`、`valid_for_enrollment=false`，浏览器要求重新录制。该布尔值仅表示有效语音
+时长达到注册门槛，不代表声纹提取和身份冲突校验通过。无效 WAV 返回 422。
+Swagger `/docs` 的样本上传接口仍是文件选择控件。
 
 ### `POST /api/v1/speakers/{name}/samples`
 

@@ -162,14 +162,9 @@ class UploadedAudioVAD:
         )
 
     def trim_wav(self, payload: bytes) -> VadTrimResult:
-        samples, source_rate = decode_pcm16_wav(payload)
-        source_duration_sec = len(samples) / float(source_rate)
-        if source_duration_sec > self._max_duration_sec:
-            raise ValueError(
-                f"音频时长超过上限 {self._max_duration_sec:g} 秒"
-            )
-        normalized = _resample(samples, source_rate, self._sample_rate)
-        ranges = self._detect_ranges(normalized)
+        normalized, source_rate, source_duration_sec, ranges = (
+            self._prepare_wav(payload)
+        )
         if not ranges:
             raise ValueError("VAD 未检测到有效语音")
         speech_duration_sec = sum(end - start for start, end in ranges) / self._sample_rate
@@ -205,6 +200,64 @@ class UploadedAudioVAD:
             speech_duration_ms=round(speech_duration_sec * 1000.0, 2),
             segment_count=segment_count,
         )
+
+    def analyze_wav(self, payload: bytes) -> dict[str, Any]:
+        """Return VAD ranges for a browser editor without storing the audio."""
+        _, source_rate, source_duration_sec, ranges = (
+            self._prepare_wav(payload)
+        )
+        speech_duration_ms = round(
+            sum(end - start for start, end in ranges) * 1000.0 / self._sample_rate,
+            2,
+        )
+        duration_ms = round(source_duration_sec * 1000.0, 2)
+        start_ms = end_ms = None
+        if ranges:
+            start_ms = max(
+                0.0,
+                round(ranges[0][0] * 1000.0 / self._sample_rate
+                      - self._pre_roll_sec * 1000.0, 2),
+            )
+            end_ms = min(
+                duration_ms,
+                round(ranges[-1][1] * 1000.0 / self._sample_rate
+                      + self._post_roll_sec * 1000.0, 2),
+            )
+        return {
+            "ok": True,
+            "source_sample_rate": source_rate,
+            "source_duration_ms": duration_ms,
+            "speech_duration_ms": speech_duration_ms,
+            "min_speech_duration_ms": round(self._min_effective_sec * 1000.0, 2),
+            "segment_count": len(ranges),
+            "speech_ranges_ms": [
+                {
+                    "start_ms": round(start * 1000.0 / self._sample_rate, 2),
+                    "end_ms": round(end * 1000.0 / self._sample_rate, 2),
+                }
+                for start, end in ranges
+            ],
+            "suggested_crop_ms": (
+                {"start_ms": start_ms, "end_ms": end_ms}
+                if ranges else None
+            ),
+            "valid_for_enrollment": bool(
+                ranges and speech_duration_ms >= self._min_effective_sec * 1000.0
+            ),
+        }
+
+    def _prepare_wav(
+        self, payload: bytes
+    ) -> tuple[np.ndarray, int, float, list[tuple[int, int]]]:
+        samples, source_rate = decode_pcm16_wav(payload)
+        source_duration_sec = len(samples) / float(source_rate)
+        if source_duration_sec > self._max_duration_sec:
+            raise ValueError(
+                f"音频时长超过上限 {self._max_duration_sec:g} 秒"
+            )
+        normalized = _resample(samples, source_rate, self._sample_rate)
+        ranges = self._detect_ranges(normalized)
+        return normalized, source_rate, source_duration_sec, ranges
 
     def _detect_ranges(self, samples: np.ndarray) -> list[tuple[int, int]]:
         with self._lock:

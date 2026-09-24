@@ -1,7 +1,7 @@
 # 产品交互词库的确定性事件路由。
 # 附件共 116 条数据行（含表头共 117 行）。中文短语参与运行时精确匹配；
 # 英文列仅保留为参考元数据，避免跨类别歧义直接触发。
-version: "2026-09-12-social-reaction-v5"
+version: "2026-09-22-play-alone-v6"
 source_name: "产品交互词库"
 source_row_count: 116
 
@@ -231,8 +231,11 @@ commands:
   - {command_key: OWNER_WONDERFUL_DAY, command_id: CMD_OWNER_WONDERFUL_DAY, event_type: EVT_VOICE_COMMAND_OWNER_WONDERFUL_DAY, control: DO, core: false, source_rows: [115], phrases: ["今天真是个好日子"], reference_phrases_en: ["Today is really a wonderful day."], behavior: "抬头注视主人后快速摇尾，主动靠近，并通过轻快走动、短暂转圈表达共享愉悦", action_name: ACT_OWNER_WONDERFUL_DAY}
   - {command_key: OWNER_FEELING_LUCKY, command_id: CMD_OWNER_FEELING_LUCKY, event_type: EVT_VOICE_COMMAND_OWNER_FEELING_LUCKY, control: DO, core: false, source_rows: [116], phrases: ["我今天太幸运了"], reference_phrases_en: ["I'm extremely lucky today."], behavior: "快速看向主人并主动靠近，快速摇尾，可进行一次短暂兴奋转圈或轻跳，随后保持期待互动状态", action_name: ACT_OWNER_FEELING_LUCKY}
 
+  # 产品表外新增词条，不占用原始产品表的 source_rows。
+  - {command_key: PLAY_ALONE, command_id: CMD_PLAY_ALONE, event_type: EVT_VOICE_COMMAND_PLAY_ALONE, control: DO, core: false, source_rows: [], phrases: ["自己去玩吧"], behavior: "去随机位置自己玩", action_name: ACT_PLAY_ALONE}
+
 # 自然语音变体：只并入运行时精确匹配表，不计入 phrase_count / expanded_phrase_count，
-# 也不参与受控扩展，因此产品词库契约（116/81/155/1550）保持不变。
+# 也不参与受控扩展，因此不会改变源数据覆盖数、路由组数和标准词句数。
 # 收录依据是现场日志里用户真实说过、但标准词表没有覆盖的说法，例如
 # 「往后退一点点」「去睡觉」「给我转一圈吧」。不要重复添加已由 expansion 生成的
 # 形式（请X / 麻烦X / X吧 / X一下 / 小狗，X 等），否则加载时会因冲突而报错。

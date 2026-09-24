@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from pathlib import Path as FilePath
 from typing import Any
 
 from fastapi import (
@@ -18,6 +19,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.responses import HTMLResponse
 
 from marsdog_voice_interaction.messages.speaker_identity import (
     SpeakerIdentity,
@@ -54,6 +56,7 @@ class SpeakerApiServer:
             Callable[[str], dict[str, Any]] | None
         ) = None,
         delete_all_handler: Callable[[], dict[str, Any]] | None = None,
+        vad_handler: Callable[[bytes], dict[str, Any]] | None = None,
     ) -> None:
         self._config = dict(config)
         self._upload_handler = upload_handler
@@ -65,6 +68,7 @@ class SpeakerApiServer:
         self._batch_upload_handler = batch_upload_handler
         self._speaker_delete_handler = speaker_delete_handler
         self._delete_all_handler = delete_all_handler
+        self._vad_handler = vad_handler
         self._enabled = bool(config.get("enabled", True))
         self._host = str(config.get("host", "127.0.0.1")).strip()
         self._port = int(config.get("port", 8091))
@@ -117,7 +121,7 @@ class SpeakerApiServer:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             if bool(getattr(self._server, "started", False)):
-                logger.info("Speaker FastAPI ready: %s/docs", self.address)
+                logger.info("Speaker enrollment page ready: %s/speaker-enrollment", self.address)
                 return True
             if not self._thread.is_alive():
                 break
@@ -149,6 +153,22 @@ class SpeakerApiServer:
                 "replaced, batch-added, or deleted. Storage is config-owned."
             ),
         )
+        static_dir = FilePath(__file__).with_name("static")
+        page_html = (static_dir / "index.html").read_text(encoding="utf-8")
+        script_js = (static_dir / "app.js").read_text(encoding="utf-8")
+        style_css = (static_dir / "style.css").read_text(encoding="utf-8")
+
+        @app.get("/speaker-enrollment", include_in_schema=False)
+        async def speaker_enrollment_page() -> HTMLResponse:
+            return HTMLResponse(page_html)
+
+        @app.get("/speaker-enrollment/assets/app.js", include_in_schema=False)
+        async def speaker_enrollment_script() -> Response:
+            return Response(script_js, media_type="text/javascript")
+
+        @app.get("/speaker-enrollment/assets/style.css", include_in_schema=False)
+        async def speaker_enrollment_style() -> Response:
+            return Response(style_css, media_type="text/css")
 
         def require_handler(handler: Any, operation: str) -> Any:
             if handler is None:
@@ -218,6 +238,16 @@ class SpeakerApiServer:
         @app.get("/health")
         async def health() -> dict[str, Any]:
             return {"ok": True, "service": "marsdog-voice-speaker-api"}
+
+        @app.post("/api/v1/recordings/vad")
+        async def analyze_recording_vad(
+            audio: UploadFile = File(...),
+        ) -> dict[str, Any]:
+            handler = require_handler(self._vad_handler, "recording VAD")
+            payload = await read_wav(audio)
+            result = await run_handler(handler, payload)
+            raise_for_result(result)
+            return result
 
         @app.post(
             "/api/v1/speakers/{name}/samples",

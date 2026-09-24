@@ -6,11 +6,11 @@
 
 ## 1. 当前目录口径
 
-- 目录版本：`2026-09-12-social-reaction-v5`。
-- 源数据：`116` 条；事件路由：`81` 个；标准中文词/句：`155` 条。
-- 每个标准词/句按配置生成 `10` 条受控扩展，共 `1550` 条扩展；另有 `70` 条人工登记
+- 目录版本：`2026-09-22-play-alone-v6`。
+- 产品表源数据：`116` 条，另新增“自己去玩吧”（无产品表行号）；事件路由：`82` 个；标准中文词/句：`156` 条。
+- 每个标准词/句按配置生成 `10` 条受控扩展，共 `1560` 条扩展；另有 `70` 条人工登记
   的变体（`phrase_variants:`，用于 ASR 稳定错写与自然口语说法）。包含标准词/句后，
-  运行时精确匹配入口共 `1775` 条。
+  运行时精确匹配入口共 `1786` 条。
 - 核心训练指令：`19` 组，对应表中“核心=是”的所有短语。
 - 表中每条中文标准词/句都必须独立测试；同一 `command_key` 下的短语是等价入口。
 - 英文 `reference_phrases_en` 当前只是参考元数据，不参与确定性词库匹配，因此不列入本表验收。
@@ -18,7 +18,7 @@
 - `action_name=—` 表示产品目录没有给出独立 `ACT_*`，但仍必须发布表中的 `event_type`。
 - 硬件或 pipeline Mock 唤醒使用 `EVT_VOICE_WAKEUP`，不属于本词库表；Model Intent
   呼名沿用 `EVT_VOICE_CALL_NAME`，也不能用来代替词库 `CALL_NAME` 的测试结果。
-- 81 个路由组的 `command_key/command_id/event_type` 必须分别唯一。目录禁止使用
+- 82 个路由组的 `command_key/command_id/event_type` 必须分别唯一。目录禁止使用
   `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的 `EVT_VOICE_INTENT_*`；
   姿态、移动、声音等显式白名单动作可以与 Model Intent 共用具体命令事件。
 - 所有词库行（包括“核心=是”）都只产生本表 `event_type`，不附带
@@ -146,7 +146,7 @@
 运行时节点当前调用 `CommandLexicon.match()`，因此只启用“标准词/句 + 上述固定扩展”
 的规范化精确匹配。代码中的 `match_fuzzy()` 拼音同音回退目前没有接入节点运行链路，
 不能把“坐虾 → 坐下”等测试当作线上词库应当命中。第 3.5 节的“相似句”同样不属于
-这 1775 个确定性入口，而是专门用于测试词库未命中后的 Model Intent。
+这 1786 个确定性入口，而是专门用于测试词库未命中后的 Model Intent。
 
 扩展命中时必须同时满足：
 
@@ -155,7 +155,7 @@
    `match_strategy=rule_expansion/catalog_phrase/matched_phrase/expansion_profile/expansion_rule`。
 3. 具体事件的 `slots` 保留完整规则取证字段；原词命中则为
    `match_strategy=catalog_exact`，且没有 `expansion_profile/expansion_rule`。
-4. 自动覆盖测试必须验证 `155 × 10 = 1550` 条扩展全部可加载且无路由冲突；人工
+4. 自动覆盖测试必须验证 `156 × 10 = 1560` 条扩展全部可加载且无路由冲突；人工
    验收至少从每个 profile 抽取样本，并覆盖 19 组核心指令。
 5. 未在规则中生成的句子继续走 Model Intent。例如“不要坐下”“请你不要坐下”不得命中
    `SIT`；“请你坐下”应按 `command/polite_please_you` 命中 `SIT`。
@@ -348,7 +348,7 @@ object_catalog_version=<目录版本>
 
 ### 3.5 产品示例的相似句测试表
 
-下列“测试相似句”均已确认不在当前 1775 个确定性匹配入口中，适合直接验证 Model Intent。
+下列“测试相似句”均已确认不在当前 1786 个确定性匹配入口中，适合直接验证 Model Intent。
 测试团队还应围绕每行自行补充同义改写，但期望标签必须遵守训练标注协议，不能仅凭
 最终事件反推模型标签。日志必须同时核对 `raw_nlu_tag` 和按序发布的 `event_types`。
 
@@ -583,13 +583,22 @@ object_catalog_version=<目录版本>
 | `CAT-153` | 否 | 114 | `我现在浑身都很轻松` | `OWNER_RELAXED` | `CMD_OWNER_RELAXED` | `EVT_VOICE_COMMAND_OWNER_RELAXED` | `NONE` | `DO` | `ACT_OWNER_RELAXED` | 是 |
 | `CAT-154` | 否 | 115 | `今天真是个好日子` | `OWNER_WONDERFUL_DAY` | `CMD_OWNER_WONDERFUL_DAY` | `EVT_VOICE_COMMAND_OWNER_WONDERFUL_DAY` | `NONE` | `DO` | `ACT_OWNER_WONDERFUL_DAY` | 是 |
 | `CAT-155` | 否 | 116 | `我今天太幸运了` | `OWNER_FEELING_LUCKY` | `CMD_OWNER_FEELING_LUCKY` | `EVT_VOICE_COMMAND_OWNER_FEELING_LUCKY` | `NONE` | `DO` | `ACT_OWNER_FEELING_LUCKY` | 是 |
+| `CAT-156` | 否 | —（新增） | `自己去玩吧` | `PLAY_ALONE` | `CMD_PLAY_ALONE` | `EVT_VOICE_COMMAND_PLAY_ALONE` | `NONE` | `DO` | `ACT_PLAY_ALONE` | 是 |
+
+“自己去玩吧”语义为“去随机位置自己玩”，使用独立事件，区别于 `PLAY`、`GO_OUT`、
+`REFUSE_PLAY`。验收时应只发布一个 `EVT_VOICE_COMMAND_PLAY_ALONE`，
+`specific_event_type` 与其相同，`dispatch_role=specific_command`，
+`is_executable=true`、`should_trigger_behavior_tree=true`，不调用 Intent，不附带 KNOWN。
+否定句“不要自己去玩吧”不得命中该词条；“小狗，自己去玩吧”应按受控扩展命中。
+此条 `source_rows=[]`，事件 slots 不含 `catalog_source_rows`。下游需新增精确事件映射，
+Voice 测试通过不能作为 Tree/Action 已执行的依据。
 
 ## 5. 批量测试汇总
 
 全量测试报告至少汇总：
 
-- 路由覆盖：命中的不同 `command_key` 数 / `81`。
-- 短语覆盖：已执行短语数 / `155`。
+- 路由覆盖：命中的不同 `command_key` 数 / `82`。
+- 短语覆盖：已执行短语数 / `156`。
 - 核心覆盖：已执行核心路由数 / `19`。
 - 每条短语的计划次数、成功次数和准确率。
 - Voice 发布结果与下游 Tree/Action 结果分开判定。
