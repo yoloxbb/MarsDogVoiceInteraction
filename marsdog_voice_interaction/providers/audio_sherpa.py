@@ -94,6 +94,9 @@ class AudioSherpaProvider(BaseProvider):
         self._read_timeout_sec = float(config.get("read_timeout_sec", 2.0))
         self._continuous_capture = bool(config.get("continuous_capture", False))
         self._capture_buffer_sec = float(config.get("capture_buffer_sec", 6.0))
+        self._reconnect_interval_sec = float(config.get("reconnect_interval_sec", 0.0))
+        if not math.isfinite(self._reconnect_interval_sec) or self._reconnect_interval_sec < 0:
+            raise ValueError("reconnect_interval_sec must be finite and non-negative")
         self._wake_history_sec = float(config.get("wake_history_sec", 0.0))
         if not math.isfinite(self._wake_history_sec) or self._wake_history_sec < 0:
             raise ValueError("wake_history_sec must be finite and non-negative")
@@ -111,6 +114,7 @@ class AudioSherpaProvider(BaseProvider):
         self._pre_roll_sec = max(0.0, float(config.get("pre_roll_sec", 0.3)))
         self._num_threads = int(config.get("num_threads", 4))
         self._device = config.get("device")  # None = default mic
+        self._arecord_device = config.get("arecord_device") or self._device
         self._audio_debug = AudioDebugRecorder(config.get("audio_debug"))
         self._debug_disable_extra_pre_roll = (
             self._audio_debug.enabled
@@ -176,7 +180,7 @@ class AudioSherpaProvider(BaseProvider):
                 "AudioSherpaProvider (streaming VAD) started — "
                 "model=%s sr=%d chunk=%dms threshold=%.2f "
                 "min_speech=%.2fs min_silence=%.1fs pre_roll=%.1fs "
-                "max=%.0fs backend=%s",
+                "max=%.0fs preferred_backend=%s device=%s arecord_device=%s",
                 self._model_path,
                 self._sample_rate,
                 int(_CHUNK_SAMPLES / self._sample_rate * 1000),
@@ -186,6 +190,8 @@ class AudioSherpaProvider(BaseProvider):
                 self._pre_roll_sec,
                 self._max_duration_sec,
                 _CAPTURE_BACKEND or "none",
+                self._device,
+                self._arecord_device,
             )
             logger.info(
                 "VAD capture policy: continuous=%s buffer_sec=%.2f "
@@ -473,6 +479,8 @@ class AudioSherpaProvider(BaseProvider):
                 self._sample_rate, self._device, sd if _HAS_AUDIO_CAPTURE else None,
                 self._capture_buffer_sec, self._read_timeout_sec,
                 history_sec=self._wake_history_sec,
+                arecord_device=self._arecord_device,
+                reconnect_interval_sec=self._reconnect_interval_sec,
             )
             self._buffered_capture.start()
         return self._buffered_capture
@@ -995,12 +1003,13 @@ class AudioSherpaProvider(BaseProvider):
                 "-c", "1",
                 "-t", "raw",
             ]
-            if self._device:
-                cmd.extend(["-D", str(self._device)])
+            if self._arecord_device is not None:
+                cmd.extend(["-D", str(self._arecord_device)])
 
             logger.info(
-                "VAD: streaming arecord fallback for up to %.0fs",
+                "VAD: streaming arecord fallback for up to %.0fs device=%s",
                 self._max_duration_sec,
+                self._arecord_device,
             )
             self._vad.reset()
             process = subprocess.Popen(

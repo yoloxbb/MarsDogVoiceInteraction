@@ -264,6 +264,154 @@ def test_arecord_no_data_times_out_and_terminates_process(monkeypatch):
     assert processes and not processes[0].running
 
 
+@pytest.mark.parametrize("continuous_capture", [False, True])
+def test_sounddevice_failure_recovers_with_separate_alsa_device(monkeypatch,
+                                                               continuous_capture):
+    from marsdog_voice_interaction.providers import audio_capture, audio_sherpa
+
+    device = "XFM-DP-V0.0.18"
+    alsa_device = "plughw:CARD=XFMDPV0018,DEV=0"
+    commands = []
+    opened_devices = []
+    processes = []
+
+    def failed_stream(**kwargs):
+        opened_devices.append(kwargs["device"])
+        raise RuntimeError("Illegal combination of I/O devices")
+
+    class Process:
+        def __init__(self, command, **kwargs):
+            commands.append(command)
+            if command[-2:] != ["-D", alsa_device]:
+                raise RuntimeError("Unknown PCM: PortAudio name is not an ALSA device")
+            self.stdout = object()
+            self.running = True
+            processes.append(self)
+
+        def poll(self):
+            return None if self.running else 0
+
+        def terminate(self):
+            self.running = False
+
+        def communicate(self, timeout=None):
+            return b"", b""
+
+        kill = terminate
+
+    def pcm_chunk(*args, **kwargs):
+        time.sleep(.002)
+        return np.full(320, 8192, dtype="<i2").tobytes()
+
+    monkeypatch.setattr(audio_sherpa, "sd", SimpleNamespace(
+        InputStream=failed_stream, PortAudioError=RuntimeError,
+    ))
+    monkeypatch.setattr(audio_sherpa, "_HAS_AUDIO_CAPTURE", True)
+    monkeypatch.setattr(audio_capture.subprocess, "Popen", Process)
+    monkeypatch.setattr(audio_capture, "read_pipe_chunk", pcm_chunk)
+    monkeypatch.setattr(audio_sherpa, "read_pipe_chunk", pcm_chunk)
+    provider = AudioSherpaProvider({
+        "device": device, "arecord_device": alsa_device,
+        "continuous_capture": continuous_capture,
+    })
+    provider._vad = Vad()
+    if continuous_capture:
+        capture = provider._ensure_buffered_capture()
+        samples = None
+        try:
+            deadline = time.monotonic() + 1
+            while samples is None and time.monotonic() < deadline:
+                try:
+                    samples = capture.read()
+                except AudioCaptureGap:
+                    pass
+            assert samples is not None, "fallback must resume microphone audio"
+        finally:
+            assert capture.close()
+    else:
+        provider.available = True
+        assert provider.start_capture()
+        result = wait_result(provider)
+        assert result["has_voice"], "fallback must deliver audio to VAD"
+        samples = result["audio_samples"]
+    np.testing.assert_allclose(samples, .25)
+    assert opened_devices == [device]
+    assert len(commands) == 1
+    assert not processes[0].running
+
+
+@pytest.mark.parametrize("disconnect_after_audio", [False, True])
+def test_microphone_recovers_same_device_and_discards_old_wake_audio(
+    monkeypatch, disconnect_after_audio,
+):
+    attempts = []
+    disconnect = threading.Event()
+    alsa_device = "plughw:CARD=XFMDPV0018,DEV=0"
+
+    def recorder(capture):
+        attempts.append(capture.arecord_device)
+        if len(attempts) == 1:
+            if disconnect_after_audio:
+                while not disconnect.wait(.002):
+                    capture._push(np.full(320, .1, dtype=np.float32))
+            raise RuntimeError("arecord exited: 1 (device unavailable or busy)")
+        while not capture._stop.wait(.002):
+            capture._push(np.full(320, .2, dtype=np.float32))
+
+    monkeypatch.setattr(BufferedAudioCapture, "_run_arecord", recorder)
+    capture = BufferedAudioCapture(
+        16000, "XFM-DP-V0.0.18", None, 1, 1, history_sec=3,
+        arecord_device=alsa_device, reconnect_interval_sec=.01,
+    )
+    capture.start_delivery(time.monotonic())
+    capture.start()
+
+    def read_level(level):
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                samples = capture.read()
+            except AudioCaptureGap:
+                continue
+            if samples is not None and np.allclose(samples, level):
+                return samples
+        raise AssertionError(f"microphone did not deliver recovered audio level {level}")
+
+    try:
+        if disconnect_after_audio:
+            read_level(.1)
+            assert capture.snapshot(time.monotonic(), 3).size
+            disconnect.set()
+        read_level(.2)
+        history = capture.snapshot(time.monotonic(), 3)
+        assert history.size
+        np.testing.assert_allclose(history, .2)
+        assert attempts == [alsa_device, alsa_device]
+        assert capture._error is None
+        assert capture._thread.is_alive()
+    finally:
+        disconnect.set()
+        assert capture.close()
+
+
+def test_close_interrupts_microphone_reconnect_backoff(monkeypatch):
+    failed = threading.Event()
+
+    def unavailable(capture):
+        failed.set()
+        raise RuntimeError("device is busy")
+
+    monkeypatch.setattr(BufferedAudioCapture, "_run_arecord", unavailable)
+    capture = BufferedAudioCapture(
+        16000, None, None, 1, 1, reconnect_interval_sec=30,
+    )
+    capture.start()
+    try:
+        assert failed.wait(1)
+    finally:
+        assert capture.close(timeout=.5)
+
+
 @pytest.mark.parametrize("sample_rate", [8000, 48000])
 def test_live_vad_rejects_unsupported_capture_sample_rate(sample_rate):
     provider = AudioSherpaProvider({"sample_rate": sample_rate})

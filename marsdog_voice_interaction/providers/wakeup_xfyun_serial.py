@@ -44,6 +44,7 @@ class WakeupXFYunSerialProvider(BaseProvider):
         self.port = config.get("port", "/dev/ttyACM0")
         self.baudrate = int(config.get("baudrate", 115200))
         self.timeout = float(config.get("timeout", 0.2))
+        self.protocol = str(config.get("protocol", "auto"))
         self.wake_score_scale = float(config.get("wake_score_scale", 1000.0))
         if not math.isfinite(self.wake_score_scale) or self.wake_score_scale <= 0:
             self.wake_score_scale = 1000.0
@@ -122,6 +123,7 @@ class WakeupXFYunSerialProvider(BaseProvider):
                 port=self.port,
                 baudrate=self.baudrate,
                 timeout=self.timeout,
+                protocol=self.protocol,
             )
             reader.open()
             self.reader = reader

@@ -1,7 +1,7 @@
 # 产品交互词库的确定性事件路由。
 # 附件共 116 条数据行（含表头共 117 行）。中文短语参与运行时精确匹配；
 # 英文列仅保留为参考元数据，避免跨类别歧义直接触发。
-version: "2026-09-22-play-alone-v6"
+version: "2026-10-09-inspect-toy-v7"
 source_name: "产品交互词库"
 source_row_count: 116
 
@@ -79,6 +79,7 @@ expansion:
     RESPOND_WANT_EAT_QUERY: query
     RESPOND_EATING_QUERY: query
     RESPOND_FOOD_PREFERENCE_QUERY: query
+    INSPECT_TOY: query
     ASK_WHAT_DOING: query
     ASK_WHERE_ARE_YOU: query
     ASK_WHATS_WRONG: query
@@ -197,6 +198,7 @@ commands:
   - {command_key: GO_GET_IT, command_id: CMD_GO_GET_IT, event_type: EVT_VOICE_COMMAND_GO_GET_IT, control: DO, core: false, source_rows: [81], phrases: ["去拿"], reference_phrases_en: ["Go get it"], action_name: ACT_GO_GET_IT}
   - {command_key: BRING_IT_BACK, command_id: CMD_BRING_IT_BACK, event_type: EVT_VOICE_COMMAND_BRING_IT_BACK, control: DO, core: false, source_rows: [82], phrases: ["叼回来"], reference_phrases_en: ["Bring it back"], action_name: ACT_BRING_IT_BACK}
   - {command_key: FETCH_BALL, command_id: CMD_FETCH_BALL, event_type: EVT_VOICE_COMMAND_FETCH_BALL, control: DO, core: false, source_rows: [83], phrases: ["捡球"], reference_phrases_en: ["Fetch the ball"], action_name: ACT_FETCH_BALL}
+  - {command_key: INSPECT_TOY, command_id: CMD_INSPECT_TOY, event_type: EVT_VOICE_COMMAND_INSPECT_TOY, control: DO, core: false, source_rows: [], phrases: ["这是啥", "这是什么"], reference_phrases_en: ["What is this?"], action_name: ACT_INSPECT_TOY, behavior: "持续识别玩具并靠近，低头抬头、左右观察和伸展互动"}
   - {command_key: FIND_TOY, command_id: CMD_FIND_TOY, event_type: EVT_VOICE_COMMAND_FIND_TOY, control: DO, core: false, source_rows: [84], phrases: ["找玩具"], reference_phrases_en: ["Find the toy"], action_name: ACT_FIND_TOY}
   - {command_key: OWNER_GOING_OUT, command_id: CMD_OWNER_GOING_OUT, event_type: EVT_VOICE_COMMAND_OWNER_GOING_OUT, control: DO, core: false, source_rows: [85], phrases: ["我要出门了"], reference_phrases_en: ["I'm going out"], behavior: "立即关注主人，抬头注视并靠近主人，短暂跟随主人移动", action_name: ACT_OWNER_GOING_OUT}
   - {command_key: STAY_HOME_ALONE, command_id: CMD_STAY_HOME_ALONE, event_type: EVT_VOICE_COMMAND_STAY_HOME_ALONE, control: DO, core: false, source_rows: [86], phrases: ["你自己在家"], reference_phrases_en: ["You stay at home"], behavior: "停止持续跟随，目送主人，随后在原地或休息区域保持等待状态", action_name: ACT_STAY_HOME_ALONE}

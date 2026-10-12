@@ -234,11 +234,11 @@ Tree、Vision 或 Action，不能把 Voice 发布成功视为这些下游已经�
 ### 完整确定性产品词库
 
 ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短语精确匹配。
-当前目录覆盖产品表 116 条源数据（不含表头），加上新增“自己去玩吧”，共 82 个路由组和 156 条
-标准中文词/句；每条标准词/句通过五类受控规则生成 10 条扩展，共 1560 条扩展，
+当前目录覆盖产品表 116 条源数据（不含表头），加上新增“自己去玩吧”“这是啥”“这是什么”，共 83 个路由组和 158 条
+标准中文词/句；每条标准词/句通过五类受控规则生成 10 条扩展，共 1580 条扩展，
 另有 70 条人工登记的变体（用于 ASR 稳定错写与自然口语说法），合计
-1786 条运行时精确匹配入口。19 组核心训练指令是这个完整目录的子集。产品表中 138 条英文
-参考短语只作元数据，当前不进入直接匹配，避免跨分类重复表达产生错误事件。
+1808 条运行时精确匹配入口。19 组核心训练指令是这个完整目录的子集。产品表中 138 条英文参考短语及新增 1 条参考短语
+只作元数据，当前不进入直接匹配，避免跨分类重复表达产生错误事件。
 新增词条“自己去玩吧”的契约为 `command_key=PLAY_ALONE`、
 `command_id=CMD_PLAY_ALONE`、`event_type=specific_event_type=EVT_VOICE_COMMAND_PLAY_ALONE`，
 `dispatch_role=specific_command`、`control=DO`、`is_executable=true`、
@@ -247,7 +247,7 @@ ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短
 
 匹配成功时：
 
-- 82 个启用路由组均必须声明非空且唯一的 `command_key/command_id/event_type`；目录
+- 83 个启用路由组均必须声明非空且唯一的 `command_key/command_id/event_type`；目录
   禁止使用 `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的
   `EVT_VOICE_INTENT_*`。缺失、重复或越界时节点启动失败；
 - 所有目录条目只发布自身的具体特殊事件，不额外发布
@@ -804,3 +804,13 @@ IDLE ──(WAKEUP)──▶ ATTENTION ──(SPEECH_START)──▶ INTERACTION
 | ASR | sherpa-onnx（支持 SenseVoice / Paraformer） | `asr_model` + `model_type` |
 | 声纹 | sherpa-onnx 3D-Speaker | `speaker_model` |
 | 意图 | 规则 + RKLLM（Qwen2.5-5B） | `model` (RKLLM) |
+
+
+### “这是啥？”玩具探索直驱命令
+
+`这是啥？` / `这是什么？` → `CMD_INSPECT_TOY` / `EVT_VOICE_COMMAND_INSPECT_TOY`。
+事件 `dispatch_role=specific_command`、`specific_event_type=event_type`、`control=DO`，
+`is_executable=true`、`should_trigger_behavior_tree=true`；词库命中后跳过 Intent，
+只发布一个具体事件。`slots.action_name=ACT_INSPECT_TOY` 是描述元数据，
+Tree 发往 Action 的行为名为 `inspect_toy`。持续检测、玩具选择、导航和动作由 Action 执行。
+这两条词句的 `source_rows=[]`，不改变产品表 116 行覆盖口径。

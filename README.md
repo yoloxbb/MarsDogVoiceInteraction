@@ -29,8 +29,8 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
   KWS/ASR 仲裁，避免长句中包含短关键词时提前误触发动作。
 - 使用当前配置的 SenseVoice INT8 ONNX 完成整句 ASR，优先精确匹配
   完整产品词库。当前目录覆盖
-  116 条源数据及新增词条“自己去玩吧”（其中 19 组为核心指令），共 82 个路由组、156 条标准
-  中文词/句；每条另有 10 个受控扩展，再加 70 条人工登记的变体，共 1786 个精确匹配入口。词库和 KWS 命中后
+  116 条源数据及新增词条“自己去玩吧”“这是啥”“这是什么”（其中 19 组为核心指令），共 83 个路由组、158 条标准
+  中文词/句；每条另有 10 个受控扩展，再加 70 条人工登记的变体，共 1808 个精确匹配入口。词库和 KWS 命中后
   只发布目录指定的 `EVT_VOICE_*` 特殊事件，不额外发布
   `EVT_VOICE_COMMAND_KNOWN`。所有目录命中均跳过意图模型。
 - 目录外文本使用 Model Intent `SOCIAL|INTENT|CONTROL` 三轴协议。模型结果先发布业务
@@ -74,7 +74,11 @@ Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)，测试执行�
 `CMD_PLAY_ALONE`，语义为“去随机位置自己玩”。Voice 设置
 `should_trigger_behavior_tree=true`；实际行为需要下游接入该事件。
 
-156 条标准中文词/句、扩展规则与期望事件见
+新增直驱命令“这是啥？”（同义句“这是什么？”）：词库发布
+`EVT_VOICE_COMMAND_INSPECT_TOY`，Tree 路由为 `inspect_toy`；Action 启动持续玩具检测，
+锁定目标并导航靠近，到达后执行低头抬头、左右观察和身体伸展三段动作组合。
+
+158 条标准中文词/句、扩展规则与期望事件见
 [docs/COMMAND_CATALOG_TEST_MATRIX.md](docs/COMMAND_CATALOG_TEST_MATRIX.md)。
 
 ## 运行环境
@@ -83,7 +87,8 @@ Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)，测试执行�
 - Python 3.10
 - [uv](https://docs.astral.sh/uv/)
 - 麦克风及 PortAudio；无法使用 `sounddevice` 时会回退到 `arecord`
-- 讯飞离线语音唤醒模块，默认串口 `/dev/ttyACM0`
+- 离线语音唤醒模块；本机使用 WCH 外置串口的稳定路径接收 AIUI 唤醒事件，
+  ListenGo 声卡负责录音
 - RK3588 平台及 RKLLM 运行库（仅启用 `intent_llm` 时需要）
 
 Python 依赖由 `pyproject.toml` 和 `uv.lock` 管理：
@@ -190,7 +195,7 @@ uv run marsdog-voice-interaction \
 配置中的文件和目录统一使用相对路径，并以当前 YAML 文件所在目录为基准解析，
 不依赖启动命令的工作目录。例如 `storage.root: ../data` 指向项目的 `data/`，
 `vad_model: ../../models/vad/silero_vad.onnx` 指向项目同级的模型目录。串口设备
-`/dev/ttyACM0` 和 ROS2 Topic/Service 名称不是项目文件路径，仍使用系统设备名和
+`/dev/serial/by-id/...` 和 ROS2 Topic/Service 名称不是项目文件路径，仍使用系统设备名和
 ROS2 绝对名称。
 
 与收音质量直接相关的参数：
@@ -529,8 +534,22 @@ ros2 pkg prefix --share marsdog_voice_interaction
 确认设备存在、端口配置正确，并检查当前用户是否有串口访问权限：
 
 ```bash
-ls -l /dev/ttyACM0
+ls -l /dev/serial/by-id/
 ```
+
+当前 `config/voice.yaml` 使用外置 WCH 串口的稳定路径
+`/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0004-if00`，本机对应 `/dev/ttyACM0`。
+现场抓包确认该端口持续发送 AIUI 握手帧；ListenGo 内置 `/dev/ttyACM1` 未输出数据，
+不能仅凭它与声卡属于同一设备就将其作为唤醒口。更换串口桥后，应按实际序列号
+更新 `providers.wakeup.config.port`；旧 `/dev/marsdog_voice` udev 规则绑定了旧序列号。
+
+`providers.wakeup.config.protocol` 支持 `aiui`、`json` 和默认的 `auto`。
+本机配置为 `aiui`，按[讯飞官方串口协议](https://doc.iflyos.cn/aiui/sdk/smart_doc/serial_port_sdk.html)
+校验 `A5 01` 二进制帧、回复相同消息 ID 的 ACK、解压 GZIP JSON（同时兼容本机固件的
+未压缩 JSON 载荷），再接收
+`type=aiui_event`、`content.eventType=4` 的唤醒事件。重发的同一事件会再次确认但不重复投递。
+旧的纯 JSON 串口输出可继续使用 `json` 或 `auto`，不会向纯 JSON 通道发送二进制 ACK。
+日志 `AIUI handshake acknowledged` 表示握手已应答；仍需用实际唤醒词验证事件和方向角。
 
 ### `sounddevice` 无法打开麦克风
 
@@ -541,6 +560,28 @@ arecord -l
 ```
 
 如需固定输入设备，在 `providers.audio.config.device` 中配置设备名称或索引。
+
+`device` 是 `sounddevice` 的设备名称或索引，`arecord_device` 是回退录音使用的
+ALSA PCM 标识，二者可能不同。未配置 `arecord_device` 时沿用 `device`。
+本机 ListenGo 使用以下配置，避免将显示名称传给 `arecord` 导致 `Unknown PCM`：
+
+```yaml
+providers:
+  audio:
+    config:
+      device: "ListenGo Circular 6-Microphone"
+      arecord_device: "plughw:CARD=L6Microphone,DEV=0"
+      reconnect_interval_sec: 2.0
+```
+
+`CARD=L6Microphone` 来自 `arecord -l` 的声卡标识，不依赖 `card 3`、`card 4`
+等数字编号。若日志先出现 `sounddevice produced no audio`，再出现无法打开设备，
+应同时检查 `dmesg --ctime` 中的麦克风 USB 断开重连记录。连续录音配置
+`reconnect_interval_sec: 2.0` 后，设备打开失败、被占用或中途掉线时，每 2 秒重试
+同一个 ALSA 设备；设备恢复后无需为此重启节点。未配置本项或设为 0 时不自动重试。
+重连时清空待处理音频和唤醒音频历史，丢弃断续命令，等待 VAD 静音边界后再识别。
+日志 `Microphone capture ready backend=...` 表示对应后端已实际读到音频；
+`Voice node ready` 只表示 ROS 接口已启动。设备离线期间仍无法录音。
 
 ### VAD 取消收音超时
 

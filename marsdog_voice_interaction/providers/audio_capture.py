@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import queue
 import select
@@ -33,13 +34,19 @@ class BufferedAudioCapture:
 
     def __init__(self, sample_rate: int, device: Any, sounddevice: Any,
                  buffer_sec: float, read_timeout_sec: float,
-                 history_sec: float = 0.0) -> None:
+                 history_sec: float = 0.0, arecord_device: Any = None,
+                 reconnect_interval_sec: float = 0.0) -> None:
         self.sample_rate = sample_rate
         self.device = device
+        # PortAudio display names and ALSA PCM identifiers are different.
+        self.arecord_device = device if arecord_device is None else arecord_device
         self.sounddevice = sounddevice
         self.chunk_samples = int(sample_rate * 0.02)
         self.buffer_sec = buffer_sec
         self.read_timeout_sec = read_timeout_sec
+        self.reconnect_interval_sec = float(reconnect_interval_sec)
+        if not math.isfinite(self.reconnect_interval_sec) or self.reconnect_interval_sec < 0:
+            raise ValueError("reconnect_interval_sec must be finite and non-negative")
         self.history_sec = max(0.0, float(history_sec))
         self._queue: queue.Queue[tuple[float, np.ndarray]] = queue.Queue(
             maxsize=max(1, int(buffer_sec / 0.02)),
@@ -153,13 +160,33 @@ class BufferedAudioCapture:
                     if self._stop.is_set():
                         return
                     logger.warning("Microphone backend failed, trying arecord: %s", exc)
-                    self._gap.set()
-                    self._discard()
-            self._run_arecord()
+                    self._discard_disconnected_audio()
+            while not self._stop.is_set():
+                try:
+                    self._run_arecord()
+                    return
+                except Exception as exc:
+                    if self._stop.is_set():
+                        return
+                    if self.reconnect_interval_sec <= 0:
+                        raise
+                    self._discard_disconnected_audio()
+                    logger.warning(
+                        "Microphone unavailable; retrying same ALSA device=%s in %.1fs: %s",
+                        self.arecord_device, self.reconnect_interval_sec, exc,
+                    )
+                    if self._stop.wait(self.reconnect_interval_sec):
+                        return
         except Exception as exc:
             if not self._stop.is_set():
                 self._error = exc
                 logger.error("Buffered microphone stopped: %s", exc)
+
+    def _discard_disconnected_audio(self) -> None:
+        with self._history_lock:
+            self._history.clear()
+            self._discard()
+            self._gap.set()
 
     def _run_sounddevice(self) -> None:
         stream = self.sounddevice.InputStream(
@@ -169,12 +196,17 @@ class BufferedAudioCapture:
         try:
             stream.start()
             last_read = time.monotonic()
+            ready = False
             while not self._stop.is_set():
                 if stream.read_available >= self.chunk_samples:
                     samples, overflowed = stream.read(self.chunk_samples)
                     if overflowed:
                         self._gap.set()
                     self._push(np.asarray(samples, dtype=np.float32).reshape(-1))
+                    if not ready:
+                        logger.info("Microphone capture ready backend=sounddevice device=%s",
+                                    self.device)
+                        ready = True
                     last_read = time.monotonic()
                 elif time.monotonic() - last_read >= self.read_timeout_sec:
                     raise TimeoutError("sounddevice produced no audio")
@@ -186,17 +218,20 @@ class BufferedAudioCapture:
     def _run_arecord(self) -> None:
         command = ["arecord", "-f", "S16_LE", "-r", str(self.sample_rate),
                    "-c", "1", "-t", "raw"]
-        if self.device is not None:
-            command.extend(["-D", str(self.device)])
+        if self.arecord_device is not None:
+            command.extend(["-D", str(self.arecord_device)])
+        logger.info("Microphone capture backend=arecord device=%s sample_rate=%d channels=1",
+                    self.arecord_device, self.sample_rate)
         # Inherit stderr so an unread error pipe cannot block the recorder.
         process = subprocess.Popen(command, stdout=subprocess.PIPE)
         pending = bytearray()
         try:
             last_read = time.monotonic()
+            ready = False
             while not self._stop.is_set():
                 raw = read_pipe_chunk(process.stdout, self.chunk_samples * 2)
                 if raw == b"":
-                    raise RuntimeError(f"arecord exited: {process.poll()}")
+                    raise RuntimeError(f"arecord exited: {process.wait(timeout=0.5)}")
                 if raw is None:
                     if time.monotonic() - last_read >= self.read_timeout_sec:
                         raise TimeoutError("arecord produced no audio")
@@ -207,6 +242,10 @@ class BufferedAudioCapture:
                     payload = bytes(pending[:self.chunk_samples * 2])
                     del pending[:self.chunk_samples * 2]
                     self._push(np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0)
+                    if not ready:
+                        logger.info("Microphone capture ready backend=arecord device=%s",
+                                    self.arecord_device)
+                        ready = True
         finally:
             if process.poll() is None:
                 process.terminate()

@@ -73,9 +73,9 @@ def test_catalog_covers_all_19_core_command_groups(
 
     match = lexicon.match(text)
 
-    assert lexicon.command_count == 82
+    assert lexicon.command_count == 83
     assert lexicon.core_command_count == 19
-    assert lexicon.phrase_count == 156
+    assert lexicon.phrase_count == 158
     assert lexicon.source_row_count == 116
     assert lexicon.covered_source_row_count == 116
     assert match is not None
@@ -98,7 +98,7 @@ def test_catalog_special_events_are_unique_and_share_only_reviewed_actions() -> 
     command_ids = [command["command_id"] for command in commands]
     event_types = [command["event_type"] for command in commands]
 
-    assert len(commands) == 82
+    assert len(commands) == 83
     assert len(command_keys) == len(set(command_keys))
     assert len(command_ids) == len(set(command_ids))
     assert len(event_types) == len(set(event_types))
@@ -222,8 +222,8 @@ def test_phrase_variants_match_without_changing_catalog_counts() -> None:
 
     assert lexicon.variant_phrase_count > 0
     # The reviewed product catalog contract is untouched.
-    assert lexicon.phrase_count == 156
-    assert lexicon.expanded_phrase_count == 1560
+    assert lexicon.phrase_count == 158
+    assert lexicon.expanded_phrase_count == 1580
 
     for text, command_key in [
         ("往后退一点点", "BACK_UP"),
@@ -368,14 +368,14 @@ def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
     assert lexicon.expansion_enabled
     assert lexicon.variants_per_phrase == 10
     assert lexicon.expansion_profile_count == 5
-    assert lexicon.expanded_phrase_count == 1560
+    assert lexicon.expanded_phrase_count == 1580
     # phrase_count/expanded_phrase_count describe the reviewed product catalog
     # only; natural-speech variants are counted separately.
     variant_count = sum(
         len(phrases) for phrases in raw.get("phrase_variants", {}).values()
     )
     assert lexicon.variant_phrase_count == variant_count
-    assert lexicon.total_match_phrase_count == 1716 + variant_count
+    assert lexicon.total_match_phrase_count == 1738 + variant_count
 
     command_profiles = expansion["command_profiles"]
     phrase_profiles = expansion["phrase_profiles"]
@@ -401,7 +401,7 @@ def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
                 assert match.expansion_rule == rule["id"]
                 checked += 1
 
-    assert checked == 1560
+    assert checked == 1580
 
 
 @pytest.mark.parametrize(
@@ -511,13 +511,13 @@ def test_every_configured_phrase_matches_its_declared_command() -> None:
             assert match.event_type == command["event_type"]
             checked += 1
 
-    assert checked == 156
+    assert checked == 158
 
 
 def test_reference_english_phrases_are_metadata_not_runtime_triggers() -> None:
     lexicon = CommandLexicon(CATALOG_PATH)
 
-    assert lexicon.reference_phrase_count == 138
+    assert lexicon.reference_phrase_count == 139
     assert lexicon.match("Good dog") is None
     assert lexicon.match("Come here") is None
 
@@ -1456,3 +1456,31 @@ def test_model_find_query_routes_only_supported_detector_target() -> None:
         and fields.get("result") == "unsupported"
         for record, fields in unsupported.traces
     )
+
+
+@pytest.mark.parametrize("text", ["这是啥？", "这是什么？", "小狗，这是啥", "这是啥呀"])
+def test_inspect_toy_publishes_one_direct_command(text):
+    node = _DirectRouteHarness(text=text)
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000}, "utterance-inspect-toy",
+    )
+    assert not node.intent_called
+    events = [event for event in node.published if event.get("intent_source")]
+    assert [event["event_type"] for event in events] == ["EVT_VOICE_COMMAND_INSPECT_TOY"]
+    event = events[0]
+    assert event["command_id"] == "CMD_INSPECT_TOY"
+    assert event["specific_event_type"] == event["event_type"]
+    assert event["dispatch_role"] == "specific_command"
+    assert event["control"] == "DO"
+    assert event["is_executable"] and event["should_trigger_behavior_tree"]
+    slots = {slot["key"]: slot["value"] for slot in event["slots"]}
+    assert slots["command_key"] == "INSPECT_TOY"
+    assert slots["action_name"] == "ACT_INSPECT_TOY"
+    assert "catalog_source_rows" not in slots
+
+
+@pytest.mark.parametrize("text", ["不要这是啥", "别这是啥", "我说的是这是啥吗"])
+def test_inspect_toy_rejects_negation_and_embedded_phrases(text):
+    lexicon = CommandLexicon(CATALOG_PATH)
+    assert lexicon.match(text) is None
+    assert lexicon.match_fuzzy(text) is None

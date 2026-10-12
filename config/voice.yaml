@@ -75,7 +75,9 @@ providers:
     type: xfyun_serial
     enabled: true
     config:
-      port: /dev/marsdog_voice  # udev 稳定映射 -> CH343(ttyACM0), 见 /etc/udev/rules.d/99-marsdog-voice.rules
+      # 唤醒数据来自外置 WCH 串口；ListenGo 内置 CDC 串口未输出唤醒数据。
+      port: /dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0004-if00
+      protocol: aiui
       baudrate: 115200
       timeout: 0.2
       reconnect_interval_sec: 2.0
@@ -85,6 +87,11 @@ providers:
     type: sherpa
     enabled: true
     config:
+      device: "ListenGo Circular 6-Microphone"
+      # arecord 使用 ALSA PCM 标识；CARD 名称不依赖 USB 重连后的数字编号。
+      arecord_device: "plughw:CARD=L6Microphone,DEV=0"
+      # 连续录音打开失败或 USB 掉线后，每 2 秒重试同一配置设备。
+      reconnect_interval_sec: 2.0
       vad_model: ../../models/vad/silero_vad.onnx
       sample_rate: 16000
       max_duration_sec: 8.0
@@ -158,7 +165,7 @@ providers:
     enabled: true
     config:
       speaker_model: ../../models/speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
-      match_threshold: 0.5
+      match_threshold: 0.3
       # 第一、第二身份的余弦分差不足时拒识；初始值需用板端真人录音校准。
       min_score_margin: 0.05
       # 最短有效语音长度（16k 采样点），低于该值无法产生可靠声纹，直接判定 audio_too_short。
