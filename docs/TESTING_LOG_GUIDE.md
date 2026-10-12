@@ -246,6 +246,9 @@ ros2 launch marsdog_voice_interaction voice.launch.py \
   log_dir:=/tmp/marsdog_voice_qa/VOICE-001
 ```
 
+控制台和文件日志的行首时间统一精确到毫秒，使用本地时间格式
+`YYYY-MM-DD HH:MM:SS.mmm`，例如 `2026-10-12 14:30:05.007`。
+
 日志分两类：
 
 - 普通日志：便于人阅读的 Provider 启停、模型错误、串口/VAD/ASR信息。
