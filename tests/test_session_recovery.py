@@ -1330,6 +1330,7 @@ def test_wakeup_provider_reconnects_after_reader_thread_stops(
 
     monkeypatch.setattr(wakeup_module, "XFYunSerialReader", FakeReader)
     provider = WakeupXFYunSerialProvider({
+        "port": "/dev/test-wakeup",
         "reconnect_interval_sec": 0.0,
     })
     provider.start()

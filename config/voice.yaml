@@ -70,7 +70,13 @@ providers:
     type: xfyun_serial
     enabled: true
     config:
-      port: /dev/marsdog_voice  # udev 稳定映射 -> CH343(ttyACM0), 见 /etc/udev/rules.d/99-marsdog-voice.rules
+      # 按 USB 型号查找唤醒串口，不依赖单台设备序列号或 ttyACM/ttyUSB 编号。
+      # 也可设为 /dev/serial/by-id/... 等明确路径，此时不做自动选择。
+      port: auto
+      usb_vid: 0x1a86
+      usb_pid: 0x55d4
+      # 同时连接多个同型号串口时，填写目标序列号（用引号保留前导零）。
+      serial_number: ""
       baudrate: 115200
       timeout: 0.2
       reconnect_interval_sec: 2.0

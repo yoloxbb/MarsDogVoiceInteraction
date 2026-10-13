@@ -78,7 +78,7 @@ Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)，测试执行�
 - Python 3.10
 - [uv](https://docs.astral.sh/uv/)
 - 麦克风及 PortAudio；无法使用 `sounddevice` 时会回退到 `arecord`
-- 讯飞离线语音唤醒模块，默认串口 `/dev/ttyACM0`
+- 讯飞离线语音唤醒模块，默认按 USB VID/PID 自动查找唤醒串口
 - RK3588 平台及 RKLLM 运行库（仅启用 `intent_llm` 时需要）
 
 Python 依赖由 `pyproject.toml` 和 `uv.lock` 管理：
@@ -517,11 +517,40 @@ ros2 pkg prefix --share marsdog_voice_interaction
 
 ### 串口无法打开
 
-确认设备存在、端口配置正确，并检查当前用户是否有串口访问权限：
+唤醒串口与录音声卡是两个接口。`lsusb` 能看到麦克风或串口模块，不代表
+`/dev/marsdog_voice` 等自定义别名一定存在。同型号设备的序列号也可能不同；
+绑定旧序列号的 udev 规则会在更换设备后失效。
+
+正式配置按 USB 型号自动查找，不绑定某一台设备或 `ttyACM/ttyUSB` 编号：
+
+```yaml
+providers:
+  wakeup:
+    config:
+      port: auto
+      usb_vid: 0x1a86
+      usb_pid: 0x55d4
+      serial_number: ""
+```
+
+`1a86:55d4` 对应 XFM 套件使用的 WCH USB Single Serial 串口桥。
+同型号替换、插拔或编号变化后，每次重连都会重新枚举匹配设备。
+仅有一个匹配项时连接；多个匹配项时不随意选取，而是在日志中列出路径和序列号，
+此时可填写 `serial_number: "目标序列号"`，或将 `port` 设为明确的设备路径。
+手动指定路径后不自动回退到其他串口；其他型号需按实际硬件修改 VID/PID，
+并确认其输出协议与当前唤醒读取器兼容。
+
+检查实际设备、USB 标识与当前用户的串口访问权限：
 
 ```bash
-ls -l /dev/ttyACM0
+python3 -m serial.tools.list_ports -v
+ls -l /dev/serial/by-id/
 ```
+
+日志 `XFYun wakeup auto-selected port=...` 表示已选出串口，
+`XFYun wakeup started` 表示已打开；仍需实际唤醒词产生 `XFYun wakeup:` /
+`wakeup_accepted` 才能确认唤醒链路可用。若报 `Permission denied`，应检查设备权限；
+若报 `No wakeup serial port matches`，应检查驱动是否创建串口、USB 标识是否匹配。
 
 ### `sounddevice` 无法打开麦克风
 

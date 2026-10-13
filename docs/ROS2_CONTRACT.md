@@ -741,7 +741,7 @@ IDLE ──(WAKEUP)──▶ ATTENTION ──(SPEECH_START)──▶ INTERACTION
 
 | 组件 | 类型 | 模型路径 |
 |------|------|---------|
-| 唤醒 | XFYun 串口 | `/dev/ttyACM0` |
+| 唤醒 | XFYun 串口 | `port: auto` 按 `usb_vid/usb_pid` 选择；可用 `serial_number` 消歧或指定路径 |
 | VAD | sherpa-onnx Silero | `vad_model` |
 | KWS | sherpa-onnx Zipformer | `model_dir` |
 | ASR | sherpa-onnx（支持 SenseVoice / Paraformer） | `asr_model` + `model_type` |

@@ -172,7 +172,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 | `interaction.hold_max_lease_sec` | 单次会话保持租约上限 20 秒，调用方需定期续租 |
 | `topics.*` | 对外 Topic/Service 名称 |
 | `speaker_api.*` | 当前为 `0.0.0.0:8091`，无身份验证，仅限可信开发局域网 |
-| `providers.wakeup` | 讯飞串口唤醒板 `/dev/ttyACM0` |
+| `providers.wakeup` | 讯飞唤醒串口：默认按 USB `1a86:55d4` 自动选择，可指定路径或序列号 |
 | `providers.audio` | 16 kHz VAD 和录音 |
 | `providers.kws` | 流式关键词命令 |
 | `providers.asr` | 当前为 SenseVoice INT8 ONNX；provider 实现仍支持其他 Sherpa ASR 模型 |
