@@ -39,6 +39,7 @@ from marsdog_voice_interaction.core.speaker_enrollment_manager import (
 from marsdog_voice_interaction.core.utterance_command_tracker import (
     UtteranceCommandTracker,
 )
+from marsdog_voice_interaction.core.speech_processing_queue import SpeechProcessingQueue
 from marsdog_voice_interaction.messages.audio_event import normalize_audio_event
 from marsdog_voice_interaction.messages.speaker_identity import speaker_identity_role
 from marsdog_voice_interaction.messages.intent_event_router import (
@@ -94,6 +95,16 @@ _UNKNOWN_INTENT = {
     ],
     "is_executable": False,
     "should_trigger_behavior_tree": False,
+}
+
+# These complete, exact expressions are commands despite a negation prefix.
+# Never exempt an entire action class (e.g. "不要安静" must not enable QUIET).
+_NEGATED_CONTROL_COMMANDS = {
+    "别动": "HOLD_POSITION",
+    "不准动": "HOLD_POSITION",
+    "不许动": "HOLD_POSITION",
+    "别叫": "QUIET",
+    "不许叫": "QUIET",
 }
 
 
@@ -176,6 +187,7 @@ class VoiceInteractionNode(Node):
         self._command_tracker = UtteranceCommandTracker()
         self._utterance_started_monotonic = 0.0
         self._kws_arbitration = self._load_kws_arbitration_config()
+        self._speech_processing: SpeechProcessingQueue | None = None
 
         interaction = self._config.get("interaction", {})
         self._idle_timeout = float(interaction.get("idle_timeout_sec", 10))
@@ -223,6 +235,19 @@ class VoiceInteractionNode(Node):
                 self._idle_timeout,
             )
         self._init_providers()
+        if self._kws_arbitration["publish_mode"] == "immediate":
+            kws = self._providers.get("kws")
+            if kws is None or not kws.is_available():
+                raise RuntimeError("即时 KWS 模式需要可用的关键词模型")
+            if self._command_lexicon is None:
+                raise RuntimeError("即时 KWS 模式需要可用的命令目录")
+            audio_config = self._config["providers"]["audio"]["config"]
+            if not audio_config.get("continuous_capture", False):
+                raise ValueError("即时 KWS 模式需要 continuous_capture=true")
+            self._speech_processing = SpeechProcessingQueue(
+                self._recognize_speech,
+                max_buffer_sec=float(audio_config.get("capture_buffer_sec", 6.0)),
+            )
         self._wire_speaker_enrollment()
         self._sync_speaker_registry()
 
@@ -352,9 +377,9 @@ class VoiceInteractionNode(Node):
             )),
             "priority_asr_aliases": normalized_priority_aliases,
         }
-        if policy["publish_mode"] != "deferred":
+        if policy["publish_mode"] not in {"deferred", "immediate"}:
             raise ValueError(
-                "providers.kws.config.publish_mode must be 'deferred'"
+                "providers.kws.config.publish_mode must be 'deferred' or 'immediate'"
             )
         if policy["arbitration_mode"] != "exclusive":
             raise ValueError(
@@ -992,6 +1017,13 @@ class VoiceInteractionNode(Node):
             self._prune_interaction_holds_locked(now)
             if self._interaction_holds:
                 return ""
+            if self._speech_processing is not None and any(
+                job["interaction_id"] == self._interaction_id
+                and job["wake_id"] == self._latest_wake_id
+                and job["tracker"].awaiting_asr
+                for job in self._speech_processing.pending_payloads
+            ):
+                return ""
             if self._idle_timeout <= 0.0:
                 return ""
             if now - self._last_interaction_time <= self._idle_timeout:
@@ -1073,6 +1105,8 @@ class VoiceInteractionNode(Node):
             if wake_event is not None and self._handle_wakeup(wake_event, audio):
                 return
         self._poll_wake_identity_result()
+        self._poll_kws_events()
+        self._poll_speech_processing()
         if audio is not None and hasattr(audio, "poll_result"):
             if audio.is_capturing():  # type: ignore[attr-defined]
                 session = self._enrollment.speaker_session
@@ -1140,10 +1174,10 @@ class VoiceInteractionNode(Node):
                                 self._refresh_interaction_activity(
                                     reason="vad_speech"
                                 )
-                            self._process_speech(
-                                result,
-                                utterance_id,
-                            )
+                            if self._speech_processing is not None:
+                                self._queue_speech(result, utterance_id)
+                            else:
+                                self._process_speech(result, utterance_id)
                             if self._latest_wake_id != wake_before_speech:
                                 # A hardware wake arrived during ASR/speaker
                                 # processing and already started a new turn.
@@ -1153,7 +1187,8 @@ class VoiceInteractionNode(Node):
                                 "VAD silence result; idle timer remains at %.3f",
                                 self._last_interaction_time,
                             )
-                        self._command_tracker.finish()
+                        if self._speech_processing is None or not has_voice:
+                            self._command_tracker.finish()
                         timed_out_id = self._timeout_interaction_id(
                             time.monotonic()
                         )
@@ -1227,6 +1262,8 @@ class VoiceInteractionNode(Node):
         wake_id = uuid.uuid4().hex
         self._latest_wake_id = wake_id
         self._latest_audio = None
+        if self._speech_processing is not None:
+            self._speech_processing.clear()
         if self._pending_wake_identity is not None:
             self._pending_wake_identity[2].cancel()
             self._pending_wake_identity = None
@@ -1461,6 +1498,7 @@ class VoiceInteractionNode(Node):
         raw_text: str,
         language: str,
         direct_match: Any = None,
+        command_tracker: UtteranceCommandTracker | None = None,
     ) -> tuple[dict[str, Any] | None, str]:
         """Select one deferred KWS result or explain why ASR owns the turn.
 
@@ -1469,9 +1507,12 @@ class VoiceInteractionNode(Node):
         aliases.
         """
 
-        candidates = [
-            dict(event) for event in self._command_tracker.kws_candidates
-        ]
+        tracker = command_tracker if command_tracker is not None else self._command_tracker
+        candidates = [dict(event) for event in tracker.kws_candidates]
+        if tracker.kws_block_reason:
+            return None, "kws_guard_blocked"
+        if self._effective_kws_arbitration()["publish_mode"] == "immediate":
+            return None, "immediate_asr_evidence_only"
         if not candidates:
             return None, "no_kws_candidate"
         if len(candidates) != 1:
@@ -1525,8 +1566,10 @@ class VoiceInteractionNode(Node):
         utterance_id: str,
         direct_match: Any = None,
         started: float,
+        command_tracker: UtteranceCommandTracker | None = None,
     ) -> None:
-        candidates = self._command_tracker.kws_candidates
+        tracker = command_tracker if command_tracker is not None else self._command_tracker
+        candidates = tracker.kws_candidates
         self._trace(
             "stage_complete",
             stage="recognition_arbitration",
@@ -1664,13 +1707,118 @@ class VoiceInteractionNode(Node):
         )
         return True
 
+    def _queue_speech(
+        self, audio_data: dict[str, Any], utterance_id: str | None,
+    ) -> None:
+        utterance_id = utterance_id or uuid.uuid4().hex
+        tracker = self._command_tracker
+        if tracker.utterance_id != utterance_id:
+            tracker = UtteranceCommandTracker()
+            tracker.begin(utterance_id)
+        job = {
+            "audio_data": audio_data,
+            "utterance_id": utterance_id,
+            "interaction_id": self._interaction_id,
+            "wake_id": self._latest_wake_id,
+            "tracker": tracker,
+        }
+        duration_sec = len(audio_data["audio_samples"]) / int(audio_data["sample_rate"])
+        accepted = self._speech_processing.submit(job, duration_sec=duration_sec)
+        self._trace(
+            "speech_processing_queue",
+            result="queued" if accepted else "discarded",
+            reason="" if accepted else "buffer_full",
+            interaction_id=job["interaction_id"],
+            utterance_id=utterance_id,
+        )
+
+    def _speech_job_is_current(self, job: dict[str, Any]) -> bool:
+        with self._interaction_lock:
+            return (
+                self._interaction_active
+                and job["interaction_id"] == self._interaction_id
+                and job["wake_id"] == self._latest_wake_id
+            )
+
+    def _recognize_speech(self, job: dict[str, Any]) -> dict[str, Any]:
+        if not self._speech_job_is_current(job):
+            return {"discard_reason": "stale_session"}
+        started = time.perf_counter()
+        audio_data = job["audio_data"]
+        asr = self._providers.get("asr")
+        asr_started = time.perf_counter()
+        asr_result = asr.transcribe(audio_data) if asr is not None else {}
+        asr_latency_ms = (time.perf_counter() - asr_started) * 1000.0
+        with self._interaction_lock:
+            if not self._speech_job_is_current(job):
+                return {"discard_reason": "stale_session"}
+            self._refresh_for_asr_result(asr_result.get("asr_text"))
+            job["tracker"].mark_asr_complete()
+        speaker = self._providers.get("speaker")
+        speaker_started = time.perf_counter()
+        with self._speaker_operation_lock:
+            speaker_result = speaker.verify(audio_data) if speaker is not None else {}
+        speaker_latency_ms = (time.perf_counter() - speaker_started) * 1000.0
+        if not self._speech_job_is_current(job):
+            return {"discard_reason": "stale_session"}
+        text = self._clean_text(str(asr_result.get("asr_text") or ""))
+        parsed_intent = None
+        intent_started = time.perf_counter()
+        if text and job["tracker"].asr_business_allowed:
+            direct_match = (
+                self._command_lexicon.match_fuzzy(text)
+                if self._command_fuzzy_matching
+                else self._command_lexicon.match(text)
+            )
+            if direct_match is None:
+                parsed_intent = self._parse_intent(text)
+        return {
+            "asr_result": asr_result,
+            "asr_latency_ms": asr_latency_ms,
+            "speaker_result": speaker_result,
+            "speaker_latency_ms": speaker_latency_ms,
+            "parsed_intent": parsed_intent,
+            "intent_latency_ms": (time.perf_counter() - intent_started) * 1000.0,
+            "started": started,
+            "wake_id": job["wake_id"],
+        }
+
+    def _poll_speech_processing(self) -> None:
+        if self._speech_processing is None:
+            return
+        while True:
+            completed = self._speech_processing.poll()
+            if completed is None:
+                return
+            job = completed.payload
+            reason = completed.discard_reason or completed.result.get("discard_reason", "")
+            if not reason and not self._speech_job_is_current(job):
+                reason = "stale_session"
+            if reason:
+                self._trace(
+                    "speech_processing_queue", result="discarded", reason=reason,
+                    interaction_id=job["interaction_id"], utterance_id=job["utterance_id"],
+                )
+                continue
+            self._process_speech(
+                job["audio_data"], job["utterance_id"], recognition=completed.result,
+                command_tracker=job["tracker"],
+            )
+
     def _process_speech(
         self,
         audio_data: dict[str, Any],
         utterance_id: str | None = None,
+        *,
+        recognition: dict[str, Any] | None = None,
+        command_tracker: UtteranceCommandTracker | None = None,
     ) -> bool:
-        pipeline_started = time.perf_counter()
-        utterance_wake_id = getattr(self, "_latest_wake_id", "")
+        tracker = command_tracker if command_tracker is not None else self._command_tracker
+        pipeline_started = recognition["started"] if recognition is not None else time.perf_counter()
+        utterance_wake_id = (
+            recognition["wake_id"] if recognition is not None
+            else getattr(self, "_latest_wake_id", "")
+        )
         self._state_machine.trigger(Trigger.SPEECH_START)
         utterance_id = utterance_id or uuid.uuid4().hex
         asr = self._providers.get("asr")
@@ -1679,18 +1827,23 @@ class VoiceInteractionNode(Node):
         asr_failed = False
         try:
             asr_result = (
-                asr.transcribe(audio_data)  # type: ignore[attr-defined]
-                if asr is not None else {}
+                recognition["asr_result"] if recognition is not None
+                else asr.transcribe(audio_data) if asr is not None else {}
             )
         except Exception as exc:
             logger.error("ASR failed: %s", exc)
             asr_result = {}
             asr_failed = True
         asr_latency_ms = (time.perf_counter() - asr_started) * 1000.0
+        if recognition is not None:
+            asr_latency_ms = recognition["asr_latency_ms"]
+            asr_failed = asr_result.get("reason") == "error"
         raw_text = str(asr_result.get("asr_text") or "")
         if self._wakeup_supersedes_utterance(utterance_wake_id):
             return False
-        self._refresh_for_asr_result(raw_text)
+        if recognition is None:
+            self._refresh_for_asr_result(raw_text)
+            tracker.mark_asr_complete()
         self._trace(
             "stage_complete",
             stage="asr",
@@ -1704,17 +1857,22 @@ class VoiceInteractionNode(Node):
 
         speaker_started = time.perf_counter()
         speaker_failed = False
-        try:
-            with self._speaker_operation_lock:
-                speaker_result = (
-                    speaker.verify(audio_data)  # type: ignore[attr-defined]
-                    if speaker is not None else {}
-                )
-        except Exception as exc:
-            logger.error("Speaker verification failed: %s", exc)
-            speaker_result = {}
-            speaker_failed = True
+        if recognition is not None:
+            speaker_result = recognition["speaker_result"]
+        else:
+            try:
+                with self._speaker_operation_lock:
+                    speaker_result = (
+                        speaker.verify(audio_data)  # type: ignore[attr-defined]
+                        if speaker is not None else {}
+                    )
+            except Exception as exc:
+                logger.error("Speaker verification failed: %s", exc)
+                speaker_result = {}
+                speaker_failed = True
         speaker_latency_ms = (time.perf_counter() - speaker_started) * 1000.0
+        if recognition is not None:
+            speaker_latency_ms = recognition["speaker_latency_ms"]
         speaker_id = str(speaker_result.get("speaker_id", "unknown"))
         confidence = float(speaker_result.get("confidence", 0))
         if self._wakeup_supersedes_utterance(utterance_wake_id):
@@ -1743,12 +1901,52 @@ class VoiceInteractionNode(Node):
         })
 
         text = self._clean_text(raw_text)
+        guard_exception = None
+        if (
+            tracker.kws_block_reason == "negation_keyword"
+            and not tracker.published_event_types
+            and text in _NEGATED_CONTROL_COMMANDS
+            and self._command_lexicon is not None
+        ):
+            exact = self._command_lexicon.match(text)
+            if exact is not None and exact.command_key == _NEGATED_CONTROL_COMMANDS[text]:
+                guard_exception = exact
+                self._trace(
+                    "stage_complete", stage="kws_guard", result="allowed_exact_control",
+                    interaction_id=self._interaction_id, utterance_id=utterance_id,
+                    asr_text=text, command_key=exact.command_key,
+                )
+        if not tracker.asr_business_allowed and guard_exception is None:
+            if text:
+                self._publish({
+                    "event_type": "speech", "utterance_id": utterance_id,
+                    "asr_text": text, "speaker_id": speaker_id,
+                    "speaker_confidence": confidence,
+                    "language": str(asr_result.get("language", "zh")),
+                    "latency_ms": float(asr_result.get("latency_ms", 0)),
+                })
+            if tracker.kws_block_reason and not tracker.published_event_types:
+                self._state_machine.trigger(Trigger.SPEECH_END)
+            self._trace(
+                "utterance_complete", result=(
+                    "negation_after_kws_publish" if tracker.kws_block_reason and tracker.published_event_types
+                    else "blocked_kws_guard" if tracker.kws_block_reason
+                    else "published_kws_immediate"
+                ),
+                interaction_id=self._interaction_id, utterance_id=utterance_id,
+                published_event_types=list(tracker.published_event_types),
+                selected_source="kws" if tracker.published_event_types else "none",
+                reason=tracker.kws_block_reason, asr_text=text,
+                latency_ms=round((time.perf_counter() - pipeline_started) * 1000.0, 2),
+            )
+            return True
         if not text:
             arbitration_started = time.perf_counter()
             selected_kws, arbitration_reason = self._select_kws_candidate(
                 text="",
                 raw_text=raw_text,
                 language=str(asr_result.get("language", "")),
+                command_tracker=tracker,
             )
             self._trace_recognition_arbitration(
                 result=(
@@ -1760,6 +1958,7 @@ class VoiceInteractionNode(Node):
                 language=str(asr_result.get("language", "")),
                 utterance_id=utterance_id,
                 started=arbitration_started,
+                command_tracker=tracker,
             )
             if selected_kws is not None:
                 return self._publish_selected_kws_candidate(
@@ -1795,7 +1994,9 @@ class VoiceInteractionNode(Node):
         })
 
         lexicon_started = time.perf_counter()
-        if self._command_lexicon is None:
+        if guard_exception is not None:
+            direct_match = guard_exception
+        elif self._command_lexicon is None:
             direct_match = None
         elif getattr(self, "_command_fuzzy_matching", True):
             direct_match = self._command_lexicon.match_fuzzy(text)
@@ -1881,6 +2082,7 @@ class VoiceInteractionNode(Node):
             raw_text=raw_text,
             language=str(asr_result.get("language", "")),
             direct_match=direct_match,
+            command_tracker=tracker,
         )
         self._trace_recognition_arbitration(
             result=(
@@ -1893,6 +2095,7 @@ class VoiceInteractionNode(Node):
             utterance_id=utterance_id,
             direct_match=direct_match,
             started=arbitration_started,
+            command_tracker=tracker,
         )
         if selected_kws is not None:
             return self._publish_selected_kws_candidate(
@@ -1965,7 +2168,10 @@ class VoiceInteractionNode(Node):
             return True
 
         intent_started = time.perf_counter()
-        parsed_intent = self._parse_intent(text)
+        parsed_intent = (
+            recognition["parsed_intent"] if recognition is not None
+            else self._parse_intent(text)
+        )
         if self._wakeup_supersedes_utterance(utterance_wake_id):
             return False
         if parsed_intent is None:
@@ -2039,6 +2245,8 @@ class VoiceInteractionNode(Node):
         intent_latency_ms = (
             time.perf_counter() - intent_started
         ) * 1000.0
+        if recognition is not None:
+            intent_latency_ms += recognition["intent_latency_ms"]
         self._trace(
             "stage_complete",
             stage="intent",
@@ -2092,6 +2300,8 @@ class VoiceInteractionNode(Node):
     def _start_interaction_capture(self, audio: BaseProvider) -> None:
         """Allocate an utterance ID, reset KWS, then start microphone capture."""
         utterance_id = uuid.uuid4().hex
+        if self._effective_kws_arbitration()["publish_mode"] == "immediate":
+            self._command_tracker = UtteranceCommandTracker()
         self._command_tracker.begin(utterance_id)
         self._utterance_started_monotonic = time.perf_counter()
         kws = self._providers.get("kws")
@@ -2180,6 +2390,8 @@ class VoiceInteractionNode(Node):
                 "",
             )
             self._interaction_active = False
+            if self._speech_processing is not None:
+                self._speech_processing.clear()
             self._interaction_started_time = 0.0
             self._latest_wake_id = ""
             if self._pending_wake_identity is not None:
@@ -2227,7 +2439,7 @@ class VoiceInteractionNode(Node):
             kws.finish_utterance()  # type: ignore[attr-defined]
 
     def _poll_kws_events(self) -> None:
-        """Cache KWS candidates; executable events wait for ASR arbitration."""
+        """接收 KWS 候选，并按配置立即发布或等待 ASR 仲裁。"""
         kws = self._providers.get("kws")
         if (
             kws is None
@@ -2239,6 +2451,20 @@ class VoiceInteractionNode(Node):
             event = kws.poll_event()  # type: ignore[attr-defined]
             if event is None:
                 return
+            if event.get("kind") == "kws_guard":
+                reason = str(event["reason"])
+                self._command_tracker.block_kws(reason)
+                self._trace(
+                    "stage_complete", stage="kws_guard", result=(
+                        "late_veto" if self._command_tracker.published_event_types else "blocked"
+                    ),
+                    interaction_id=self._interaction_id,
+                    utterance_id=self._command_tracker.utterance_id,
+                    reason=reason,
+                    keyword=str(event.get("keyword", "")),
+                    published_event_types=list(self._command_tracker.published_event_types),
+                )
+                continue
             event_type = str(event.get("event_type", ""))
             command_key = str(event.get("action", "")).strip().upper()
             command_lexicon = getattr(self, "_command_lexicon", None)
@@ -2283,6 +2509,34 @@ class VoiceInteractionNode(Node):
             if catalog_command is not None:
                 event["command_id"] = catalog_command.command_id
             if not self._command_tracker.record_kws_candidate(event):
+                continue
+            if self._effective_kws_arbitration()["publish_mode"] == "immediate":
+                if self._command_tracker.kws_block_reason:
+                    self._trace(
+                        "stage_complete", stage="kws", result="blocked_negation_guard",
+                        interaction_id=self._interaction_id,
+                        utterance_id=self._command_tracker.utterance_id,
+                        event_type=event_type, command_key=command_key,
+                        reason=self._command_tracker.kws_block_reason,
+                    )
+                    continue
+                if catalog_command is None:
+                    raise RuntimeError(f"即时 KWS 命令 {command_key} 缺少目录定义")
+                immediate_event = catalog_command.to_kws_event(
+                    event, utterance_id=self._command_tracker.utterance_id,
+                    latency_ms=kws_latency_ms,
+                )
+                self._state_machine.trigger(Trigger.INTENT_PARSED)
+                self._publish(immediate_event)
+                self._command_tracker.mark_kws_published(event_type)
+                self._refresh_interaction_activity(reason="kws_immediate")
+                self._trace(
+                    "stage_complete", stage="kws", result="published_immediate",
+                    interaction_id=self._interaction_id,
+                    utterance_id=self._command_tracker.utterance_id,
+                    event_type=event_type, command_key=command_key,
+                    published_event_types=[event_type], latency_ms=round(kws_latency_ms, 2),
+                )
                 continue
             self._trace(
                 "stage_complete",
@@ -2739,6 +2993,8 @@ class VoiceInteractionNode(Node):
             self._enrollment.sync_to_provider(speaker)
 
     def destroy_node(self) -> None:
+        if self._speech_processing is not None:
+            self._speech_processing.close()
         self._wake_identity_executor.shutdown(wait=True, cancel_futures=True)
         if self._speaker_api is not None:
             self._speaker_api.stop()

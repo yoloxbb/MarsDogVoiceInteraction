@@ -21,6 +21,7 @@ _CONFIG_PATH_FIELDS = (
     ("providers", "audio", "config", "vad_model"),
     ("providers", "kws", "config", "model_dir"),
     ("providers", "kws", "config", "keywords_file"),
+    ("providers", "kws", "config", "negation_keywords_file"),
     ("providers", "asr", "config", "asr_model"),
     ("providers", "asr", "config", "tokens"),
     ("providers", "speaker", "config", "speaker_model"),

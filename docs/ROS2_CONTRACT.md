@@ -228,7 +228,7 @@ Tree、Vision 或 Action，不能把 Voice 发布成功视为这些下游已经�
 
 | 值 | 说明 |
 |---|---|
-| `interaction_timeout` | 空闲或总时长阈值触发；非空 ASR 刷新空闲计时。正式配置空闲超时 20 秒、总时长上限 0（禁用） |
+| `interaction_timeout` | 空闲或总时长阈值触发；非空 ASR 和即时 KWS 命令刷新空闲计时。正式配置空闲超时 20 秒、总时长上限 0（禁用） |
 | `stop_listening` | 外部通过 `/perception/voice/task` 主动停止 |
 
 ### 完整确定性产品词库
@@ -269,8 +269,8 @@ ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短
 - `match_strategy=catalog_exact` 表示标准词/句命中，`rule_expansion` 表示配置生成的
   扩展命中；扩展仍是启动时预生成、运行时整句哈希查找，不做子串或模糊匹配；
 - 同一句跳过规则和 RKLLM，不产生 `stage_complete stage=intent`；
-- 流式 KWS 只缓存候选，不在 VAD 结束前发布业务事件。ASR 完成后通过
-  `recognition_arbitration` 在 KWS 与 ASR 链路中选择唯一结果来源；被选中的命令只
+- 流式 KWS 按 `publish_mode` 即时发布或等待 ASR 仲裁；同句的业务结果使用一个
+  识别来源。已经发布即时 KWS 命令时，整句 ASR 提供文本与身份事件。命令只
   发布具体特殊事件，不附带 KNOWN 摘要。
 
 词库未命中时才进入下面的 Model Intent 意图协议。当前完整路由组、核心子集和所有等价短语以
@@ -341,13 +341,33 @@ DOG_PREFERENCE / DOG_CAPABILITY
 └───────────────────────────────────────────────────────┘
 ```
 
-### KWS 流式候选与 ASR 仲裁
+### KWS 即时发布与整句仲裁
 
-KWS（关键词识别）在用户说话过程中实时检测指令词，但命中后只缓存候选并打印
-`stage_complete stage=kws result=candidate`，不立即发布业务事件。VAD 结束后仍执行
-ASR 和声纹，再通过 `stage_complete stage=recognition_arbitration` 选择唯一识别来源。
+正式配置使用 `publish_mode=immediate`，并启用 `negation_guard_enabled`。
+动作 KWS 命中后等待 `negation_guard_window_sec=0.25` 秒后续音频，
+独立否定检测流先处理相同音频，再允许发布目录指定的具体事件，
+并记录 `stage_complete stage=kws result=published_immediate`。同一句中的每个事件
+发布一次，后续语句可以再次发布相同事件。即时事件携带当前会话、语句和唤醒编号，
+`asr_text=""`，`speaker_id=unknown`，`speaker_role=undetermined`，
+`speaker_status=pending`，`speaker_confidence=0`。身份与完整 ASR 文本由后续事件提供。
+同句的业务结果使用 KWS 来源；同句没有 KWS 命令且未被拦截时执行 ASR 业务路由。
 
-默认仲裁规则如下：
+否定词表为“不要 / 别 / 不准 / 不许”，使用独立模型实例和解码流，标签仅在 Voice
+内部流转，绝不作为 ROS 动作事件。命中后清除本句待发布命令，并锁住后续 KWS 与
+ASR/模型动作回退；下一句重置。检测流异常也阻止本句动作回退。
+“别动 / 不准动 / 不许动 / 别叫 / 不许叫”只有完整 ASR 精确命中对应目录时放行，
+不对整个 HOLD_POSITION 或 QUIET 类别免检。
+通过检查的即时事件 slots 增加 `kws_negation_guard=passed` 与 `kws_guard_window_ms`。
+确认窗口按音频进度计时，VAD 结束不会缩短窗口；未确认命令由正常 ASR 路由处理。
+
+VAD 完成后，后台串行执行 ASR、声纹和意图推理，下一句继续进行 VAD 和 KWS。
+等待识别的音频受 `capture_buffer_sec` 容量和保留时间限制；超限或过期记录
+`speech_processing_queue result=discarded`。会话结束或重新唤醒后，旧任务结果丢弃。
+即时 KWS 命令刷新会话空闲计时。拦截不代替完整语义判断：否定词漏检、引用句、
+已发布后的改口仍可能误执行。`kws_guard result=late_veto` 记录迟到的否定信号，
+不会撤回已发布动作；必须结合 `published_event_types` 判断是否成功拦截。
+
+`publish_mode=deferred` 在 VAD 完成后使用整句 ASR 仲裁：
 
 - 没有 KWS 候选时选择 ASR 链路；
 - 同一句出现多个不同 KWS 候选时选择 ASR 链路；
@@ -355,17 +375,17 @@ ASR 和声纹，再通过 `stage_complete stage=recognition_arbitration` 选择�
   ASR 词库命中同一事件；冲突时选择 ASR，未确认时 KWS 不执行；
 - 长文本选择 ASR 链路，即使其中包含 KWS 关键词；
 - `priority_command_keys` 还必须命中 `priority_asr_aliases` 中同一命令的精确错写，才
-  允许覆盖；当前仅为 `吃罐罐→去滚罐` 和 `去拿→去哪`；
-- ASR 为空时不允许单一 KWS 候选独立执行；
+  允许覆盖；正式配置的白名单为 `吃罐罐→去滚罐`；
+- ASR 为空时由 `kws_fallback_on_asr_empty` 决定是否选择单个候选；
 - 只有被选来源发布一个具体业务事件；词库/KWS 不附带 KNOWN 摘要；
 - 声纹身份事件与 `speech` 是链路证据，不参与业务结果互斥。
 
-配置位于 `providers.kws.config`：`publish_mode=deferred`、
+配置位于 `providers.kws.config`：`publish_mode=immediate/deferred`、
 `arbitration_mode=exclusive`、`short_max_chars_zh`、`short_max_words_en`、
 `asr_long_text_wins`、`kws_fallback_on_asr_empty` 和
-`short_requires_asr_agreement`。当前仅允许 deferred/exclusive，另有窄范围
-`priority_command_keys + priority_asr_aliases` 精确错写白名单。
-配置为其他值会在启动时失败，避免恢复成先执行后纠错的链路。
+`short_requires_asr_agreement`。整句仲裁参数及
+`priority_command_keys + priority_asr_aliases` 精确错写白名单用于 deferred 模式。
+不支持的模式会在启动时失败。
 长度阈值只作用于已配置 KWS 候选，不会自动把目录中的一字/两字词加入关键词文件；
 单字关键词默认不启用，必须经过独立误触发验收后显式配置。
 
@@ -491,12 +511,15 @@ float64 latency_ms     # 处理耗时
 
 会话空闲计时在 ASR 返回非空文本时立即刷新，发生在声纹和语义处理之前。
 不要求命中词库或触发行为，NEUTRAL、UNKNOWN、语义拒识文本同样续期；
-空字符串、纯空白、ASR 异常以及只有 KWS 候选的情况不刷新。
-正式配置 `idle_timeout_sec=20`，最后一次非空 ASR 后静默 20 秒结束会话；
+已经发布的即时 KWS 命令同样刷新空闲计时。
+有效语音等待后台 ASR 判定时保持会话有效，ASR 完成后按结果判断空闲超时；
+主动停止和会话总时长上限仍然生效。
+空字符串、纯空白、ASR 异常以及尚未发布的 KWS 候选保持原计时。
+正式配置 `idle_timeout_sec=20`，最后一次有效活动后静默 20 秒结束会话；
 `max_duration_sec=0` 不设绝对上限。
 每次通过去重和时效检查的硬件再次唤醒也刷新 idle 计时，不重置会话开始时间、
 `interaction_id` 或有效 hold；其 `wake_id` 更新。`wake_debounce_sec=0.8` 过滤
-硬件重报，`wake_event_max_age_sec=8` 拒绝过旧唤醒（覆盖同步识别期间的排队）。
+硬件重报，`wake_event_max_age_sec=8` 拒绝过旧唤醒。
 后续 ASR 指令仍逐句核验
 声纹，不能继承唤醒身份作为执行授权。
 可调用 `stop_listening` 主动结束。ASR 活动仍记录为 `last_activity_reason=asr_result`。

@@ -7,7 +7,7 @@ logging:
 
 audio_debug:
   enabled: true
-  output_dir: /tmp/voice_debug
+  output_dir: ../log/voice_debug
   save_raw_capture: true
   save_vad_segment: true
   save_asr_input: true
@@ -54,7 +54,7 @@ topics:
   voice_task: /perception/voice/task
 
 interaction:
-  # ASR 返回非空文本即刷新空闲计时，不要求命中命令或通过语义校验。
+  # 非空 ASR 或已经发布的即时 KWS 命令刷新空闲计时。
   # 正式配置 20 秒；正数时静默超过该时长即结束会话，0 或负数 = 不因空闲退出。
   idle_timeout_sec: 20.0
   hold_max_lease_sec: 20.0
@@ -125,21 +125,22 @@ providers:
       keywords_threshold: 0.4
       num_trailing_blanks: 1
       event_confidence: 0.9
-      # KWS 仅生成候选；VAD 结束后与完整 ASR 文本仲裁，只发布一个结果来源。
-      # 明确分工：KWS 只做候选；普通短命令也必须得到 ASR 词库同事件确认。
-      publish_mode: deferred
+      # 即时模式先经独立否定词检测，并等待 250 ms 后续音频通过检测。
+      # 命中否定词后锁住本句动作；下一句重新开始。
+      negation_guard_enabled: true
+      negation_keywords_file: kws_negation_keywords.txt
+      negation_guard_window_sec: 0.25
+      # 通过拦截检查后发布目录指定事件；同句 ASR 提供文本和声纹信息。
+      # deferred 模式在整句 ASR 完成后仲裁。
+      publish_mode: immediate
       arbitration_mode: exclusive
+      # 以下仲裁参数用于 deferred 模式。
       asr_long_text_wins: true
-      # ASR 整段为空（低电平/极短音频常见）时不再丢弃已命中的 KWS 候选。
-      # 原先 false 会让「KWS 听对了、ASR 没出字」直接变成一次无声失败。
       kws_fallback_on_asr_empty: true
       short_requires_asr_agreement: true
       short_max_chars_zh: 2
       short_max_words_en: 2
       # 只有已确认的”命令 + ASR 错写”精确组合允许 KWS 覆盖；不得泛化。
-      # GO_GET_IT:[去哪] 已于 2026-09-18 删除：fuzzy 同音兜底现在能通用地把
-      # 「去哪」解析成 GO_GET_IT，仲裁改走 short_asr_catalog_agrees，结果等价。
-      # ⚠️ 此删除依赖 command_lexicon.fuzzy_matching=true；若关掉 fuzzy，需恢复该别名。
       priority_command_keys: [EAT_CANNED_FOOD]
       priority_asr_aliases:
         EAT_CANNED_FOOD: [去滚罐]
@@ -173,11 +174,11 @@ providers:
       num_threads: 2
   intent_rule:
     type: rule
-    enabled: true
+    enabled: false
     config: {}
   intent_llm:
     type: rkllm
-    enabled: true
+    enabled: false
     config:
       model: ../../models/llm/qwen2_5_5b_rk3588_260903_w8a8.rkllm
       lib_path: ../lib/librkllmrt.so

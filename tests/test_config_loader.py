@@ -30,6 +30,7 @@ providers:
   kws:
     config:
       keywords_file: keywords.txt
+      negation_keywords_file: negation_keywords.txt
   wakeup:
     config:
       port: /dev/ttyACM0
@@ -57,6 +58,9 @@ topics:
     )
     assert config["providers"]["kws"]["config"]["keywords_file"] == str(
         config_dir / "keywords.txt"
+    )
+    assert config["providers"]["kws"]["config"]["negation_keywords_file"] == str(
+        config_dir / "negation_keywords.txt"
     )
     assert config["providers"]["wakeup"]["config"]["port"] == "/dev/ttyACM0"
     assert config["topics"]["audio_event"] == "/perception/audio_event"

@@ -98,6 +98,7 @@ _ENGLISH_ARPABET = {
 # reading in a command context. Add any new ambiguous word here.
 _POLYPHONE_OVERRIDES = {
     "转圈": "zh uàn q uān",  # 转 = zhuàn (rotate), not pypinyin default zhuǎn
+    "不要": "b ú y ào",  # 不 before a fourth tone uses the spoken second tone.
 }
 
 
@@ -145,12 +146,15 @@ def g2p(word: str) -> str:
     return arpabet
 
 
-def generate() -> str:
+def generate(raw_path: Path = _RAW_PATH) -> str:
     """Render kws_keywords.txt content from the raw file."""
     lines: list[str] = []
-    for raw in _RAW_PATH.read_text(encoding="utf-8").splitlines():
+    for raw in raw_path.read_text(encoding="utf-8").splitlines():
         stripped = raw.strip()
-        if not stripped or stripped.lstrip().startswith("#"):
+        if stripped.startswith("#"):
+            # sherpa treats '#' as a probability override, not a comment.
+            continue
+        if not stripped:
             lines.append(raw)
             continue
         word, label = (part.strip() for part in raw.rsplit("@", 1))
@@ -166,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
         help="verify generated content matches the current file, write nothing",
     )
     parser.add_argument(
+        "--negation",
+        action="store_true",
+        help="generate/check the independent negation keyword file",
+    )
+    parser.add_argument(
         "--tokens",
         default=None,
         help=(
@@ -175,7 +184,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    rendered = generate()
+    raw_path = _CONFIG_DIR / "kws_negation_keywords_raw.txt" if args.negation else _RAW_PATH
+    out_path = _CONFIG_DIR / "kws_negation_keywords.txt" if args.negation else _OUT_PATH
+    rendered = generate(raw_path)
     tokens_path = (
         Path(args.tokens).expanduser()
         if args.tokens else _default_tokens_path()
@@ -183,15 +194,15 @@ def main(argv: list[str] | None = None) -> int:
 
     status = 0
     if args.check:
-        current = _OUT_PATH.read_text(encoding="utf-8")
+        current = out_path.read_text(encoding="utf-8")
         if rendered == current:
-            print(f"OK: {_OUT_PATH} is up to date")
+            print(f"OK: {out_path} is up to date")
         else:
-            print(f"DIFF: {_OUT_PATH} is stale; run without --check to regenerate")
+            print(f"DIFF: {out_path} is stale; run without --check to regenerate")
             status = 1
     else:
-        _OUT_PATH.write_text(rendered, encoding="utf-8")
-        print(f"Wrote {_OUT_PATH} ({rendered.count(chr(10))} lines)")
+        out_path.write_text(rendered, encoding="utf-8")
+        print(f"Wrote {out_path} ({rendered.count(chr(10))} lines)")
 
     if tokens_path is None or not tokens_path.is_file():
         print(

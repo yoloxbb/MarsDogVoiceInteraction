@@ -1,14 +1,15 @@
-"""Track deferred KWS candidates during one utterance."""
-
 from __future__ import annotations
 
 
 class UtteranceCommandTracker:
-    """Cache unique KWS candidates until ASR arbitration is complete."""
+    """记录同一句的 KWS 候选及已经发布的事件。"""
 
     def __init__(self) -> None:
         self._utterance_id = ""
         self._kws_candidates: dict[str, dict[str, object]] = {}
+        self._published_event_types: dict[str, None] = {}
+        self._asr_complete = False
+        self._kws_block_reason = ""
 
     @property
     def utterance_id(self) -> str:
@@ -28,9 +29,43 @@ class UtteranceCommandTracker:
     def kws_candidate_count(self) -> int:
         return len(self._kws_candidates)
 
+    @property
+    def published_event_types(self) -> tuple[str, ...]:
+        return tuple(self._published_event_types)
+
+    @property
+    def asr_business_allowed(self) -> bool:
+        return not self._published_event_types and not self._kws_block_reason
+
+    @property
+    def kws_block_reason(self) -> str:
+        return self._kws_block_reason
+
+    def block_kws(self, reason: str) -> None:
+        if self.is_active:
+            self._kws_block_reason = str(reason)
+
+    @property
+    def awaiting_asr(self) -> bool:
+        return self.is_active and not self._asr_complete
+
+    def mark_asr_complete(self) -> None:
+        self._asr_complete = True
+
     def begin(self, utterance_id: str) -> None:
         self._utterance_id = str(utterance_id)
         self._kws_candidates.clear()
+        self._published_event_types.clear()
+        self._asr_complete = False
+        self._kws_block_reason = ""
+
+    def mark_kws_published(self, event_type: str) -> bool:
+        if self._kws_block_reason or not self.is_active or event_type not in self._kws_candidates:
+            return False
+        if event_type in self._published_event_types:
+            return False
+        self._published_event_types[event_type] = None
+        return True
 
     def record_kws_candidate(self, event: dict[str, object]) -> bool:
         """Record one unique candidate and return whether it is new."""
@@ -53,3 +88,5 @@ class UtteranceCommandTracker:
     def finish(self) -> None:
         self._utterance_id = ""
         self._kws_candidates.clear()
+        self._published_event_types.clear()
+        self._kws_block_reason = ""

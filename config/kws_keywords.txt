@@ -24,6 +24,31 @@ f àng x ià @DROP
 zh āng z uǐ @DROP
 ch ī g uàn g uàn @EAT_CANNED_FOOD
 q ù n á @GO_GET_IT
+z ǒu @WALK
+q ù @WALK
+l ái @COME
+l ái zh è @COME
+d ào w ǒ zh è ér l ái @COME
+g ēn w ǒ z ǒu @FOLLOW
+ch ū q ù w án @GO_OUT
+ch ū q ù l iū l iū @GO_OUT
+z uò @SIT
+zh àn zh e @STAND_STILL
+w ò g è sh ǒu @SHAKE_HAND
+t ái sh ǒu @SHAKE_HAND
+j ī g è zh ǎng @HIGH_FIVE
+p āi sh ǒu @HIGH_FIVE
+d ěng zh e @HOLD_POSITION
+t íng @HOLD_POSITION
+b ù zh ǔn d òng @HOLD_POSITION
+b ù x ǔ d òng @HOLD_POSITION
+l ǎo sh í d iǎn @HOLD_POSITION
+d ěng d ěng @HOLD_POSITION
+s ōng k āi @DROP
+s ōng k ǒu @DROP
+b ì z uǐ @QUIET
+b ié j iào @QUIET
+b ù x ǔ j iào @QUIET
 K AH1 M HH IY1 R @COME
 SH EY1 K HH AE1 N D Z @SHAKE_HAND
 HH AY1 F AY1 V @HIGH_FIVE

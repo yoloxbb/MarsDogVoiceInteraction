@@ -139,6 +139,8 @@ class _NodeHarness:
     _end_interaction = VoiceInteractionNode._end_interaction
     _finish_kws_utterance = VoiceInteractionNode._finish_kws_utterance
     _poll_kws_events = VoiceInteractionNode._poll_kws_events
+    _poll_speech_processing = VoiceInteractionNode._poll_speech_processing
+    _effective_kws_arbitration = VoiceInteractionNode._effective_kws_arbitration
     _audio_speech_active = staticmethod(
         VoiceInteractionNode._audio_speech_active
     )
@@ -163,6 +165,7 @@ class _NodeHarness:
         self._state_machine = VoiceInteractionStateMachine()
         self._state_machine.trigger(Trigger.WAKEUP)
         self._command_tracker = UtteranceCommandTracker()
+        self._speech_processing = None
         self._interaction_lock = threading.RLock()
         self._interaction_active = True
         self._interaction_id = "interaction-test"

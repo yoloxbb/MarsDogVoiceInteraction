@@ -1,0 +1,5 @@
+# Internal veto signals only; these labels are never ROS action events.
+不要 @不要
+别 @别
+不准 @不准
+不许 @不许

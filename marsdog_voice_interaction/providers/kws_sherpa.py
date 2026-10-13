@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 import logging
+import math
 from pathlib import Path
 import threading
 from typing import Any
@@ -61,9 +62,23 @@ class KWSSherpaProvider(BaseProvider):
         self._event_confidence = float(
             config.get("event_confidence", 0.90)
         )
+        self._guard_enabled = bool(config.get("negation_guard_enabled", False)) and (
+            str(config.get("publish_mode", "deferred")).strip().lower() == "immediate"
+        )
+        self._negation_keywords_file = str(config.get("negation_keywords_file", ""))
+        self._guard_window_sec = float(config.get("negation_guard_window_sec", 0.25))
+        if self._guard_enabled and (
+            not math.isfinite(self._guard_window_sec) or self._guard_window_sec <= 0
+        ):
+            raise ValueError("negation_guard_window_sec must be a finite positive number")
 
         self._spotter: Any = None
         self._stream: Any = None
+        self._negation_spotter: Any = None
+        self._negation_stream: Any = None
+        self._guard_reason = ""
+        self._audio_received_sec = 0.0
+        self._pending_commands: deque[tuple[float, dict[str, Any]]] = deque()
         self._stream_lock = threading.Lock()
         self._events: deque[dict[str, Any]] = deque()
         self._event_lock = threading.Lock()
@@ -85,18 +100,19 @@ class KWSSherpaProvider(BaseProvider):
                 self._joiner,
                 self._keywords_file,
             )
+            if self._guard_enabled:
+                required += (self._negation_keywords_file,)
             missing = [path for path in required if not Path(path).is_file()]
             if missing:
                 raise FileNotFoundError(
                     "KWS files not found: " + ", ".join(missing)
                 )
 
-            self._spotter = KeywordSpotter(
+            common = dict(
                 tokens=self._tokens,
                 encoder=self._encoder,
                 decoder=self._decoder,
                 joiner=self._joiner,
-                keywords_file=self._keywords_file,
                 num_threads=self._num_threads,
                 sample_rate=self._sample_rate,
                 max_active_paths=self._max_active_paths,
@@ -106,14 +122,24 @@ class KWSSherpaProvider(BaseProvider):
                 provider=self._provider,
                 device=self._device,
             )
+            self._spotter = KeywordSpotter(keywords_file=self._keywords_file, **common)
+            if self._guard_enabled:
+                # A separate vocabulary/stream prevents command hits and resets
+                # from consuming the negation prefix. Do not add veto labels to
+                # the business command inventory.
+                self._negation_spotter = KeywordSpotter(
+                    keywords_file=self._negation_keywords_file, **common,
+                )
             self.available = True
             logger.info(
                 "KWSSherpaProvider started — model=%s keywords=%s "
-                "threshold=%.2f keyword_count=%d",
+                "threshold=%.2f keyword_count=%d negation_guard=%s guard_window_sec=%.3f",
                 self._encoder,
                 self._keywords_file,
                 self._keywords_threshold,
                 self._count_keywords(),
+                self._guard_enabled,
+                self._guard_window_sec if self._guard_enabled else 0.0,
             )
         except FileNotFoundError as exc:
             self.available = False
@@ -130,6 +156,9 @@ class KWSSherpaProvider(BaseProvider):
         with self._stream_lock:
             self._stream = None
             self._spotter = None
+            self._negation_stream = None
+            self._negation_spotter = None
+            self._pending_commands.clear()
         with self._event_lock:
             self._events.clear()
         self._seen_actions.clear()
@@ -156,16 +185,26 @@ class KWSSherpaProvider(BaseProvider):
             return
         with self._stream_lock:
             self._stream = self._spotter.create_stream()
+            self._negation_stream = (
+                self._negation_spotter.create_stream() if self._guard_enabled else None
+            )
+            self._guard_reason = ""
+            self._audio_received_sec = 0.0
+            self._pending_commands.clear()
             self._seen_actions.clear()
             self._utterance_decodes = 0
             self._utterance_hits = 0
-        with self._event_lock:
-            self._events.clear()
+            with self._event_lock:
+                self._events.clear()
 
     def finish_utterance(self) -> None:
         """Discard the current stream after all captured chunks were consumed."""
         with self._stream_lock:
             self._stream = None
+            self._negation_stream = None
+            # Never shorten the confirmation window at VAD end/cancellation.
+            # The ordinary ASR route can still handle an unconfirmed command.
+            self._pending_commands.clear()
             decodes = self._utterance_decodes
             hits = self._utterance_hits
             self._utterance_decodes = 0
@@ -193,11 +232,26 @@ class KWSSherpaProvider(BaseProvider):
         if waveform.size == 0:
             return
 
+        stream = None
         try:
             with self._stream_lock:
                 stream = self._stream
                 if stream is None:
                     return
+                self._audio_received_sec += waveform.size / int(sample_rate)
+                if self._guard_enabled:
+                    guard = self._negation_spotter
+                    guard_stream = self._negation_stream
+                    if guard is None or guard_stream is None:
+                        raise RuntimeError("negation detector is unavailable")
+                    guard_stream.accept_waveform(int(sample_rate), waveform)
+                    # Decode the veto stream first for every audio chunk.
+                    while guard.is_ready(guard_stream):
+                        guard.decode_stream(guard_stream)
+                        negation_keyword = str(guard.get_result(guard_stream)).strip()
+                        if negation_keyword:
+                            guard.reset_stream(guard_stream)
+                            self._block_guard("negation_keyword", keyword=negation_keyword)
                 stream.accept_waveform(int(sample_rate), waveform)
                 while self._spotter.is_ready(stream):
                     self._utterance_decodes += 1
@@ -208,8 +262,33 @@ class KWSSherpaProvider(BaseProvider):
                     self._utterance_hits += 1
                     self._spotter.reset_stream(stream)
                     self._queue_keyword(keyword)
+                self._release_guarded_commands()
         except Exception as exc:
+            if self._guard_enabled:
+                with self._stream_lock:
+                    if stream is not None and stream is self._stream:
+                        self._block_guard("kws_decode_error")
             logger.warning("KWS streaming decode failed: %s", exc)
+
+    def _block_guard(self, reason: str, *, keyword: str = "") -> None:
+        """Latch a veto under the stream lock; never expose it as a ROS action."""
+        if self._guard_reason == reason or self._guard_reason == "kws_decode_error":
+            return
+        self._guard_reason = reason
+        self._pending_commands.clear()
+        with self._event_lock:
+            # Also suppress commands ready for polling but not yet consumed.
+            self._events.clear()
+            self._events.append({"kind": "kws_guard", "reason": reason, "keyword": keyword})
+        logger.info("KWS negation guard blocked utterance: reason=%s keyword=%s", reason, keyword)
+
+    def _release_guarded_commands(self) -> None:
+        if self._guard_reason:
+            return
+        while self._pending_commands and self._pending_commands[0][0] <= self._audio_received_sec:
+            _, event = self._pending_commands.popleft()
+            with self._event_lock:
+                self._events.append(event)
 
     def poll_event(self) -> dict[str, Any] | None:
         """Return the next detected command without blocking."""
@@ -226,6 +305,9 @@ class KWSSherpaProvider(BaseProvider):
         if command_key in self._seen_actions:
             return
         self._seen_actions.add(command_key)
+        if self._guard_reason:
+            logger.info("KWS command suppressed: command=%s reason=%s", command_key, self._guard_reason)
+            return
 
         social, intent, control = labels
         event = classification_to_event(
@@ -250,6 +332,10 @@ class KWSSherpaProvider(BaseProvider):
             "action": command_key,
             "language": "zh-en",
         })
-        with self._event_lock:
-            self._events.append(event)
+        if self._guard_enabled:
+            event["kws_guard_window_ms"] = round(self._guard_window_sec * 1000.0, 2)
+            self._pending_commands.append((self._audio_received_sec + self._guard_window_sec, event))
+        else:
+            with self._event_lock:
+                self._events.append(event)
         logger.info("KWS detected command: %s", command_key)

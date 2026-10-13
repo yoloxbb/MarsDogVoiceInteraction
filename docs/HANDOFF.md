@@ -6,8 +6,8 @@
 
 语音节点负责唤醒、录音/VAD、流式 KWS、ASR、声纹识别、完整产品词库匹配、
 非词库文本的意图分类，以及一次语音会话的生命周期。当前词库覆盖 116 条
-源数据，另新增“自己去玩吧”，共 82 个路由组和 156 条标准中文短语；每条另生成 10 个受控扩展，
-再加 70 条人工登记的变体，共 1786 个精确匹配入口；其中 19 组是核心指令子集。
+源数据及新增词条，共 83 个路由组和 158 条标准中文短语；每条另生成 10 个受控扩展，
+再加 70 条人工登记的变体，共 1808 个精确匹配入口；其中 19 组是核心指令子集。
 它只发布“听见了什么”和
 “会话状态”，不订阅视觉数据，也不直接发布 `/cmd_vel` 或调用动作系统。
 
@@ -100,8 +100,9 @@ Model Intent 沿用已交付下游的业务事件名；明确的姿态、移动�
 
 状态结束原因当前为：
 
-- `interaction_timeout`：最后一次非空 ASR 后静默超过 `idle_timeout_sec`（正式配置
-  20 秒）即触发；纯 VAD、空 ASR 和缓存的 KWS 候选不续期。总时长上限正式配置为 0，
+- `interaction_timeout`：最后一次非空 ASR 或即时 KWS 命令后静默超过
+  `idle_timeout_sec`（正式配置 20 秒）即触发；后台 ASR 判定期间保持会话有效。
+  纯 VAD、空 ASR 和尚未发布的候选保持原计时。总时长上限正式配置为 0，
   不设硬上限。
 - `stop_listening`：Service 主动结束。
 
@@ -115,8 +116,8 @@ Model Intent 沿用已交付下游的业务事件名；明确的姿态、移动�
 ### 确定性词库、KWS 和唯一来源仲裁
 
 ASR 得到文本后，节点先使用 `config/command_catalog.yaml` 做规范化后的整句精确匹配。
-目录以产品表的 116 条数据行为覆盖基线，连同新增“自己去玩吧”，共 156 条标准中文短语，
-每条按配置生成 10 个受控扩展，并归并成 82 个稳定路由组。标准短语或扩展命中时
+目录以产品表的 116 条数据行为覆盖基线，连同新增词条，共 158 条标准中文短语，
+每条按配置生成 10 个受控扩展，并归并成 83 个稳定路由组。标准短语或扩展命中时
 直接发布该组配置的 `event_type`，并跳过 RKLLM/
 规则意图；未命中才进入意图识别。词库中的“回来”明确归为 `COME`，不再归为旧版
 `RETURN`。
@@ -129,19 +130,30 @@ ASR 得到文本后，节点先使用 `config/command_catalog.yaml` 做规范化
 产品表的 138 条英文仅作参考元数据，当前不参与确定性匹配。原因是表内存在
 `Good dog` 这类跨分类重复表达，在产品给出唯一归属前不能盲目直发。
 
-KWS 在 VAD 结束前只缓存候选，不发布业务事件。ASR 完成后由 Voice 在 KWS 和 ASR
-链路之间选择唯一结果来源：普通短指令只有在 ASR 词库命中同一事件时才选择 KWS；
-冲突、未确认、多个候选或空 ASR 均不允许 KWS 单独执行。长句选择 ASR。仅
-`吃罐罐→去滚罐`、`去拿→去哪` 两个已确认的精确错写组合允许 KWS 覆盖。仲裁记录为
-`stage_complete stage=recognition_arbitration`。词库或 KWS 指令无论由哪一来源选中，
-都只发布目录指定的具体特殊事件，不附带 KNOWN 摘要。下游仍应按
-`interaction_id + utterance_id + event_type` 做幂等保护。
+正式配置使用 `publish_mode=immediate`，并启用独立否定词检测。
+动作命中后等待 250 ms 后续音频通过检测，再发布具体事件，
+记录 `stage_complete stage=kws result=published_immediate`；同一句的每个事件发布
+一次。即时事件身份为 `unknown/pending`，完整 ASR 和声纹结果由后续事件提供。
+同句的业务结果使用 KWS 来源；未命中且未被否定拦截的语句执行 ASR 词库和意图路由。
+“不要 / 别 / 不准 / 不许”命中后锁住本句的 KWS 与 ASR 动作回退；下一句重置。
+“别动 / 不准动 / 不许动 / 别叫 / 不许叫”只通过整句 ASR 精确目录匹配放行。
+否定词漏检、引用句和发布后的改口仍可能误触发；`kws_guard result=late_veto`
+表示已有动作发布，不能视作成功拦截，也不会自动撤回动作。
+
+整句识别在后台串行执行，下一句继续进行 VAD 和 KWS。等待识别的音频容量及保留
+时间由 `capture_buffer_sec` 限定，超限和过期记录 `speech_processing_queue`；
+重新唤醒或结束会话时丢弃旧任务结果。
+
+`publish_mode=deferred` 在整句 ASR 后进行唯一来源仲裁，短句确认、精确错写白名单
+和空 ASR 行为由对应配置控制。两种模式均发布目录指定的具体事件。下游按
+`interaction_id + utterance_id + event_type` 处理重复事件。
 
 ## 4. 启动与验证
 
 ```bash
-cd /home/cat/xbb/MarsDogVoiceInteraction
+cd /home/cat/marsdog_ws/src/MarsDogVoiceInteraction
 source /opt/ros/humble/setup.bash
+source /home/cat/marsdog_ws/install/local_setup.bash
 uv sync --extra dev
 uv run marsdog-voice-interaction \
   --ros-args -p config_path:="$PWD/config/voice.yaml"
@@ -150,10 +162,16 @@ uv run marsdog-voice-interaction \
 如果需要 `/perception/voice/task`，必须先用 colcon 生成 `.srv`：
 
 ```bash
-colcon build --base-paths . --packages-select marsdog_voice_interaction
-source install/setup.bash
+cd /home/cat/marsdog_ws
+colcon build --packages-select marsdog_voice_interaction --symlink-install
+source install/local_setup.bash
+ros2 pkg prefix marsdog_voice_interaction
+# 应输出 /home/cat/marsdog_ws/install/marsdog_voice_interaction
 ros2 launch marsdog_voice_interaction voice.launch.py
 ```
+
+`config_path` 只切换 YAML，不能切换旧工作空间中的节点代码。当前工作空间的
+`local_setup.bash` 应在其他 overlay 之后加载；以 `ros2 pkg prefix` 和启动栈为准。
 
 检查：
 
@@ -172,7 +190,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 
 | 配置项 | 当前值/含义 |
 |---|---|
-| `interaction.idle_timeout_sec` | 正式配置为 20 秒，从最后一次非空 ASR 开始计算；0 或负数 = 禁用空闲超时 |
+| `interaction.idle_timeout_sec` | 正式配置为 20 秒，从最后一次非空 ASR 或即时 KWS 命令开始计算；后台 ASR 判定期间保持会话有效；0 或负数 = 禁用空闲超时 |
 | `interaction.max_duration_sec` | 正式配置为 0，禁用总时长上限；正数时不被活动或租约延长 |
 | `interaction.refresh_on_any_speech` | 测试专用，生产为 `false` 时非空 ASR 文本即刷新，不要求语义接受；`true` 时仅 VAD 检测到语音也会刷新 |
 | `interaction.hold_max_lease_sec` | 单次会话保持租约上限 20 秒，调用方需定期续租 |
@@ -183,7 +201,7 @@ Provider，不能只按模式名称判断真机或 Mock。
 | `providers.kws` | 流式关键词命令 |
 | `providers.asr` | 当前为 SenseVoice INT8 ONNX；provider 实现仍支持其他 Sherpa ASR 模型 |
 | `providers.speaker` | 声纹模型和阈值 |
-| `command_lexicon` | 完整产品词库（116 条源数据及新增词条/82 个路由组/156 条标准词句/1560 条受控扩展/70 条变体/19 组核心子集）开关、目录路径和 `fuzzy_matching` 同音兜底 |
+| `command_lexicon` | 完整产品词库（116 条源数据及新增词条/83 个路由组/158 条标准词句/1580 条受控扩展/70 条变体/19 组核心子集）开关、目录路径和 `fuzzy_matching` 同音兜底 |
 | `providers.intent_*` | Model Intent 优先、三轴兼容规则回退 |
 
 配置文件中的文件和目录均使用相对于 YAML 所在目录的路径：模型默认通过

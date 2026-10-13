@@ -563,8 +563,16 @@ def test_documented_qa_command_inventory_matches_current_code() -> None:
         for line in keyword_lines
     }
 
-    assert len(ACTION_TO_VOICE_EVENT) == 25
+    assert len(ACTION_TO_VOICE_EVENT) == 26
     assert len(_RULES) == 30
-    assert len(keyword_lines) == 39
-    assert len(keyword_actions) == 20
-    assert {"BRING", "FETCH", "STOP", "WALK"}.isdisjoint(keyword_actions)
+    assert len(keyword_lines) == 64
+    assert len(keyword_actions) == 22
+    assert {"BRING", "FETCH", "STOP", "RETURN"}.isdisjoint(keyword_actions)
+    negation_file = keyword_file.with_name("kws_negation_keywords_raw.txt")
+    negations = {
+        line.rsplit("@", 1)[-1].strip()
+        for line in negation_file.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert negations == {"不要", "别", "不准", "不许"}
+    assert negations.isdisjoint(ACTION_TO_VOICE_EVENT)

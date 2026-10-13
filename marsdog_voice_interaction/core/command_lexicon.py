@@ -172,6 +172,39 @@ class DirectCommandMatch:
             "language": language or "zh",
         }
 
+    def to_kws_event(
+        self,
+        candidate: dict[str, Any],
+        *,
+        utterance_id: str,
+        latency_ms: float,
+    ) -> dict[str, Any]:
+        event = self.to_event(asr_text="", language="zh")
+        event.update({
+            "utterance_id": utterance_id,
+            "intent_source": "kws",
+            "intent_confidence": float(candidate.get("intent_confidence", 0.0)),
+            "speaker_id": "unknown",
+            "speaker_confidence": 0.0,
+            "speaker_role": "undetermined",
+            "speaker_status": "pending",
+            "latency_ms": round(latency_ms, 2),
+        })
+        event["slots"] = [
+            slot for slot in event["slots"]
+            if slot["key"] not in {"match_strategy", "matched_phrase"}
+        ] + [
+            {"key": "match_strategy", "value": "kws_immediate"},
+            {"key": "recognition_strategy", "value": "kws_immediate"},
+            {"key": "kws_keyword", "value": self.command_key},
+        ]
+        if "kws_guard_window_ms" in candidate:
+            event["slots"].extend([
+                {"key": "kws_negation_guard", "value": "passed"},
+                {"key": "kws_guard_window_ms", "value": str(candidate["kws_guard_window_ms"])},
+            ])
+        return event
+
     def to_known_event(
         self,
         *,

@@ -2,18 +2,11 @@
 
 MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的完整语音链路：
 
-```text
-讯飞唤醒板
-    ↓
-麦克风采集 → Silero VAD ─┬→ 流式 KWS → 缓存候选 ─┐
-                          ├→ SenseVoice ASR ───────┼→ 唯一来源仲裁
-                          │                        ├→ KWS 结果组
-                          │                        └→ ASR → 完整产品词库
-                          │                                  └→ 未命中 → Model Intent / 兼容规则
-                          └→ 3D-Speaker 声纹识别 → 身份事件
-                                                ↓
-                                  /perception/audio_event
-```
+讯飞串口产生唤醒事件后，麦克风音频同时进入 Silero VAD 和流式 KWS。正式配置使用
+即时 KWS：命中后通过否定检查与 250 ms 音频确认窗口，再发布 `/perception/audio_event`。
+VAD 完成片段后，后台串行执行
+SenseVoice ASR、3D-Speaker 和意图推理；同句已经发布 KWS 命令时，ASR 提供文本和
+身份信息。同句没有 KWS 命令且未被拦截时，ASR 文本经过词库和 Model Intent 路由。
 
 项目只负责“听见了什么”以及语音会话的生命周期，不订阅视觉数据，不直接控制
 底盘，也不负责行为优先级、排队或抢占。
@@ -25,8 +18,8 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
   这些标定只由动作项目在执行转向时应用一次。
 - 使用 sherpa-onnx Silero VAD 实时切分语音。
 - VAD 与流式 KWS 复用同一份 16 kHz 麦克风数据，不重复打开设备。
-- KWS 命中中英文核心动作词后只缓存候选。VAD 结束、ASR 得到完整文本后再做
-  KWS/ASR 仲裁，避免长句中包含短关键词时提前误触发动作。
+- KWS 命中中英文动作词并通过否定检查与确认窗口后发布目录指定事件，携带会话和语句编号。
+  同一句中每个事件发布一次；不同语句可以再次执行相同命令。
 - 使用当前配置的 SenseVoice INT8 ONNX 完成整句 ASR，优先精确匹配
   完整产品词库。当前目录覆盖
   116 条源数据及新增词条“自己去玩吧”“这是啥”“这是什么”（其中 19 组为核心指令），共 83 个路由组、158 条标准
@@ -46,16 +39,26 @@ MarsDog 的独立语音交互 ROS2 包，负责从唤醒到意图事件发布的
 - 使用 `interaction_id` 和 `utterance_id` 关联一次会话及其中的每句话。
 - 支持 pipeline Mock 和直接事件 Mock，无硬件也可联调下游。
 
-KWS 与 ASR 采用延迟发布、唯一来源仲裁。普通短指令的唯一 KWS 候选必须得到 ASR
-词库同事件确认；冲突、未确认、空 ASR 或多个 KWS 候选均不得由 KWS 单独执行。长句
-采用完整 ASR 文本。仅两个已确认的“命令 + ASR 精确错写”组合允许 KWS 覆盖。
-被选中的核心命令只发布具体特殊事件，且不会再同时
-发布另一识别来源的业务结果或 KNOWN 摘要。声纹和 `speech`
-证据不受业务结果仲裁影响。词库未命中且 ASR 被选中时才进行意图处理。
+`providers.kws.config.publish_mode=immediate` 在说话过程中发布关键词命令。
+正式配置启用 `negation_guard_enabled`：独立 KWS 流检测“不要 / 别 / 不准 / 不许”，
+动作命中后等待 `negation_guard_window_sec=0.25` 秒后续音频通过检测，再允许发布。
+确认窗口按已处理音频计时；录音停止或 VAD 结束不会提前放行，未确认动作交给 ASR。
+命中否定词会拦住本句 KWS 和 ASR 动作回退，即使 ASR 漏掉否定前缀也不放行。
+“别动 / 不准动 / 不许动 / 别叫 / 不许叫”通过完整 ASR 的精确目录匹配保留。
+同句的业务结果使用 KWS 来源。即时事件的 `asr_text` 为空，
+`speaker_id=unknown/speaker_status=pending/speaker_confidence=0`；后续文本和身份事件
+通过相同的 `interaction_id/utterance_id` 关联。该拦截只覆盖配置的中文否定词，
+不代替完整语义理解；漏检、引用句或发布后的改口仍可能误触发，已发动作不会自动撤回。
+
+`publish_mode=deferred` 使用整句 ASR 仲裁：长文本使用 ASR，普通短指令要求 ASR
+词库确认同一事件，精确错写白名单及空 ASR 行为由对应配置控制。两种模式均只发布目录
+指定的具体事件；声纹身份与 `speech` 保留独立事件。同句没有 KWS 业务结果时才进入
+ASR 词库和意图业务路由（被否定拦截的语句除外）。
 
 上述长度阈值只决定“已有 KWS 候选能否胜出”，不会自动把所有一字/两字词加入 KWS。
-当前仍只使用显式关键词文件；暂不默认加入“走、去、来、坐、停”等单字词，以避免环境
-音和长句片段造成高频候选。新增短关键词必须先完成误触发测试，再写入关键词文件。
+当前显式动作词表包含“走、去、来、坐、停”等单字词，须单独验收环境音和长句片段
+误触发。否定词使用独立的 `kws_negation_keywords_raw.txt` / `kws_negation_keywords.txt`，
+用 `scripts/generate_kws_keywords.py --negation` 生成；不计入业务动作词表。
 
 ## 项目边界
 
@@ -94,7 +97,7 @@ Service 参数见 [docs/ROS2_CONTRACT.md](docs/ROS2_CONTRACT.md)，测试执行�
 Python 依赖由 `pyproject.toml` 和 `uv.lock` 管理：
 
 ```bash
-cd /home/cat/xbb/MarsDogVoiceInteraction
+cd /home/cat/marsdog_ws/src/MarsDogVoiceInteraction
 uv sync --extra dev
 ```
 
@@ -121,20 +124,19 @@ uv sync --extra dev
 
 ## 构建
 
-本仓库已软链接到 ROS2 工作空间：
+当前开发副本位于 ROS2 工作空间：
 
 ```text
-/home/cat/ros2_ws/src/marsdog_voice_interaction
-    -> /home/cat/xbb/MarsDogVoiceInteraction
+/home/cat/marsdog_ws/src/MarsDogVoiceInteraction
 ```
 
 在工作空间中构建：
 
 ```bash
 source /opt/ros/humble/setup.bash
-cd /home/cat/ros2_ws
+cd /home/cat/marsdog_ws
 colcon build --packages-select marsdog_voice_interaction --symlink-install
-source install/setup.bash
+source install/local_setup.bash
 ```
 
 必须经过 colcon 构建后才能生成并使用自定义的 `VoiceTask.srv`。
@@ -145,7 +147,9 @@ source install/setup.bash
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/cat/ros2_ws/install/setup.bash
+source /home/cat/marsdog_ws/install/local_setup.bash
+ros2 pkg prefix marsdog_voice_interaction
+# 应输出 /home/cat/marsdog_ws/install/marsdog_voice_interaction
 ros2 launch marsdog_voice_interaction voice.launch.py
 ```
 
@@ -156,14 +160,19 @@ ros2 launch marsdog_voice_interaction voice.launch.py \
   config_path:=/absolute/path/to/voice.yaml
 ```
 
+`config_path` 只选择配置，不选择 Python 代码；进入 `marsdog_ws` 目录也不会切换
+ROS 环境。如果终端已加载旧的 `/home/cat/ros2_ws/install`，必须最后再 source
+当前 `marsdog_ws/install/local_setup.bash`。若启动栈仍指向 `ros2_ws/install`，
+或报 `publish_mode must be 'deferred'`，先检查上述包路径，不要改回旧发布模式。
+
 ### 直接运行源码入口
 
 适合开发调试，但调用 `/perception/voice/task` 前仍需 source 已构建的工作空间：
 
 ```bash
-cd /home/cat/xbb/MarsDogVoiceInteraction
+cd /home/cat/marsdog_ws/src/MarsDogVoiceInteraction
 source /opt/ros/humble/setup.bash
-source /home/cat/ros2_ws/install/setup.bash
+source /home/cat/marsdog_ws/install/local_setup.bash
 uv run marsdog-voice-interaction \
   --ros-args -p config_path:="$PWD/config/voice.yaml"
 ```
@@ -180,13 +189,13 @@ uv run marsdog-voice-interaction \
 | `command_lexicon` | 完整产品词库、19 组核心子集及每标准词/句 10 个受控精确匹配扩展 |
 | `speaker_api` | 声纹上传 API 的开关、监听地址、端口和大小限制 |
 | `topics` | ROS2 Topic 和 Service 名称 |
-| `interaction.idle_timeout_sec` | 非空 ASR 后的空闲超时；`<=0` 禁用。正式配置为 `20` 秒，静默超时即结束会话 |
+| `interaction.idle_timeout_sec` | 非空 ASR 或即时 KWS 命令后的空闲超时；`<=0` 禁用。正式配置为 `20` 秒 |
 | `interaction.max_duration_sec` | 单次唤醒会话总时长上限；`<=0` 禁用。正式配置为 `0`，由空闲超时或 `stop_listening` 结束 |
 | `interaction.hold_max_lease_sec` | 外部会话保持租约的单次最长秒数 |
 | `interaction.refresh_on_any_speech` | 测试专用：`true` 时 VAD 检测到语音即刷新空闲计时器；生产为 `false` 时要求 ASR 返回非空文本，不要求语义接受。见 `docs/TESTING_LOG_GUIDE.md` 的「测试模式」小节 |
 | `providers.wakeup` | 讯飞串口和唤醒事件类型 |
 | `providers.audio` | 麦克风、VAD 阈值、语音时长和预录缓存 |
-| `providers.kws` | KWS 模型、显式关键词、检测阈值及 deferred/exclusive 仲裁策略 |
+| `providers.kws` | KWS 模型、显式关键词、检测阈值及 immediate/deferred 发布模式 |
 | `providers.asr` | ASR 模型、语言和 ITN |
 | `providers.speaker` | 声纹模型及匹配阈值 |
 | `providers.intent_rule` | 规则意图回退 |
@@ -212,9 +221,10 @@ ROS2 绝对名称。
 | `continuous_capture` | `true` | 会话内保持麦克风打开，ASR/声纹/语义处理期间继续缓存音频 |
 | `capture_buffer_sec` | `6.0` 秒 | 待处理音频缓存容量及最大保留时间；超限丢弃受影响的句子 |
 
-持续采集的缓冲区只存音频，KWS 在逐句消费时运行，因此下一句不会污染当前句的
-候选。会话结束或取消时关闭设备并清空缓存。缓存溢出、录音丢帧或缓存过期时，
-丢弃当前句并等待静音边界后恢复，不把缺失前缀的残句当成新命令。
+持续采集的缓冲区保存音频，KWS 在逐句消费时运行。即时模式下，上一句的整句识别在
+后台串行执行，下一句继续进行 VAD 和 KWS。整句识别等待音频的容量与最长保留时间
+由 `capture_buffer_sec` 限定；超限或过期记录 `speech_processing_queue result=discarded`。
+重新唤醒或会话结束时丢弃旧任务结果。录音缺失时等待静音边界后恢复采集。
 VAD 检测灵敏度参数保持原值；采样率限定为 16 kHz，`num_threads` 显式传给
 实时和上传 VAD。`continuous_capture: false` 可恢复逐句开关设备的兼容路径。
 
@@ -643,10 +653,10 @@ MarsDogVoiceInteraction/
   `should_trigger_behavior_tree=true` 授权 Tree 生成一次性社交反应。
 - 每句话创建新的 `utterance_id`；同句话的 KWS、声纹、speech 和最终路由结果共享
   该 ID。
-- 非空 ASR 文本刷新会话活动时间，与是否接受语义无关；纯 VAD、空 ASR 和
-  缓存中的 KWS 候选不刷新。
+- 非空 ASR 文本和已经发布的即时 KWS 命令刷新会话活动时间。
+  纯 VAD、空 ASR 和尚未发布的候选保持原计时。
 - 会话静默时长使用单调时钟计算，不受 NTP、RTC 或人工调整系统时间影响。
-- 正式配置的空闲超时为 20 秒：最后一次非空 ASR 后静默超过该时长即结束会话；总时长
+- 正式配置的空闲超时为 20 秒：最后一次有效活动后静默超过该时长即结束会话；总时长
   上限为 0（不设硬上限），也可用 `stop_listening` 主动结束。若配置正数，总时长上限
   仍不能被活动或 hold 租约延长。
 - 活跃 VAD 采集不能被会话静默超时截断。

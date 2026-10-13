@@ -38,8 +38,8 @@ Voice 日志不能证明动作已经执行。
 代码和配置中的可验证库存为：
 
 - 完整确定性词库：`config/command_catalog.yaml` 覆盖产品表 **116 条源数据**
-  （不含表头），加上新增“自己去玩吧”，共 **82 个路由组、156 条标准中文词/句**；每条标准入口生成
-  10 条受控扩展，共 **1560 条扩展、70 条人工登记变体、1786 条运行时精确匹配入口**。ASR 文本
+  （不含表头），加上新增词条，共 **83 个路由组、158 条标准中文词/句**；每条标准入口生成
+  10 条受控扩展，共 **1580 条扩展、70 条人工登记变体、1808 条运行时精确匹配入口**。ASR 文本
   命中标准入口或受控扩展后不经过意图模型。19 组核心和其他目录项都只发布目录指定
   的具体事件，不附带 `EVT_VOICE_COMMAND_KNOWN` 摘要；测试人员按
   [COMMAND_CATALOG_TEST_MATRIX.md](COMMAND_CATALOG_TEST_MATRIX.md) 逐条对齐短语和事件。
@@ -57,10 +57,10 @@ Voice 日志不能证明动作已经执行。
   KNOWN 摘要。不能用模型 INTENT 数量替代词库覆盖率。
 - `FETCH/FIND_TOY` 还必须经过 `config/object_targets.yaml` 的 18 类目标物门控；
   未命中目标时 `object_name=NONE`，不得发布可执行 FETCH。
-- 流式 KWS 配置有 26 条中文和 13 条英文，共 39 条关键词，当前对应 20 个不同动作
+- 流式 KWS 动作配置有 51 条中文和 13 条英文，共 64 条关键词，当前对应 22 个不同动作
   标签。`WAIT` 是兼容 KWS 指令；“回来/COME BACK”统一映射为 `COME`。短句仲裁
-  阈值不会自动扩充关键词；当前不把“走、去、来、坐、停”等单字词加入 KWS，单字
-  输入仍按 ASR 目录验收。
+  阈值不会自动扩充关键词；当前包含“走、去、来、坐、停”等单字词，须单独验收误触发。
+  另有独立的 4 条中文否定词“不要 / 别 / 不准 / 不许”，不计入业务动作数量。
 - 本地规则意图：30 条正则规则。规则数量不等同于自然语言词条数量。
 - 产品表附件共 117 行是“1 行表头 + 116 行数据”，不应记成 117 组指令。
   目录保留 138 条英文参考表达，但由于存在跨分类重复，当前只作元数据，
@@ -91,42 +91,43 @@ Voice 日志不能证明动作已经执行。
 
 | 编号 | 当前测试口径 | 日志与接口证据 | 判定标准 |
 |---:|---|---|---|
-| 1 | 以 `command_catalog.yaml` 中 `core=true` 的 19 组为核心清单，每组代表短语播放 20 次，并补测全部别名。 | 同一句依次出现 ASR、`command_lexicon`、`recognition_arbitration` 和预期具体事件；检查 `dispatch_role/specific_event_type/raw_nlu_tag`，并确认无 KNOWN 摘要。 | 每组代表短语至少 17/20，且 19/19 均有结果。每句只发布预期具体事件且只有一个识别来源；出现非预期或重复的 `EVT_VOICE_*` 即失败。只有现成 Tree/Action 映射的组可判端到端 PASS。 |
-| 2 | 以产品表 116 条数据及新增“自己去玩吧”、共 156 条标准中文词/句和每条 10 个受控扩展执行覆盖测试。不再要求测试方另外提供“117 组”清单。 | 记录 `command_lexicon` 的 `matched/command_key/event_type/match_strategy/catalog_phrase/matched_phrase/expansion_profile/expansion_rule`，并复核事件 payload/slots；只有未命中时才记录模型来源。 | 标准词/句每条测试 10 次时，85% 门限至少 **9/10**；扩展规则自动验收 `1560/1560`，人工按五个 profile 和 19 组核心抽样。同时报告源数据 `116/116`、路由组 `82/82`、标准词/句 `156/156`、变体 `70/70`、总入口 `1786`；下游未映射项不得判端到端 PASS。 |
-| 3 | 使用唤醒词启动正式会话，并分别播放一条目录内指令和一条目录外语义文本。 | 两条都应有 ASR；目录内指令随后 `command_lexicon result=matched` 且不出现该句 `stage=intent`；目录外文本 `result=no_match` 后才出现 `stage=intent`。 | 同一 `interaction_id` 内两条链路各自完整且无 ERROR。仅有唤醒事件不能证明后续模块已工作。 |
+| 1 | 以 `command_catalog.yaml` 中 `core=true` 的 19 组为核心清单，每组代表短语播放 20 次，并补测全部别名。 | 即时模式检查 `stage=kws result=published_immediate` 和对应事件；没有 KWS 命中的语句检查 ASR 目录及仲裁。检查 `dispatch_role/specific_event_type/raw_nlu_tag`。 | 每组代表短语至少 17/20，且 19/19 均有结果。业务结果来源一致，同句同事件只发布一次。只有已经接入 Tree/Action 的组可判端到端 PASS。 |
+| 2 | 以产品表 116 条数据及新增词条、共 158 条标准中文词/句和每条 10 个受控扩展执行覆盖测试。 | 记录目录匹配策略、命令编号、事件和扩展规则，复核事件字段；未命中时记录模型来源。 | 标准词/句每条测试 10 次时，85% 门限至少 **9/10**；扩展规则验收 `1580/1580`。报告源数据 `116/116`、路由组 `83/83`、标准词/句 `158/158`、变体 `70/70`、总入口 `1808`；下游未接入项按 Voice 事件验收。 |
+| 3 | 使用唤醒词启动正式会话，并分别播放一条关键词命令和一条目录外语义文本。 | 关键词在 VAD 完成前出现即时命令事件；句尾提供 ASR 和身份事件。目录外文本没有 KWS 命中时进入词库及意图路由。 | 同一 `interaction_id` 内两条语句各自完整，后台识别期间关键词可以继续发布。 |
 | 4 | 机播已知文本，对照 `speech` 事件中的 `asr_text` 和完整 `payload`。 | `stage_complete stage=asr result=ok`；`event_publish event_type=speech`；完整 ROS2 原文。 | `asr_text` 与期望文本一致或符合用例允许的等价转写；JSON 字段符合当前 ROS2 契约。测试表里的 `action/target` 不作为格式标准。 |
-| 5 | 对编号 4 的同一 `utterance_id` 检查最终路由结果。 | 目录命中看 `stage=command_lexicon`；目录未命中才看 `stage=intent` 的 `social/intent/control/event_types`。 | 目录命中必须只得到指定具体事件且无 KNOWN 摘要；模型结果必须符合三轴组合约束。模型具体动作还必须有 `model_action_gate=accepted`；只有具体动作可执行。 |
-| 6 | 对已有中英文 KWS 逐条执行，并对完整中文 ASR 标准词/句与扩展分层执行；两类覆盖率分开报告。 | KWS 先看 `stage=kws result=candidate`，再看 `recognition_arbitration selected_source/reason` 及最终事件来源；目录看 `intent_source=command_lexicon` 和 `match_strategy`。 | KWS 按 39 条配置逐条验收。普通短指令必须由 ASR 词库确认同一事件；冲突、未确认和空 ASR 不执行 KWS。只有 `吃罐罐→去滚罐` 的精确组合可优先（`去拿→去哪` 已于 2026-09-18 移除，`去哪` 现由同音兜底直接命中 GO_GET_IT）。两条链路不得同时发布业务结果。目录按 156 条标准入口及 1560 条自动扩展验收。 |
-| 7 | 在一个会话内连续播放 3 条指令，每条之间保留正常句尾静音；既测试三条不同指令，也测试同一指令连续 3 次。 | 一个 `interaction_id` 下出现 3 个不同 `utterance_id`；逐句检查 `recognition_arbitration`、`utterance_complete`、目录匹配和最终事件。 | 三句均正确；每句只允许 KWS 或 ASR 链路中的一个来源发布一个具体业务事件，不得附带 KNOWN 摘要。 |
-| 8 | 使用相似音、否定反转和未配置的前后缀探索拒识，例如“官过来”“你要不要过来”“不要坐下”。 | 记录 KWS、ASR、`command_lexicon matched/no_match`、`match_strategy`、模型门控和任何可执行事件。 | 目录只能命中标准词/句或配置明确生成的扩展；“请你坐下”应命中，但“不要坐下”不得命中 SIT。未被 ASR 同事件确认的 KWS 必须拒绝；RKLLM 否定或缺少对应动作证据时不得发布具体动作。 |
+| 5 | 对编号 4 的同一 `utterance_id` 检查业务结果。 | 已经发布即时 KWS 命令时，后续 ASR 提供文本和身份事件；没有 KWS 命中时检查目录或模型路由。 | 同句同事件没有重复，业务来源一致；模型结果符合三轴约束，具体动作有 `model_action_gate=accepted`。 |
+| 6 | 按 64 条中英文动作关键词逐条测试即时发布；关闭 KWS 后执行完整目录的 ASR 验收。 | 即时模式检查 `stage=kws result=published_immediate`、`kws_negation_guard=passed` 和事件时间；目录检查 `intent_source=command_lexicon`。 | 动作须经过 250 ms 音频确认窗口，句尾业务结果没有重复。VAD 结束时未满窗口的命令转 ASR，不能提前发布。 |
+| 7 | 同会话连续播放三条指令，包括三条不同指令及同一指令重复三次。 | 三个不同 `utterance_id`，逐句检查即时 KWS、`utterance_complete` 和最终事件。 | 三句均正确；每句的同一个具体事件只出现一次，不同语句可以再次发布相同事件。 |
+| 8 | 播放“不要过来 / 不要坐下 / 那这里好像有不要过来”，并补测“别动 / 不许动 / 别叫”、相似音和引用句。 | 检查 `stage=kws_guard` 的 `result/reason/keyword/published_event_types`，关联同句全部事件。 | 三条否定录音不得出现可执行命令，ASR 漏掉否定前缀也不得回退执行；有效控制短语整句精确匹配后保留。引用句和未覆盖否定表达单独统计，不能视为已经解决。 |
 | 9 | 播放陌生词，随后持续静音，并按正式配置的 `idle_timeout_sec`（20 秒）等待。 | 先看到 `command_lexicon result=no_match`，再看 Model Intent 三轴及 `event_types`，最后出现同会话 idle 和 `interaction_end`。 | 合法 OOS `NONE|NONE|NONE` 发布不可执行的 `EVT_VOICE_NEUTRAL`；非空 ASR 仍刷新空闲计时，只有模型与规则均无有效协议结果才发 `EVT_VOICE_COMMAND_UNKNOWN`。不发布可执行动作、不崩溃，并在最后一次非空 ASR 后 20 秒静默时待机。 |
 
-### ASR 同音误识别与 KWS 安全仲裁如何记分
+### 即时 KWS 与 ASR 如何记分
 
-ASR 转写准确率与最终命令功能必须分项统计。普通 KWS 候选不能再独立纠正任意 ASR
-同音错误；例如用户说“击掌”但 `speech.asr_text=机长` 时，必须拒绝动作：
+KWS 检测、事件发布延迟和 ASR 转写准确率分别统计。即时 KWS 命令以关键词音频及
+`stage=kws result=published_immediate` 为证据；随后 ASR 的转写结果单独验收。
+同句的业务结果使用 KWS 来源，后续 ASR 提供文本与身份事件。
 
-```text
-stage_complete stage=kws result=candidate
-  command_key=HIGH_FIVE event_type=EVT_VOICE_COMMAND_HIGH_FIVE
-stage_complete stage=asr result=ok
-  speech.asr_text=机长
-stage_complete stage=command_lexicon result=no_match
-stage_complete stage=recognition_arbitration result=asr_selected
-  selected_source=asr_pipeline reason=short_asr_unconfirmed_kws
-# 不发布 EVT_VOICE_COMMAND_HIGH_FIVE
+正式即时模式使用独立否定流和 250 ms 音频确认窗口。成功拦截要求同句没有任何
+可执行命令，且出现 `kws_guard result=blocked`、`utterance_complete result=blocked_kws_guard`。
+`late_veto` / `negation_after_kws_publish` 表示否定到达时动作已经发出，不计为成功拦截。
+否定流异常以 `reason=kws_decode_error` 阻止本句动作回退。内部否定信号不发布到 ROS。
+通过检查的即时事件带 `slots.kws_negation_guard=passed/kws_guard_window_ms=250.0`。
+拦截只覆盖“不要 / 别 / 不准 / 不许”，混合多命令、引用句和其他表达仍需负样本验收。
+
+现场录音回归使用真实 KWS 模型离线解码，不启动麦克风或 ROS 节点：
+
+```bash
+MARSDOG_NEGATION_TEST_AUDIO_DIR=log/voice_debug python -m pytest -q tests/test_kws_negation_audio.py
+python scripts/generate_kws_keywords.py --negation --check
 ```
 
-以上证据完整时：
+录音测试包含 2026-10-13 的三条否定样本及两条原本能够命中 KWS 的正样本，
+逐条对照关闭/开启拦截的结果；不代表现场泛化准确率或真机动作验收。
+否定词使用“不要”的实际变调 `bú yào`，保持动作检测阈值不变。
 
-- 编号 4 的 ASR 转写单项记 **FAIL（“击掌”误识别为“机长”）**；
-- 编号 5 的动作识别记 **FAIL/拒识成功**，编号 6 的安全仲裁记 **PASS**；
-- 只有 `吃罐罐→去滚罐` 和 `去拿→去哪` 两个配置精确错写组合可以记为
-  “ASR FAIL、命令路由 PASS”。
-- 不得将本次记为 `command_lexicon catalog_exact` 成功，也不得发布
-  `EVT_VOICE_COMMAND_HIGH_FIVE`；
-- 若最终仍出现错误动作或重复发布，则安全仲裁 FAIL。短文本发生 ASR 目录冲突时应记录
-  `reason=short_asr_catalog_conflict` 并由 ASR 目录结果胜出；长文本仍由 ASR 胜出。
+设置 `publish_mode=deferred` 时，记录 `stage=kws result=candidate`、完整 ASR 和
+`recognition_arbitration`。该模式的短句确认、精确错写白名单和空 ASR 行为按实际
+配置验收。每个用例记录发布模式，统计同句重复事件及错误命令。
 
 ### 测试常用固定日志关键字
 
@@ -150,7 +151,7 @@ VOICE_TRACE {"record":"interaction_end"...}
 应同时保存 `/perception/audio_event` 原文，防止只验证了日志而没有验证传输接口。
 
 确定性词库建议使用以下逐条记录格式；核心用例使用 `CORE-*`，全量词库用例另使用
-`CATALOG-*` 并记录对应的 `source_rows`。当前 156 条短语的期望值已经整理在
+`CATALOG-*` 并记录对应的 `source_rows`。当前 158 条短语的期望值已经整理在
 [COMMAND_CATALOG_TEST_MATRIX.md](COMMAND_CATALOG_TEST_MATRIX.md)：
 
 | 指令 ID | 播放文本 | 期望 COMMAND_KEY | 期望 EVENT_TYPE | 期望路由 | Voice 状态 | 下游状态 | 计划次数 | 成功次数 | 结果 |
@@ -307,14 +308,14 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `config_path` | string | 本次节点实际读取的配置文件参数。 |
 | `log_level` / `log_file` | string | 实际日志级别和本进程日志文件路径。 |
 | `audio_topic` / `enrollment_topic` / `service` | string | 实际发布 Topic 和 VoiceTask Service 名称。 |
-| `idle_timeout_sec` | number | 最后一次非空 ASR 后的空闲超时；正式配置为 20 秒。 |
+| `idle_timeout_sec` | number | 最后一次非空 ASR 或即时 KWS 命令后的空闲超时；正式配置为 20 秒。后台 ASR 判定期间保持会话有效。 |
 | `refresh_on_any_speech` | bool | 测试模式开关；`true` 表示任何 VAD 语音都刷新空闲计时器。生产必须为 `false`，见 2.1。 |
 | `max_duration_sec` | number | 单次唤醒会话总时长上限；正式配置为 0，禁用。 |
 | `audio_debug` | object | VAD → ASR 调试开关、输出目录、三份 WAV 保存项、`max_utterances` 保留上限、pre-roll A/B 和同模型对照状态。 |
 | `providers` | object | 每个 Provider 的 `class/available`；正式测试要求真实 Provider 可用且没有意外 Mock。 |
-| `command_lexicon` | object | 词库实际加载状态和统计。正式与 Pipeline Mock 应为 `ready=true/command_count=82/core_command_count=19/phrase_count=156/expansion_enabled=true/variants_per_phrase=10/expanded_phrase_count=1560/total_match_phrase_count=1786/variant_phrase_count=70/fuzzy_matching=true/expansion_profile_count=5/reference_phrase_count=138/source_row_count=116/covered_source_row_count=116`；`phrase_count` 只统计标准词/句，`total_match_phrase_count` 才是运行时总入口。 |
+| `command_lexicon` | object | 词库加载状态和统计：`ready=true/command_count=83/core_command_count=19/phrase_count=158/expansion_enabled=true/variants_per_phrase=10/expanded_phrase_count=1580/total_match_phrase_count=1808/variant_phrase_count=70/fuzzy_matching=true/expansion_profile_count=5/reference_phrase_count=138/source_row_count=116/covered_source_row_count=116`。 |
 | `object_target_routing` | object | 目标物目录加载状态。应为 `enabled=true/ready=true/target_count=18`，并记录 `catalog/version/alias_count`。不可用时所有找物模型结果均不得生成具体 FETCH。 |
-| `kws_arbitration` | object | 实际仲裁策略。当前必须为 `publish_mode=deferred/arbitration_mode=exclusive`；默认 `asr_long_text_wins=true/kws_fallback_on_asr_empty=false/short_requires_asr_agreement=true`；优先命令还必须命中 `priority_asr_aliases` 的精确错写。 |
+| `kws_arbitration` | object | 正式配置为 `publish_mode=immediate/arbitration_mode=exclusive`。设置 deferred 时使用整句仲裁参数及精确错写白名单。 |
 | `speaker_api` | object | `enabled/ready/address/docs`；启动失败时包含 `error`。 |
 
 ### 4.3 `stage_complete` 字段和耗时边界
@@ -322,7 +323,8 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `stage` | `result` 可能值 | 阶段专属字段 | `latency_ms` 的准确范围 |
 |---|---|---|---|
 | `vad_capture` | `voice/silence` | `audio_duration_ms` | 从分配本句并启动收音，到 VAD 结果被节点取出；包含等待说话、有效语音、句尾静音和线程轮询，不是纯 VAD 模型推理耗时。 |
-| `kws` | `candidate/rejected_catalog_mismatch` | `event_type/command_key/candidate_count/published_event_types` | 从本句开始收音到 KWS 候选首次命中并取出；不是单个 KWS 模型调用耗时。`candidate` 时 `published_event_types=[]`，表示只缓存、尚未发布业务事件。未命中时没有该记录。 |
+| `kws` | `published_immediate/candidate/rejected_catalog_mismatch` | `event_type/command_key/published_event_types` | 从本句开始收音到关键词取出并处理的耗时；即时模式中 `published_event_types` 包含已经发布的具体事件，deferred 候选时为空。 |
+| `kws_guard` | `blocked/late_veto/allowed_exact_control` | `reason/keyword/asr_text/published_event_types` | 否定拦截、迟到否定、有效控制短语的整句精确放行。`late_veto` 不撤回已发动作。 |
 | `asr` | `ok/empty/error` | `language/text_length` | 一次 `transcribe()` 调用的总耗时。`ok` 仅表示得到非空文本，不表示文本一定正确。 |
 | `speaker` | `matched/unknown/error` | `speaker_id/speaker_confidence` | 声纹 embedding 提取、已注册人员检索和阈值判定的总耗时。 |
 | `command_lexicon` | `matched/no_match/unavailable` | `command_key/event_type/catalog_version/catalog_phrase/matched_phrase/match_strategy/expansion_profile/expansion_rule/social/intent/control/action_name/source_rows/core/emit_known_event` | 一次规范化及精确哈希查找的总耗时，`latency_ms` 保留三位小数以记录微秒级查找；原词为 `catalog_exact`，受控扩展为 `rule_expansion`；当前所有词库项均要求 `emit_known_event=false`；`matched` 后跳过意图模型，`no_match` 后才进入 `intent`。 |
@@ -384,7 +386,7 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 | `record` | 字段 | 含义和判定方法 |
 |---|---|---|
 | `interaction_start` | `source/state` | 会话来源和进入状态；`source` 常见为 `wakeup/service`。 |
-| `utterance_complete` | `result/event_type/event_types/published_event_types/selected_source/latency_ms` | KWS 被选中为 `published_kws_selected`；ASR 目录可执行事件为 `published_direct_command`；合法 OOS 发布 NEUTRAL 后为 `published`。 |
+| `utterance_complete` | `result/event_type/event_types/published_event_types/selected_source/reason/latency_ms` | 即时完成为 `published_kws_immediate`，成功拦截为 `blocked_kws_guard`，迟到否定为 `negation_after_kws_publish`；deferred 为 `published_kws_selected`，ASR 目录为 `published_direct_command`。 |
 | `service_complete` | `service/task_id/task_type/task_result/error/latency_ms` | 一次 VoiceTask 回调总耗时和完整返回对象。`result=success/failure`。 |
 | `interaction_hold` | `operation/hold_token/reason/lease_sec/idle_timer_reset` | `operation=acquire/renew/release/expire`；不同操作只输出适用字段。 |
 | `enrollment_publish` | `topic/speaker_id/payload/latency_ms` | 一次录音注册样本的 embedding、进度处理和发布耗时；最终样本还包含落盘及运行时同步。`result=progress/complete`。 |
@@ -397,8 +399,8 @@ JSON 内的 `header.stamp` 是 ROS2 事件时间戳，用于与 Topic、rosbag �
 `event_publish.latency_ms` 是产生该事件的决策阶段耗时；ASR 目录具体事件应等于
 同句 `command_lexicon.latency_ms`，Model Intent 大类、白名单具体事件和 KNOWN 摘要应等于
 同句 `intent.latency_ms`。
-KWS 被选中时，事件的 `latency_ms` 是从 VAD 返回后进入处理到最终仲裁发布的耗时；
-首次 KWS 候选耗时看事件 slot `kws_candidate_latency_ms` 或同句 `stage=kws`。
+即时 KWS 事件的 `latency_ms` 是从本句开始采集到发布的耗时；deferred 事件为 VAD
+返回后进入处理到最终仲裁发布的耗时。两种模式分别统计。
 `utterance_complete.latency_ms` 是
 **VAD 返回后的处理总耗时**，两者都不是从开始收音到最终结果的完整端到端耗时。
 当前真正端到端耗时需要在同一 `utterance_id` 下，用日志行墙钟时间计算：
@@ -513,9 +515,9 @@ ros2 service type /perception/voice/task
 
 | 启动模式 | `runtime_start.runtime_mode` | 必须检查的内容 |
 |---|---|---|
-| 正式链路 | `production` | 所需 Provider 的 `available=true`；`command_lexicon.ready=true/command_count=82/core_command_count=19/phrase_count=156/expanded_phrase_count=1560/total_match_phrase_count=1786/variant_phrase_count=70/fuzzy_matching=true/source_row_count=116/covered_source_row_count=116`；`speaker_api.enabled=true/ready=true` |
+| 正式链路 | `production` | 所需 Provider 的 `available=true`；`command_lexicon.ready=true/command_count=83/core_command_count=19/phrase_count=158/expanded_phrase_count=1580/total_match_phrase_count=1808/variant_phrase_count=70/fuzzy_matching=true/source_row_count=116/covered_source_row_count=116`；`speaker_api.enabled=true/ready=true` |
 | Event Mock | `mock_event` | `mock_event.class=MockEventProvider` 且 `available=true`，`speaker_api.enabled=false` |
-| Pipeline Mock | `mock_pipeline` | Wakeup、Audio、ASR、Speaker 为对应的 `Mock*Provider` 且可用；`command_lexicon.ready=true/command_count=82/core_command_count=19/phrase_count=156/expanded_phrase_count=1560/total_match_phrase_count=1786/variant_phrase_count=70/fuzzy_matching=true/source_row_count=116/covered_source_row_count=116`；规则意图可用；KWS 禁用 |
+| Pipeline Mock | `mock_pipeline` | Wakeup、Audio、ASR、Speaker 为对应的 `Mock*Provider` 且可用；`command_lexicon.ready=true/command_count=83/core_command_count=19/phrase_count=158/expanded_phrase_count=1580/total_match_phrase_count=1808/variant_phrase_count=70/fuzzy_matching=true/source_row_count=116/covered_source_row_count=116`；规则意图可用；KWS 禁用 |
 
 模式、配置路径、Provider 或 API 状态不符合预期时，应停止测试并记为环境/启动失败，
 不能继续出具功能 PASS。出现多个 `/voice_interaction` 节点时也必须先清理重复进程。
@@ -693,12 +695,12 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 | 节点启动 | `runtime_start result=ready`，Topic/Service 正确 | 各 Provider `available=true` |
 | 唤醒 | `interaction_start` 后发布 `EVT_VOICE_WAKEUP` | 唤醒事件的角度、置信度；硬件响应时间由外部操作时间对照 |
 | VAD | `stage_complete stage=vad_capture result=voice` | `latency_ms`、`audio_duration_ms` |
-| KWS 候选 | 命中时只缓存、不发布业务事件；最终选中 KWS 后才发布结果组 | `stage_complete stage=kws result=candidate latency_ms/candidate_count` |
+| KWS 发布 | 即时模式通过否定检查与 250 ms 音频窗口后发布，同句同事件一次；deferred 缓存候选等待 ASR | `stage_complete stage=kws result=published_immediate/candidate`、`stage=kws_guard` |
 | ASR | 发布 `speech`，`asr_text` 与实说内容对照 | `stage_complete stage=asr latency_ms` |
 | 声纹识别 | `owner` 发布 MASTER，`family_member_*` 发布 FOLK，未匹配/历史名称发布 UNMASTER | `stage_complete stage=speaker latency_ms/speaker_id/speaker_confidence`；正式 Sherpa 模式下该分数为最佳模板余弦值 |
 | 完整确定性词库 | 所有项只发布目录具体特殊事件，不附带 KNOWN 摘要；该句不执行 Intent | `command_lexicon matched/latency_ms`，并检查唯一 `dispatch_role=specific_command` 和 `specific_event_type` |
 | 目录外意图 | 三轴及事件顺序符合契约；仅白名单具体动作可执行 | `command_lexicon no_match` 后检查 `stage=intent social/intent/control/event_types/latency_ms`；找物类还要检查 `stage=object_target` |
-| KWS/ASR 仲裁 | 普通短指令只有 ASR 词库确认同一事件时 KWS 才胜出；冲突、未确认、空 ASR 和多个候选均不得由 KWS 单独执行；精确错写白名单除外 | `stage_complete stage=recognition_arbitration result/selected_source/reason/kws_candidate_count` |
+| KWS/ASR 业务来源 | 即时 KWS 发布后，同句 ASR 提供文本和身份事件；未命中且未被否定拦截时执行 ASR 业务路由。deferred 按整句仲裁配置执行 | 即时 KWS 发布、否定标记、同句后续事件及 `utterance_complete`；deferred 的 `recognition_arbitration` |
 | 空闲超时/主动结束 | 静默超过 `idle_timeout_sec`（正式配置 20 秒）后自动结束；`stop_listening` 发布匹配 ID 的 idle 并关闭采集 | `idle_timeout_sec=20`、`max_duration_sec=0`；`interaction_end reason=interaction_timeout` 或 `stop_listening` |
 | 手动监听 | VoiceTask 返回成功并带当前 ID | `service_complete latency_ms/task_result` |
 | 会话保持 | hold 后不超时；release/租约到期后恢复超时 | Service 结果、`interaction_hold`、结束时间 |
@@ -710,7 +712,7 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 | 模型故障拒识 | 声纹模型不可用时返回 `unknown/unavailable`，不得因库中存在 owner 而产生模拟匹配 | `stage_complete stage=speaker reason=unavailable` |
 | 身份模糊拒识 | 第一、第二身份分差不足或同分时返回 `unknown/ambiguous_identity` | `reason/score_margin`；真实录音分别统计误识与拒识 |
 | 有效语音时长 | 250 ms 的 VAD 片段即使添加 500 ms 前后音频也应拒绝注册 | HTTP 422；`speech_duration_ms` 不计额外补音和段间静音 |
-| 连续说话采集 | 上一句识别时第二句仍进入有界音频缓存；逐句 ID 与 KWS 候选分开 | 两句不同的 `utterance_id`，第二句 raw/VAD/ASR 输入完整 |
+| 连续说话采集 | 上一句后台识别期间，第二句继续进行 VAD、KWS 和即时发布；等待整句识别的音频受容量和保留时间限制 | 两句不同的 `utterance_id`，即时事件时间和 `speech_processing_queue` |
 | 等待与说话超时 | 等待接近 8 秒才开始说话，开始后仍有独立的 8 秒上限 | `capture_end_reason=vad_complete/speech_limit/wait_timeout` |
 | 音频缓存异常 | 溢出、过期或录音丢帧时丢弃受影响句子，并等静音边界后恢复 | `capture_end_reason=audio_gap/audio_resync_timeout`；不发布残句命令 |
 | 无数据与取消 | sounddevice/arecord 无数据能超时退出；取消关闭设备并清空待处理音频 | 后端超时日志；新会话不出现旧音频或旧 KWS 候选 |
@@ -741,7 +743,7 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 运行模式和配置：production / config/voice.yaml
 实际 Provider：<复制 runtime_start.providers>
 词库版本与统计：<复制 runtime_start.command_lexicon>
-源数据行 / 路由组 / 标准词句 / 扩展 / 变体 / 总入口：116/116 / 82/82 / 156/156 / 1560/1560 / 70/70 / 1786
+源数据行 / 路由组 / 标准词句 / 扩展 / 变体 / 总入口：116/116 / 83/83 / 158/158 / 1580/1580 / 70/70 / 1808
 目标指令数 / 已实现数 / 缺失数：
 功能覆盖率：
 实际执行次数 / 成功次数 / 识别准确率：
@@ -767,7 +769,7 @@ rg '\[ERROR\]|\[WARNING\]' /tmp/marsdog_voice_qa/VOICE-MOCK-001
 建议每个测试版本提供：
 
 1. 本文档 `docs/TESTING_LOG_GUIDE.md`：测试执行和日志判定。
-2. `docs/COMMAND_CATALOG_TEST_MATRIX.md`：156 条标准中文词/句、扩展规则与期望事件对齐表。
+2. `docs/COMMAND_CATALOG_TEST_MATRIX.md`：158 条标准中文词/句、扩展规则与期望事件表。
 3. `docs/ROS2_CONTRACT.md`：事件、字段、枚举和 Service 权威契约。
 4. `docs/HANDOFF.md`：上下游职责和跨项目语义。
 5. 三份运行配置和确定性目录：`voice.yaml`、`voice.mock.yaml`、
