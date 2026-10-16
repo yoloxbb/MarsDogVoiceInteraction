@@ -31,4 +31,12 @@ interaction:
   # 测试模式默认关闭，以免「超时后回到待机」用例无法验证；
   # 需要连续测试时设 true，并把 max_duration_sec 设 0 取消绝对上限。
   refresh_on_any_speech: false
-providers: {}
+providers:
+  intent_rule:
+    type: rule
+    enabled: false
+    config: {}
+  intent_llm:
+    type: rkllm
+    enabled: false
+    config: {}

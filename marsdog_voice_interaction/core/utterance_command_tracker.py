@@ -67,13 +67,15 @@ class UtteranceCommandTracker:
         self._published_event_types[event_type] = None
         return True
 
-    def record_kws_candidate(self, event: dict[str, object]) -> bool:
-        """Record one unique candidate and return whether it is new."""
+    def record_kws_candidate(self, event: dict[str, object], *, replace: bool = False) -> bool:
+        """Record a candidate, optionally update evidence; return whether new."""
 
         event_type = str(event.get("event_type", "")).strip()
         if not self.is_active or not event_type:
             return False
         if event_type in self._kws_candidates:
+            if replace:
+                self._kws_candidates[event_type] = dict(event)
             return False
         self._kws_candidates[event_type] = dict(event)
         return True

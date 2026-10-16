@@ -1,0 +1,8 @@
+version: "2026-10-15-v2"
+# 当前只配置主人，与视觉身份槽位 owner 对齐；修改后重启 Voice 加载。
+# 声纹注册不会自动同步到此表；下游仍需完成人脸注册和寻人动作接入。
+# 未登记人物只发布 unregistered_person 摘要，不授权执行。
+persons:
+  - person_id: owner
+    name: 主人
+    aliases: []

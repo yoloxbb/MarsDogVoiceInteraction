@@ -23,6 +23,9 @@ command_lexicon:
   catalog: command_catalog.yaml
 object_target_routing:
   catalog: object_targets.yaml
+parameterized_commands:
+  locations: location_targets.yaml
+  persons: person_targets.yaml
 providers:
   audio:
     config:
@@ -53,6 +56,9 @@ topics:
     assert config["object_target_routing"]["catalog"] == str(
         config_dir / "object_targets.yaml"
     )
+    assert config["parameterized_commands"]["locations"] == str(
+        config_dir / "location_targets.yaml"
+    )
     assert config["providers"]["audio"]["config"]["vad_model"] == str(
         tmp_path.parent / "models" / "vad.onnx"
     )
@@ -63,6 +69,7 @@ topics:
         config_dir / "negation_keywords.txt"
     )
     assert config["providers"]["wakeup"]["config"]["port"] == "/dev/ttyACM0"
+    assert config["parameterized_commands"]["persons"] == str(config_dir / "person_targets.yaml")
     assert config["topics"]["audio_event"] == "/perception/audio_event"
 
 

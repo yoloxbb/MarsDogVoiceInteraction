@@ -208,6 +208,8 @@ _NEGATED_DO_MARKERS = (
     "不准",
     "不想",
     "不能",
+    "不可以",
+    "禁止",
     "donot",
     "dont",
     "donotwant",

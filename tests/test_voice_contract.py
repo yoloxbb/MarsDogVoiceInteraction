@@ -121,18 +121,31 @@ def test_wake_angle_contract_uses_raw_microphone_array_frame() -> None:
     assert pipeline_event["header"]["frame_id"] == WAKE_ANGLE_FRAME_ID
 
 
+@pytest.mark.parametrize("valid", [False, "false", 1, None])
+def test_explicit_invalid_bearing_is_not_inferred_from_a_numeric_angle(valid):
+    value = normalize_audio_event({"wake_angle": 95, "wake_angle_valid": valid})
+    assert value["wake_angle_valid"] is False
+    assert normalize_audio_event({"wake_angle": 95})["wake_angle_valid"] is True
+    assert normalize_audio_event({"wake_angle": float("nan"), "wake_angle_valid": True})["wake_angle_valid"] is False
+
+
+@pytest.mark.parametrize("angle", [-1, False, True, None, float("inf")])
+def test_invalid_angle_cannot_be_authorized_by_validity_flag(angle):
+    assert normalize_audio_event({"wake_angle": angle, "wake_angle_valid": True})["wake_angle_valid"] is False
+
+
 def test_hardware_wakeup_and_catalog_nickname_use_distinct_events() -> None:
     lexicon = CommandLexicon(
         Path(__file__).parents[1] / "config" / "command_catalog.yaml"
     )
-    nickname = lexicon.match("小宝贝")
+    nickname = lexicon.match("小狗")
 
     assert nickname is not None
     assert nickname.command_id == "CMD_CALL_NAME"
     assert nickname.event_type == EVT_VOICE_COMMAND_CALL_NAME
     assert nickname.event_type != EVT_VOICE_CALL_NAME
     assert nickname.event_type != EVT_VOICE_WAKEUP
-    nickname_event = nickname.to_event(asr_text="小宝贝", language="zh")
+    nickname_event = nickname.to_event(asr_text="小狗", language="zh")
     assert nickname_event["raw_nlu_tag"] == "CALL|NONE|NONE"
     assert nickname_event["intent_category"] == "social"
     assert nickname_event["action"] == "NONE"
@@ -565,8 +578,8 @@ def test_documented_qa_command_inventory_matches_current_code() -> None:
 
     assert len(ACTION_TO_VOICE_EVENT) == 26
     assert len(_RULES) == 30
-    assert len(keyword_lines) == 64
-    assert len(keyword_actions) == 22
+    assert len(keyword_lines) == 56
+    assert len(keyword_actions) == 14
     assert {"BRING", "FETCH", "STOP", "RETURN"}.isdisjoint(keyword_actions)
     negation_file = keyword_file.with_name("kws_negation_keywords_raw.txt")
     negations = {

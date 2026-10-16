@@ -182,14 +182,26 @@ def test_late_negation_does_not_claim_that_an_already_published_command_was_bloc
     assert any(f.get("result") == "negation_after_kws_publish" for _, f in node.traces)
 
 
-def test_deferred_mode_keeps_its_original_candidate_path():
+def test_deferred_mode_keeps_guarded_candidate_path():
     provider = KWSSherpaProvider({"publish_mode": "deferred", "negation_guard_enabled": True})
     provider._spotter = _Spotter(("COME",))
+    provider._negation_spotter = _Spotter(())
     provider.available = True
     provider.start_utterance()
+    assert _feed(provider, 3) == []
     events = _feed(provider)
     assert [e["event_type"] for e in events] == ["EVT_VOICE_COMMAND_COME"]
-    assert "kws_guard_window_ms" not in events[0]
+    assert events[0]["kws_guard_window_ms"] == 250.0
+
+
+def test_deferred_guard_still_vetoes_a_keyword_candidate():
+    provider = KWSSherpaProvider({"publish_mode": "deferred", "negation_guard_enabled": True})
+    provider._spotter = _Spotter(("COME",))
+    provider._negation_spotter = _Spotter(("不要",))
+    provider.available = True
+    provider.start_utterance()
+    events = _feed(provider, 5)
+    assert events == [{"kind": "kws_guard", "reason": "negation_keyword", "keyword": "不要"}]
 
 
 def test_queued_utterance_keeps_its_veto_when_capture_moves_to_next_sentence():

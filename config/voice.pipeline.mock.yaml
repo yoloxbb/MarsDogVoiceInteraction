@@ -25,6 +25,11 @@ object_target_routing:
   enabled: true
   catalog: object_targets.yaml
 
+parameterized_commands:
+  enabled: true
+  locations: location_targets.yaml
+  persons: person_targets.yaml
+
 speaker_api:
   enabled: false
 
@@ -67,7 +72,7 @@ providers:
       match_threshold: 0.5
   intent_rule:
     type: rule
-    enabled: true
+    enabled: false
     config: {}
   intent_llm:
     type: mock

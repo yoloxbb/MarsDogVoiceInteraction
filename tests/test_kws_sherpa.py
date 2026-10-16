@@ -83,39 +83,22 @@ def test_keyword_file_label_inventory_matches_expected() -> None:
         if line.strip()
     )
     assert labels == Counter({
-        "COME": 7,
-        "SHAKE_HAND": 4,
-        "HIGH_FIVE": 4,
-        "SIT": 4,
-        "LIE_DOWN": 3,
-        "STAND_UP": 3,
-        "WAIT": 2,
-        "FOLLOW": 3,
-        "ROLL_OVER": 2,
-        "SPIN": 2,
-        "DROP": 6,
-        "PLAY_DEAD": 2,
-        "WALK": 2,
-        "GO_OUT": 2,
-        "GO_HOME": 1,
-        "BACK_UP": 1,
-        "APPROACH": 1,
-        "STAND_STILL": 2,
-        "HOLD_POSITION": 7,
-        "QUIET": 4,
-        "EAT_CANNED_FOOD": 1,
-        "GO_GET_IT": 1,
+        "QUIET": 4, "HOLD_POSITION": 6, "FOLLOW": 4, "COME": 5,
+        "APPROACH": 3, "BACK_UP": 5, "SIT": 2, "LIE_DOWN": 2,
+        "STAND_UP": 4, "SHAKE_HAND": 5, "HIGH_FIVE": 3, "SPIN": 4,
+        "DROP": 7, "PLAY_DEAD": 2,
     })
 
 
-def test_keyword_file_includes_single_character_chinese_actions() -> None:
+def test_keyword_file_excludes_ambiguous_single_character_destination_word() -> None:
     keywords = (
         Path(__file__).parents[1] / "config" / "kws_keywords_raw.txt"
     ).read_text(encoding="utf-8").splitlines()
     phrases = {
         line.rsplit("@", 1)[0].strip()
         for line in keywords
-        if line.strip()
+        if line.strip() and not line.startswith("#")
     }
 
-    assert {"走", "去", "来", "坐", "停"} <= phrases
+    assert {"走", "来", "坐", "停"}.isdisjoint(phrases)
+    assert "去" not in phrases

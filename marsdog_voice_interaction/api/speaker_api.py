@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class SpeakerApiServer:
-    """Run a bounded FastAPI/Uvicorn server in the ROS process."""
+    """Serve speaker management in a background thread or foreground process."""
 
     def __init__(
         self,
@@ -95,9 +95,7 @@ class SpeakerApiServer:
         if not self._host:
             raise RuntimeError("speaker_api.host 不能为空")
 
-    def start(self) -> bool:
-        if not self._enabled:
-            return False
+    def _create_server(self) -> Any:
         self._validate_host()
 
         import uvicorn
@@ -111,7 +109,22 @@ class SpeakerApiServer:
             log_config=None,
             access_log=True,
         )
-        self._server = uvicorn.Server(uvicorn_config)
+        return uvicorn.Server(uvicorn_config)
+
+    def run(self) -> None:
+        """Block in the main thread so Uvicorn owns SIGINT/SIGTERM handling."""
+        if not self._enabled:
+            return
+        self._server = self._create_server()
+        try:
+            self._server.run()
+        finally:
+            self._server = None
+
+    def start(self) -> bool:
+        if not self._enabled:
+            return False
+        self._server = self._create_server()
         self._thread = threading.Thread(
             target=self._server.run,
             name="speaker-fastapi",

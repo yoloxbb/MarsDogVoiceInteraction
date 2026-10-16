@@ -336,7 +336,15 @@ class CommandLexicon:
         if not self._phrases:
             raise ValueError("Command catalog contains no enabled phrases")
         if self.source_row_count:
-            expected_rows = set(range(1, self.source_row_count + 1))
+            # New workbooks use physical worksheet row numbers and also contain
+            # wake/parameter/fallback rows outside the fixed phrase catalog.
+            declared_rows = raw.get("source_rows", list(range(1, self.source_row_count + 1)))
+            if (not isinstance(declared_rows, list)
+                    or any(type(row) is not int or row <= 0 for row in declared_rows)
+                    or len(set(declared_rows)) != self.source_row_count
+                    or len(declared_rows) != self.source_row_count):
+                raise ValueError("Command catalog source_rows must enumerate source_row_count unique rows")
+            expected_rows = set(declared_rows)
             if self._source_rows != expected_rows:
                 missing = sorted(expected_rows - self._source_rows)
                 unexpected = sorted(self._source_rows - expected_rows)
@@ -394,7 +402,9 @@ class CommandLexicon:
         if exact is not None:
             return exact
         normalized = normalize_command_phrase(text)
-        if not normalized:
+        # Single-character workbook entries (来/坐/趴/累/烦...) must be exact;
+        # a same-pinyin syllable alone is insufficient evidence for an action.
+        if len(normalized) < 2:
             return None
         syllables = _pinyin_syllables(normalized)
         if not syllables:

@@ -1,0 +1,10 @@
+version: "2026-10-15-v2"
+
+# 听觉地点名称；不保存坐标。调用方负责将 location_id 绑定到自己的地图点位。
+locations:
+  - {location_id: dog_bed, name: 狗窝, aliases: [狗窝, 狗床]}
+  - {location_id: room, name: 房间, aliases: [房间]}
+  - {location_id: bedroom, name: 卧室, aliases: [卧室, 睡房]}
+  - {location_id: living_room, name: 客厅, aliases: [客厅]}
+  - {location_id: kitchen, name: 厨房, aliases: [厨房]}
+  - {location_id: entrance, name: 门口, aliases: [门口]}

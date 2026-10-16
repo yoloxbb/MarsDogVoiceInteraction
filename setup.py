@@ -30,6 +30,7 @@ setup(
     entry_points={
         "console_scripts": [
             "marsdog-voice-interaction = marsdog_voice_interaction.main:main",
+            "marsdog-speaker-service = marsdog_voice_interaction.speaker_service:main",
         ],
     },
 )

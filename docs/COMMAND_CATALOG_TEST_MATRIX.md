@@ -1,613 +1,86 @@
 # 确定性词库测试对齐表
 
-本文档供测试人员逐条对齐 ASR 词库输入与最终语音事件。它是
-[`config/command_catalog.yaml`](../config/command_catalog.yaml) 的可读测试快照；若两者不一致，
-`command_catalog.yaml` 是唯一权威源。
+由 `scripts/generate_command_catalog.py` 生成。修改 XLSX 和审核规则后重新生成。
 
-## 1. 当前目录口径
+版本 `2026-10-16-workbook-v14`，来源 [docs/语音识别内容.xlsx](语音识别内容.xlsx) 的 Sheet1。
+共 49 个功能条目：43 个固定路由（含 ASR 呼名），4 个参数句式、1个闲聊兜底和1个声源入口。
+标准词句 222 条，受控整句扩展 2220 条，复用口语/ASR变体 123 条，共 2565 个精确入口。
+`source_rows` 是 Excel 实际行号。叫两声/说话优先 BARK；去/走开/翻滚等旧独立路由已移出本版。
 
-- 目录版本：`2026-10-09-inspect-toy-v7`。
-- 产品表源数据：`116` 条，另新增“自己去玩吧”“这是啥”“这是什么”（无产品表行号）；事件路由：`83` 个；标准中文词/句：`158` 条。
-- 每个标准词/句按配置生成 `10` 条受控扩展，共 `1580` 条扩展；另有 `70` 条人工登记
-  的变体（`phrase_variants:`，用于 ASR 稳定错写与自然口语说法）。包含标准词/句后，
-  运行时精确匹配入口共 `1808` 条。
-- 核心训练指令：`19` 组，对应表中“核心=是”的所有短语。
-- 表中每条中文标准词/句都必须独立测试；同一 `command_key` 下的短语是等价入口。
-- 英文 `reference_phrases_en` 当前只是参考元数据，不参与确定性词库匹配，因此不列入本表验收。
-- `BT=是` 只表示 Voice 应设置 `should_trigger_behavior_tree=true`，不代表下游已经完成事件映射或动作执行。
-- `action_name=—` 表示产品目录没有给出独立 `ACT_*`，但仍必须发布表中的 `event_type`。
-- 硬件或 pipeline Mock 唤醒使用 `EVT_VOICE_WAKEUP`，不属于本词库表；Model Intent
-  呼名沿用 `EVT_VOICE_CALL_NAME`，也不能用来代替词库 `CALL_NAME` 的测试结果。
-- 83 个路由组的 `command_key/command_id/event_type` 必须分别唯一。目录禁止使用
-  `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的 `EVT_VOICE_INTENT_*`；
-  姿态、移动、声音等显式白名单动作可以与 Model Intent 共用具体命令事件。
-- 所有词库行（包括“核心=是”）都只产生本表 `event_type`，不附带
-  `EVT_VOICE_COMMAND_KNOWN`。普通动作使用 `dispatch_role=specific_command`；
-  PRAISE/SCOLD 使用 `dispatch_role=social_reaction`。
-  KWS 只缓存候选，最终由 `recognition_arbitration` 选择 KWS 或 ASR 目录作为唯一
-  结果来源，并只发布选中来源的具体特殊事件。
+每句话只发布一个具体事件；PRAISE/SCOLD 为 social_reaction（可执行=false，BT=true）；CALL_NAME 两项均 false；其余固定路由两项均 true。
+BT=true 表示 Voice 允许下游接收，不证明 Tree/Action 已实现或真机已执行。硬件唤醒仍由模块配置，ASR 呼名不代替唤醒。
 
-### 1.1 测试日志字段速查与路径判定
-
-词库与 KWS 对同一个确定性命令可以共享 `EVT_VOICE_COMMAND_*`。Model Intent 沿用
-下游既有业务分类事件；显式动作白名单也可以共用对应的具体命令事件，因此必须根据
-`intent_source/dispatch_role/command_id` 判断来源和职责，不能只看事件名。测试仍须
-使用同一个 `utterance_id` 关联本句话的全部日志，再联合检查以下字段：
-
-| 日志位置 | 重点字段 | 用途 |
-|---|---|---|
-| 所有 `VOICE_TRACE` | `record/interaction_id/utterance_id` | `utterance_id` 是单句主键；不得把相邻两句话的阶段或事件拼在一起。 |
-| `stage_complete stage=command_lexicon` | `result/command_key/event_type/match_strategy/catalog_phrase/matched_phrase/core/emit_known_event/source_rows` | 判断是否命中确定性词库、命中标准词还是受控扩展；当前所有词库项的 `emit_known_event` 均为 `false`。 |
-| `stage_complete stage=kws` | `result/command_key/event_type/candidate_count/published_event_types` | `result=candidate` 只表示缓存候选；此时 `published_event_types=[]`，不能据此判定业务事件已发布。 |
-| `stage_complete stage=recognition_arbitration` | `result/selected_source/reason/kws_candidate_count/catalog_event_type` | 判断本句最终由 KWS 还是 ASR 链路取得业务结果；这是区分“候选”和“最终来源”的依据。 |
-| `stage_complete stage=intent` | `result/event_types/social/intent/control/intent_source` | 只有词库未命中并选择 ASR 链路后才应出现；用于判定 Model Intent 或兼容规则路径。 |
-| `event_publish` | `event_type/command_id/intent_source/dispatch_role/specific_event_type/raw_nlu_tag/is_executable/should_trigger_behavior_tree/slots` | 判断最终实际发布了什么、来源是什么、属于摘要还是具体事件、是否允许进入行为树。 |
-| `utterance_complete` | `result/published_event_types/event_types/selected_source` | 核对本句最终事件组的数量、顺序和结束类型，防止漏发或重复发布。 |
-
-其中最关键的四个字段是：
-
-- `intent_source`：最终决策来源，常见为 `command_lexicon`、`kws`、
-  `rkllm`、`rule_rkllm_compatible`、`invalid_protocol_fallback`；
-- `dispatch_role`：事件职责，`specific_command` 是词库/KWS 的具体动作命令，
-  `social_reaction` 是非动作但允许 Tree 反应的词库 PRAISE/SCOLD，
-  `semantic_classification` 是 Model Intent 语义分类，
-  `diagnostic` 是无有效协议结果时的诊断事件；
-- `specific_event_type`：摘要所指向的模型具体事件；比较 KNOWN 与具体事件时，两者应
-  指向同一个 `EVT_VOICE_COMMAND_*`；
-- `should_trigger_behavior_tree`：是否允许进入行为树。动作命令和词库 PRAISE/SCOLD
-  为 `true`，CALL_NAME 与 KNOWN 摘要为 `false`；不能仅凭事件名推断权限。
-
-#### 三条识别路径如何区分
-
-| 路径 | 必须看到的阶段证据 | 最终事件证据 | 不应出现 |
+| Excel行 | 命令 | 标准词句 | 事件 / 编号 |
 |---|---|---|---|
-| ASR 确定性词库 | `command_lexicon result=matched`；`recognition_arbitration result=asr_selected selected_source=asr_pipeline` | `event_publish.intent_source=command_lexicon`；`event_publish.slots.match_strategy=catalog_exact` 或 `rule_expansion` | 同一句 `stage=intent` |
-| KWS 最终胜出 | `kws result=candidate`；`recognition_arbitration result=kws_selected selected_source=kws` | 最终业务事件全部为 `intent_source=kws`；`utterance_complete result=published_kws_selected` | ASR/词库或 Model Intent 再发布第二组业务结果 |
-| Model Intent / 兼容规则意图 | `command_lexicon result=no_match`；`recognition_arbitration result=asr_selected selected_source=asr_pipeline`；随后 `stage=intent` | `intent_source=rkllm` 或 `rule_rkllm_compatible`，并按 `social/intent/control/raw_nlu_tag/event_types` 验收 | 把模型事件记成词库命中 |
+| 3 | CALL_NAME | 小火小火、小狗、跟屁虫、嘬嘬嘬 | `EVT_VOICE_COMMAND_CALL_NAME` / `CMD_CALL_NAME` |
+| 4 | QUIET | 安静、闭嘴、别叫、不许叫 | `EVT_VOICE_COMMAND_QUIET` / `CMD_QUIET` |
+| 5 | HOLD_POSITION | 等等、定、别动、停、不准动、不许动、老实点、不可以、No | `EVT_VOICE_COMMAND_HOLD_POSITION` / `CMD_HOLD_POSITION` |
+| 6 | FOLLOW | 走、跟我走、跟着我、跟上、跟我来 | `EVT_VOICE_COMMAND_FOLLOW` / `CMD_FOLLOW` |
+| 7 | COME | 过来、来、回来、来这、到我这儿来、走上前来 | `EVT_VOICE_COMMAND_COME` / `CMD_COME_HERE` |
+| 8 | APPROACH | 再过来点、再过来些、靠近点 | `EVT_VOICE_COMMAND_APPROACH` / `CMD_APPROACH` |
+| 9 | MOVE_FORWARD | 往前走走、前进、向前走 | `EVT_VOICE_COMMAND_MOVE_FORWARD` / `CMD_MOVE_FORWARD` |
+| 10 | BACK_UP | 往后退、靠后、退后、后退、往后稍稍 | `EVT_VOICE_COMMAND_BACK_UP` / `CMD_BACK_UP` |
+| 11 | TURN_LEFT | 向左转、往左转、转到左边来 | `EVT_VOICE_COMMAND_TURN_LEFT` / `CMD_TURN_LEFT` |
+| 12 | TURN_RIGHT | 向右转、往右转、转到右边来 | `EVT_VOICE_COMMAND_TURN_RIGHT` / `CMD_TURN_RIGHT` |
+| 13 | SPEED_UP | 走快点、快点走、快跟上 | `EVT_VOICE_COMMAND_SPEED_UP` / `CMD_SPEED_UP` |
+| 14 | SLOW_DOWN | 走慢点、慢点走、慢慢走 | `EVT_VOICE_COMMAND_SLOW_DOWN` / `CMD_SLOW_DOWN` |
+| 15 | SIT | 坐、坐下、蹲下 | `EVT_VOICE_COMMAND_SIT` / `CMD_SIT` |
+| 16 | LIE_DOWN | 趴、躺、趴下、躺下 | `EVT_VOICE_COMMAND_LIE_DOWN` / `CMD_LIE_DOWN` |
+| 17 | STAND_UP | 站起来、起来、站好、站着 | `EVT_VOICE_COMMAND_STAND_UP` / `CMD_STAND_UP` |
+| 18 | LOOK_DOWN | 低头、看地板、头低一点 | `EVT_VOICE_COMMAND_LOOK_DOWN` / `CMD_LOOK_DOWN` |
+| 19 | LOOK_UP | 抬头、往上看、看上边 | `EVT_VOICE_COMMAND_LOOK_UP` / `CMD_LOOK_UP` |
+| 20 | BARK | 叫两声、汪两声、说话 | `EVT_VOICE_COMMAND_BARK` / `CMD_BARK` |
+| 21 | SHAKE_HAND | 握手、握个手、抬手、握手手、手手 | `EVT_VOICE_COMMAND_SHAKE_HAND` / `CMD_HAND` |
+| 22 | HIGH_FIVE | 击掌、击个掌、拍手 | `EVT_VOICE_COMMAND_HIGH_FIVE` / `CMD_FIVE` |
+| 23 | SPIN | 转圈、转一圈、转个圈、转一转 | `EVT_VOICE_COMMAND_SPIN` / `CMD_SPIN` |
+| 24 | DROP | 吐掉、放下、松开、松口、张嘴、不可以吃、不可以咬 | `EVT_VOICE_COMMAND_DROP` / `CMD_SPIT` |
+| 25 | CIRCLE_AROUND | 绕圈、绕着转一圈、绕一圈 | `EVT_VOICE_COMMAND_CIRCLE_AROUND` / `CMD_CIRCLE_AROUND` |
+| 26 | PLAY_DEAD | 装死、倒下来 | `EVT_VOICE_COMMAND_PLAY_DEAD` / `CMD_DEAD` |
+| 27 | SOCIAL_GREETING | 哈喽、你叫什么名字、你叫啥、你在干嘛、你听得懂吗、你会说话吗、你会说什么 | `EVT_VOICE_COMMAND_SOCIAL_GREETING` / `CMD_SOCIAL_GREETING` |
+| 28 | SLEEP | 困了吗、去睡觉、睡吧、去休息、回窝睡觉 | `EVT_VOICE_COMMAND_SLEEP` / `CMD_SLEEP` |
+| 29 | FOOD_CARE | 想吃啥、想吃不、喝水吗、吃不吃、吃罐罐 | `EVT_VOICE_COMMAND_FOOD_CARE` / `CMD_FOOD_CARE` |
+| 30 | PLAY | 来玩、跟我玩、玩不玩、一起玩、玩游戏 | `EVT_VOICE_COMMAND_PLAY` / `CMD_PLAY` |
+| 31 | PLAY_END | 不玩了、不想玩了、玩累了、结束游戏、下次再玩 | `EVT_VOICE_COMMAND_PLAY_END` / `CMD_PLAY_END` |
+| 32 | GO_OUT | 出去玩、出门溜溜、一块出去走走、想不想出去玩 | `EVT_VOICE_COMMAND_GO_OUT` / `CMD_GO_OUT` |
+| 33 | TUG_OF_WAR | 来拔河、拔河游戏、看谁力气大 | `EVT_VOICE_COMMAND_TUG_OF_WAR` / `CMD_TUG_OF_WAR` |
+| 34 | CHASE | 追逐游戏、来追我呀、来抓我呀、抓小狗游戏、看谁跑的快 | `EVT_VOICE_COMMAND_CHASE` / `CMD_CHASE` |
+| 35 | HIDE_AND_SEEK | 来捉迷藏、躲藏游戏 | `EVT_VOICE_COMMAND_HIDE_AND_SEEK` / `CMD_HIDE_AND_SEEK` |
+| 36 | FETCH_FRISBEE | 飞盘游戏 | `EVT_VOICE_COMMAND_FETCH_FRISBEE` / `CMD_FETCH_FRISBEE` |
+| 37 | CHASE_BALL | 去追球 | `EVT_VOICE_COMMAND_CHASE_BALL` / `CMD_CHASE_BALL` |
+| 38 | PRAISE | 真棒、好狗、真乖、真聪明、可爱、厉害、太棒了、好样的、我爱你、我喜欢你、你真有趣、真有意思、小跟屁虫、小宝贝、乖狗狗、好狗狗 | `EVT_VOICE_COMMAND_PRAISE` / `CMD_PRAISE` |
+| 39 | SCOLD | 你怎么不听话、不跟你玩了、不理你、不想理你、讨厌你、我生气了、我要惩罚你咯、罚你站着、罚你不准吃饭、坏狗狗、傻狗、笨狗 | `EVT_VOICE_COMMAND_SCOLD` / `CMD_SCOLD` |
+| 40 | OWNER_UNHAPPY | 累、烦、不开心、不得劲、难过、心情不好、不舒服、孤独、压力大、难受、哭唧唧、悲伤 | `EVT_VOICE_COMMAND_OWNER_UNHAPPY` / `CMD_OWNER_UNHAPPY` |
+| 41 | OWNER_HAPPY | 开心、高兴、幸运、耶、太好了、太妙了 | `EVT_VOICE_COMMAND_OWNER_HAPPY` / `CMD_OWNER_HAPPY` |
+| 47 | OWNER_RETURNED | 我回来啦、想我了吗、回来咯、猜猜我是谁、谁回来啦、谁来啦、我来啦 | `EVT_VOICE_COMMAND_OWNER_RETURNED` / `CMD_OWNER_RETURNED` |
+| 48 | OWNER_GOING_OUT | 我走啦、我出门啦、我出去啦、我出去一下、我去上班啦、我撤退啦、我先溜啦、我回去啦、拜拜、再见、乖乖等我回来哦 | `EVT_VOICE_COMMAND_OWNER_GOING_OUT` / `CMD_OWNER_GOING_OUT` |
+| 49 | WHAT_IS_THIS | 你看看这是啥、快看、看过来、瞧瞧这是啥、你瞅瞅这是啥、这是什么、这是啥、那是啥、那是什么、这是什么东西、看前边 | `EVT_VOICE_COMMAND_WHAT_IS_THIS` / `CMD_WHAT_IS_THIS` |
+| 50 | WHO_IS_IT | 看、看看谁回来了、看下谁来了、这是谁、我是谁、你知道我是谁吗、他是谁、谁呀、什么人 | `EVT_VOICE_COMMAND_WHO_IS_IT` / `CMD_WHO_IS_IT` |
 
-`EVT_VOICE_COMMAND_UNKNOWN` 不是正常词库事件。只有 `stage=intent result=fallback_unknown`、
-`intent_source=invalid_protocol_fallback`、`dispatch_role=diagnostic` 且
-`should_trigger_behavior_tree=false` 时，才是合法的非执行诊断结果。
+## 参数、兜底及声源入口
 
-注意：`command_lexicon result=matched` 本身仍不足以证明最终走词库。例如短指令同时
-命中 KWS 和词库时，仲裁可能选择 KWS；最终归属必须以
-`recognition_arbitration.selected_source` 和 `event_publish.intent_source` 为准。
-
-#### 哪些结果会同时发布 `EVT_VOICE_COMMAND_KNOWN`
-
-这里的“同时携带”是指同一个 `utterance_id` 下额外发布一条独立的
-`EVT_VOICE_COMMAND_KNOWN`，不是在具体事件内部增加一个同名字段。
-
-| 场景 | 事件顺序 | KNOWN 的关键字段 | 具体事件的关键字段 |
-|---|---|---|---|
-| Model Intent 命中显式动作白名单且 ASR 文本含对应动作证据、未被否定 | 可选社交大类事件 `→ 具体事件 → KNOWN` | `intent_source=rkllm` 或兼容规则来源、`dispatch_role=semantic_classification`、不可执行 | `dispatch_role=specific_command`、`should_trigger_behavior_tree=true`、`model_dispatch_policy=allowlist_and_text_evidence` |
-| Model Intent 得到有命令语义但无法安全落到具体动作 | 仅 `KNOWN`，或社交大类事件 `→ KNOWN` | `dispatch_role=semantic_classification`、不可执行；`specific_event_type` 可为空 | 不应伪造可执行具体事件 |
-
-词库和 KWS 事件一律不附带 KNOWN。纯社交、QUERY、`NONE|NONE|NONE` 等 Model Intent
-结果也不附带；后者分别按对应业务大类、
-`EVT_VOICE_STATUS_CARE` 或 `EVT_VOICE_NEUTRAL` 判定。最终仍应以本句
-`utterance_complete.published_event_types/event_types` 为准，不按事件名称猜测。
-
-## 2. 单条用例判定
-
-每条用例至少满足：
-
-1. `speech.asr_text` 与播放文本一致，或符合用例事先允许的等价转写；若符合下方
-   “KWS 修正 ASR 同音转写”的条件，则 ASR 转写单项记为失败，但命令功能可按最终
-   仲裁事件单独判定。
-2. ASR 目录路径必须在同一个 `utterance_id` 出现
-   `stage_complete stage=command_lexicon result=matched`；KWS 同音纠正路径则必须如实
-   记录 `result=no_match`，并满足下方独立证据链。
-3. 最终发布事件中的 `command_key/command_id/event_type` 与本表一致；核心行还须按
-   下方三轴表检查 `social/intent/control/raw_nlu_tag`。
-4. ASR 目录被选中时，最终 `event_publish.intent_source=command_lexicon`，且不再进入
-   `stage=intent`；短句由 KWS 选中时来源为 `kws`。
-5. 同一句必须有 `stage_complete stage=recognition_arbitration`，且只允许一个识别来源
-   发布一个具体业务事件；不得因词库或 KWS 命中再附带 KNOWN 摘要。
-
-### KWS 与 ASR 同音转写的安全仲裁
-
-普通短指令出现 ASR 同音误识别时，流式 KWS 候选不能独立授权动作。例如用户实际说
-“击掌”、`speech.asr_text` 为“机长”时，同一个 `utterance_id` 必须满足：
-
-1. `stage=kws result=candidate`，候选为 `HIGH_FIVE` /
-   `EVT_VOICE_COMMAND_HIGH_FIVE`；
-2. `stage=command_lexicon result=no_match`，不得把“机长”伪报为目录命中；
-3. `stage=recognition_arbitration result=asr_selected`、
-   `reason=short_asr_unconfirmed_kws`；
-4. 不发布 `EVT_VOICE_COMMAND_HIGH_FIVE`。
-
-测试报告记录 ASR 转写 **FAIL**、动作识别 **FAIL/拒识成功**、安全仲裁 **PASS**。
-短 ASR 文本精确命中另一个目录命令时选择 ASR 并记录
-`short_asr_catalog_conflict`。只有 `吃罐罐→去滚罐` 和 `去拿→去哪` 两个配置精确错写
-组合允许 KWS 胜出，记录 `configured_kws_priority_alias`。
-
-### 受控扩展的判定
-
-扩展规则直接定义在 `command_catalog.yaml.expansion`，按语义分为 `command`、
-`query`、`statement`、`social`、`vocative` 五种 profile。运行时启动时生成全部变体，
-随后仍通过哈希表进行规范化整句精确匹配，不使用子串、编辑距离或否定词删除。
-
-这里的“扩展”不是任意相似句或模糊匹配，而是把标准词/句代入固定模板。例如标准词
-“坐下”使用 `command` profile 后，会生成“请坐下”“请你坐下”“麻烦坐下”等恰好
-10 条新入口。profile 的选择顺序为：`phrase_profiles` 指定的单条短语优先，其次是
-`command_profiles` 指定的命令组，均未指定时使用 `default_profile: command`。
-
-当前五类 profile 的完整生成规则如下；表中的 `{phrase}` 代表原始标准词/句：
-
-| profile | 适用语义 | 10 条受控模板 |
+| Excel行 | 路由 | 识别内容 |
 |---|---|---|
-| `command` | 默认动作命令 | `请{phrase}`；`请你{phrase}`；`麻烦{phrase}`；`麻烦你{phrase}`；`小狗，{phrase}`；`狗狗，{phrase}`；`宝贝，{phrase}`；`{phrase}一下`；`{phrase}吧`；`{phrase}呀` |
-| `query` | 问句 | `小狗，{phrase}`；`狗狗，{phrase}`；`宝贝，{phrase}`；`我想问，{phrase}`；`我想知道，{phrase}`；`跟我说说，{phrase}`；`{phrase}呢`；`{phrase}呀`；`{phrase}啊`；`{phrase}嘛` |
-| `statement` | 主人状态或陈述 | `小狗，{phrase}`；`狗狗，{phrase}`；`宝贝，{phrase}`；`跟你说，{phrase}`；`我想说，{phrase}`；`其实，{phrase}`；`{phrase}啊`；`{phrase}呀`；`{phrase}呢`；`{phrase}哦` |
-| `social` | 表扬、责备、安抚等社交表达 | `小狗，{phrase}`；`狗狗，{phrase}`；`宝贝，{phrase}`；`跟你说，{phrase}`；`听我说，{phrase}`；`{phrase}啊`；`{phrase}呀`；`{phrase}哦`；`{phrase}呢`；`{phrase}啦` |
-| `vocative` | 呼名 | `喂，{phrase}`；`嘿，{phrase}`；`{phrase}啊`；`{phrase}呀`；`{phrase}哦`；`{phrase}诶`；`{phrase}哎`；`{phrase}哟`；`{phrase}呐`；`{phrase}呢` |
+| 42 | FETCH | [去拿xx/拿xx过来/找xx过来/找xx来]<br>xx为狗绳/狗绳子、玩具、狗碗等物品 |
+| 43 | FIND_PERSON | 去找xx<br>xx为录入身份信息的人 |
+| 44 | GO_TO_LOCATION | [去xx/到xx去/回xx去]<br>xx为狗窝、房间、卧室、客厅、厨房等有地图标记的地点 |
+| 45 | FETCH_FROM_LOCATION | [去xx/到xx去/回xx去]+[去拿yy/拿yy过来/找yy过来/找yy来]<br>xx为狗窝、房间、卧室、客厅、厨房等有地图标记的地点<br>yy为狗绳/狗绳子、玩具、狗碗等物品 |
+| 46 | CHAT_FALLBACK | 无明确意图及匹配词的闲聊内容 |
+| 51 | SOUND_SOURCE | 1、唤醒词<br>2、高于周围环境或谈话声音频率的声音如[嘬嘬嘬]、[嘿嘿嘿]、拍手声、突发异响等 |
 
-运行时节点当前调用 `CommandLexicon.match()`，因此只启用“标准词/句 + 上述固定扩展”
-的规范化精确匹配。代码中的 `match_fuzzy()` 拼音同音回退目前没有接入节点运行链路，
-不能把“坐虾 → 坐下”等测试当作线上词库应当命中。第 3.5 节的“相似句”同样不属于
-这 1808 个确定性入口，而是专门用于测试词库未命中后的 Model Intent。
+## 验收边界
 
-扩展命中时必须同时满足：
+- 逐条验证标准词句及变体的整句事件；同一句不能同时触发特技与问候。
+- 否定、引用、第三人陈述及多目标不得靠截取子串执行；明确的停止游戏、责备与制止语句允许整句命中。
+- 去厨房/门口拿狗绳子须同时保留地点与物品；泛称玩具通过 object_group=toy 授权下游选择目标，未注册人物、未知地点/物品仍为不可执行摘要。
+- 去追球使用 CHASE_BALL 独立事件，与追人 CHASE 和取物 FETCH 分开；下游需接入追球及随机放球流程和5分钟任务上限。
+- 声源行仅对齐通用声音活动入口，不证明拍手、嘬声或异响分类已实现；闲聊仍为非执行 UNKNOWN。
+- 观察同一 utterance_id 的 command_lexicon、recognition_arbitration、event_publish；词库加载成功不等于真机验收。
 
-1. `command_key/event_type` 与对应标准词/句完全相同，并跳过 Model Intent。
-2. `stage_complete(stage=command_lexicon)` 输出
-   `match_strategy=rule_expansion/catalog_phrase/matched_phrase/expansion_profile/expansion_rule`。
-3. 具体事件的 `slots` 保留完整规则取证字段；原词命中则为
-   `match_strategy=catalog_exact`，且没有 `expansion_profile/expansion_rule`。
-4. 自动覆盖测试必须验证 `158 × 10 = 1580` 条扩展全部可加载且无路由冲突；人工
-   验收至少从每个 profile 抽取样本，并覆盖 19 组核心指令。
-5. 未在规则中生成的句子继续走 Model Intent。例如“不要坐下”“请你不要坐下”不得命中
-   `SIT`；“请你坐下”应按 `command/polite_please_you` 命中 `SIT`。
+## 表格全局约束（下游实现）
 
-典型对齐样例：
-
-| 输入 | 标准词/句 | profile / rule | 期望 `command_key` |
-|---|---|---|---|
-| 请你坐下 | 坐下 | `command/polite_please_you` | `SIT` |
-| 宝贝，太棒了 | 太棒了 | `social/address_baby` | `PRAISE` |
-| 我想问，你在哪里 | 你在哪里 | `query/ask_preface` | `ASK_WHERE_ARE_YOU` |
-| 跟你说，我好孤独 | 我好孤独 | `statement/tell_you_preface` | `OWNER_LONELY` |
-| 嘿，小狗 | 小狗 | `vocative/prefix_hey` | `CALL_NAME` |
-
-说明：`PRAISE`、`SCOLD` 为非动作社交事件，`is_executable=false`，但通过
-`dispatch_role=social_reaction` 授权 Tree，因此 `BT=是`。主表 `control` 是目录的具体
-事件执行配置；核心事件 payload 的正式三轴以紧随其后的三轴表为准，因此 QUIET
-虽然具体事件可执行，语义仍为 `NONE|BARK|STOP`。
-
-### 19 组核心指令的三轴语义
-
-| command_key | SOCIAL | INTENT | CONTROL |
-|---|---|---|---|
-| WALK | NONE | GO | DO |
-| COME | NONE | COME | DO |
-| FOLLOW | NONE | FOLLOW | DO |
-| GO_OUT | NONE | GO_OUT | DO |
-| GO_HOME | NONE | GO_HOME | DO |
-| APPROACH | NONE | APPROACH | DO |
-| BACK_UP | NONE | BACK | DO |
-| SIT | NONE | SIT | DO |
-| LIE_DOWN | NONE | LIE | DO |
-| PLAY_DEAD | NONE | PLAY_DEAD | DO |
-| STAND_UP | NONE | STAND | DO |
-| STAND_STILL | NONE | STAY | DO |
-| SHAKE_HAND | NONE | SHAKE | DO |
-| HIGH_FIVE | NONE | HIGH_FIVE | DO |
-| SPIN | NONE | SPIN | DO |
-| ROLL_OVER | NONE | ROLL | DO |
-| HOLD_POSITION | NONE | STAY | DO |
-| DROP | NONE | DROP | DO |
-| QUIET | NONE | BARK | STOP |
-
-## 3. Model Intent 意图识别与事件对应表
-
-本节用于测试与产品示例**语义相近、但没有命中确定性词库**的自然表达。测试前必须先
-确认同一 `utterance_id` 的日志为：
-
-```text
-stage_complete stage=command_lexicon result=no_match
-stage_complete stage=recognition_arbitration result=asr_selected
-stage_complete stage=intent result=parsed
-```
-
-如果原句或受控扩展已命中目录，则应按第 4 节的具体目录事件判定，不能拿目录结果
-冒充 Model Intent 准确率。Model Intent 的正式输出是 `SOCIAL|INTENT|CONTROL`；随后由开发侧
-固定规则映射成下表事件。业务大类和 `EVT_VOICE_COMMAND_KNOWN` 摘要均为
-`dispatch_role=semantic_classification`、`should_trigger_behavior_tree=false`。只有命中
-第 3.2 节显式动作白名单、ASR 文本动作证据且未被否定时，才额外发布
-`dispatch_role=specific_command`、`should_trigger_behavior_tree=true` 的具体动作事件。
-
-### 3.1 三轴到事件的固定映射
-
-| 触发条件 | 固定事件 | 说明 |
-|---|---|---|
-| `SOCIAL=CALL` | `EVT_VOICE_CALL_NAME` | 呼唤、昵称或吸引注意。 |
-| `SOCIAL=PRAISE` | `EVT_VOICE_PRAISE` | 夸赞、鼓励。 |
-| `SOCIAL=SCOLD` | `EVT_VOICE_SCOLD` | 责备、纠正。 |
-| `SOCIAL=COMFORT` | `EVT_VOICE_COMFORT` | 安抚、关怀。 |
-| `SOCIAL=PLAYFUL` | `EVT_VOICE_PLAY_INTERACTION` | 玩耍、逗弄语气。 |
-| `SOCIAL=OWNER_POSITIVE` | `EVT_VOICE_POSITIVE_EMOTION` | 主人积极状态。 |
-| `SOCIAL=OWNER_NEGATIVE` | `EVT_VOICE_NEGATIVE_EMOTION` | 主人消极状态。 |
-| `INTENT!=NONE` 且 `CONTROL=QUERY` | `EVT_VOICE_STATUS_CARE` | 查询类统一进入状态关怀。 |
-| `INTENT=PLAY/TUG/DANCE` 且非 `QUERY` | `EVT_VOICE_PLAY_INTERACTION` | 娱乐意图统一进入游戏互动。 |
-| 其他 `INTENT!=NONE` 且 `CONTROL=DO/STOP` | `EVT_VOICE_COMMAND_KNOWN` | 只表示识别到粗类命令，不是具体动作事件。 |
-| `NONE\|NONE\|NONE` | `EVT_VOICE_NEUTRAL` | 中性/OOS 统一事件；不可执行。 |
-
-一个结果同时包含 SOCIAL、可执行白名单 INTENT 时，按“社交大类 → 具体动作 →
-`EVT_VOICE_COMMAND_KNOWN` 摘要”的顺序发布；如果社交轴和意图轴导出同一个大类事件
-则只发布一次。例如 `PLAYFUL|PLAY|DO` 只发布一个
-`EVT_VOICE_PLAY_INTERACTION`，`SCOLD|EAT|STOP` 依次发布
-`EVT_VOICE_SCOLD`、`EVT_VOICE_COMMAND_KNOWN`，而 `PRAISE|SIT|DO` 依次发布
-`EVT_VOICE_PRAISE`、`EVT_VOICE_COMMAND_SIT`、`EVT_VOICE_COMMAND_KNOWN`。
-
-### 3.2 Model Intent 具体动作白名单
-
-只有下表一一对应、无需目标槽位的组合可以由模型额外生成具体动作事件。表外标签
-仍只发布第 3.1 节业务大类；禁止通过字符串拼接自行生成事件名。
-
-| `INTENT\|CONTROL` | `command_key` | 具体事件 |
-|---|---|---|
-| `GO\|DO` | `WALK` | `EVT_VOICE_COMMAND_WALK` |
-| `COME\|DO` | `COME` | `EVT_VOICE_COMMAND_COME` |
-| `FOLLOW\|DO` | `FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` |
-| `GO_OUT\|DO` | `GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` |
-| `GO_HOME\|DO` | `GO_HOME` | `EVT_VOICE_COMMAND_GO_HOME` |
-| `APPROACH\|DO` | `APPROACH` | `EVT_VOICE_COMMAND_APPROACH` |
-| `BACK\|DO` | `BACK_UP` | `EVT_VOICE_COMMAND_BACK_UP` |
-| `SIT\|DO` | `SIT` | `EVT_VOICE_COMMAND_SIT` |
-| `LIE\|DO` | `LIE_DOWN` | `EVT_VOICE_COMMAND_LIE_DOWN` |
-| `PLAY_DEAD\|DO` | `PLAY_DEAD` | `EVT_VOICE_COMMAND_PLAY_DEAD` |
-| `STAND\|DO` | `STAND_UP` | `EVT_VOICE_COMMAND_STAND_UP` |
-| `SHAKE\|DO` | `SHAKE_HAND` | `EVT_VOICE_COMMAND_SHAKE_HAND` |
-| `HIGH_FIVE\|DO` | `HIGH_FIVE` | `EVT_VOICE_COMMAND_HIGH_FIVE` |
-| `SPIN\|DO` | `SPIN` | `EVT_VOICE_COMMAND_SPIN` |
-| `ROLL\|DO` | `ROLL_OVER` | `EVT_VOICE_COMMAND_ROLL_OVER` |
-| `DROP\|DO` | `DROP` | `EVT_VOICE_COMMAND_DROP` |
-| `BARK\|STOP` | `QUIET` | `EVT_VOICE_COMMAND_QUIET` |
-| `TOILET\|DO` | `TOILET` | `EVT_VOICE_COMMAND_TOILET` |
-| `CLEAN\|DO` | `CLEAN` | `EVT_VOICE_COMMAND_CLEAN` |
-| `SLEEP\|DO` | `SLEEP` | `EVT_VOICE_COMMAND_SLEEP` |
-
-`STAY|DO` 不是一一对应标签，必须再结合 ASR 原文确定具体事件：包含“站好、站着、
-站稳、站直、站立、站姿”等站立语义时发布 `EVT_VOICE_COMMAND_STAND_STILL`；包含
-“别动、不要动、不准动、不许动、保持不动、等着、原地、不要走、停下”等保持语义时
-发布 `EVT_VOICE_COMMAND_HOLD_POSITION`。未能可靠区分时只发布不可执行的
-`EVT_VOICE_COMMAND_KNOWN`，不能猜测动作。
-
-`EAT/FIND_PERSON` 等标签仍因动作条件或目标槽位未冻结而不在具体白名单。
-`FETCH/FIND_TOY` 使用下一节独立目标物门控。具体动作事件必须是事件组中唯一的可执行
-事件；大类事件和 KNOWN 摘要不能再次生成行为树候选。
-
-### 3.3 找物/捡取目标物门控
-
-`FETCH/FIND_TOY` 不能只凭模型标签执行。节点必须从 ASR 原文进行确定性别名匹配，且
-`object_name` 只能是 `config/object_targets.yaml` 中以下 18 个视觉类别之一：
-
-```text
-dog toy ball              dog frisbee toy          dog tug ring toy
-dog collar                dog bowl                  dog leash
-dog treat bag             dog food can              dog bed
-trash can                 cardboard shipping box   sock
-slipper                   tissue paper              door
-stairs                    cat                       dog
-```
-
-匹配使用最长别名优先，中文和英文别名最终都转换为上面的规范英文类别。命中后：
-
-| 模型标签 | 事件顺序 | 可执行事件 |
-|---|---|---|
-| `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` | 只有 FETCH |
-| `NONE\|FIND_TOY\|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` | 只有 FETCH |
-| `NONE\|FETCH\|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` | 只有 FETCH |
-
-具体事件使用 `command_key=FETCH/command_id=CMD_FETCH_OBJECT`，并携带：
-
-```text
-object_name=<18 类之一>
-object_mention=<ASR 中命中的别名>
-object_matched_alias=<目录别名>
-object_match_source=asr_rule
-object_catalog_version=<目录版本>
-```
-
-没有命中 18 类时，所有相关大类事件仍保留原三轴，但必须携带
-`object_name=NONE/object_match_source=unsupported`，且不发布具体 FETCH 事件。例如
-“看看那个布偶娃娃在哪里”只发布不可执行的 `EVT_VOICE_STATUS_CARE`，不能把整个三轴
-改写成 `NONE|NONE|NONE`。
-
-### 3.4 意图识别事件组示例表
-
-下表集中给出 Model Intent 三轴标签经过开发侧固定路由后的最终事件。`BT` 一列与“发布
-事件（按顺序）”逐项对应：`是` 表示该事件允许进入行为树，`否` 表示只传递语义或
-状态。一个事件组内的所有事件必须共用同一 `interaction_id/utterance_id` 和
-`raw_nlu_tag`。
-
-| 输入示例 | 模型输出 `raw_nlu_tag` | 发布事件（按顺序） | `dispatch_role`（按顺序） | BT（按顺序） | 核对重点 |
-|---|---|---|---|---|---|
-| 旺财看看我 | `CALL\|NONE\|NONE` | `EVT_VOICE_CALL_NAME` | `semantic_classification` | 否 | 只表达呼唤，不生成动作候选。 |
-| 你今天表现得特别优秀 | `PRAISE\|NONE\|NONE` | `EVT_VOICE_PRAISE` | `semantic_classification` | 否 | 单一社交事件。 |
-| 你表现很好现在坐好 | `PRAISE\|SIT\|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `specific_command` → `semantic_classification` | 否 → 是 → 否 | ASR 含“坐好”动作证据；只有 SIT 是可执行事件，KNOWN 只是命令摘要。 |
-| 往前走几步 | `NONE\|GO\|DO` | `EVT_VOICE_COMMAND_WALK` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | 模型标签使用 `GO`，具体事件按白名单映射为 WALK。 |
-| 起立一下 | `NONE\|STAND\|DO` | `EVT_VOICE_COMMAND_STAND_UP` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | ASR 含“起立”动作证据；`STAND` 是明确的起立动作。 |
-| 保持站立姿势 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_STAND_STILL` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | `STAY` 结合 ASR 中的站立语义解析为 STAND_STILL。 |
-| 保持原地不要走 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_HOLD_POSITION` → `EVT_VOICE_COMMAND_KNOWN` | `specific_command` → `semantic_classification` | 是 → 否 | `STAY` 结合 ASR 中的原地/不要走语义解析为 HOLD_POSITION。 |
-| 不允许再碰这些吃的 | `SCOLD\|EAT\|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` | `semantic_classification` → `semantic_classification` | 否 → 否 | `EAT\|STOP` 不在具体动作白名单，不能拼出具体命令事件。 |
-| 别紧张我就在这里 | `COMFORT\|NONE\|NONE` | `EVT_VOICE_COMFORT` | `semantic_classification` | 否 | 安抚大类事件。 |
-| 咱们一起做个游戏 | `PLAYFUL\|PLAY\|DO` | `EVT_VOICE_PLAY_INTERACTION` | `semantic_classification` | 否 | SOCIAL 与 INTENT 导出同一事件时去重，只发布一次。 |
-| 身体有没有哪里难受 | `NONE\|DOG_STATUS\|QUERY` | `EVT_VOICE_STATUS_CARE` | `semantic_classification` | 否 | 查询类统一路由到状态关怀。 |
-| 看看那个球在哪里 | `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` | `specific_command` → `semantic_classification` | 是 → 否 | ASR 目标匹配成功；FETCH 携带规范化 `object_name=dog toy ball`。 |
-| 看看那个布偶娃娃在哪里 | `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_STATUS_CARE` | `semantic_classification` | 否 | 目标不在 18 类白名单；携带 `object_name=NONE/object_match_source=unsupported`。 |
-| 最近事情太多让我很焦虑 | `OWNER_NEGATIVE\|NONE\|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` | `semantic_classification` | 否 | 主人消极状态大类。 |
-| 今天所有事情都特别顺心 | `OWNER_POSITIVE\|NONE\|NONE` | `EVT_VOICE_POSITIVE_EMOTION` | `semantic_classification` | 否 | 主人积极状态大类。 |
-| 等一下记得读这条消息 | `NONE\|NONE\|NONE` | `EVT_VOICE_NEUTRAL` | `semantic_classification` | 否 | 合法中性/OOS 标签，不等同于模型解析失败。 |
-| `<模型输出不符合三轴协议>` | 无有效标签 | `EVT_VOICE_COMMAND_UNKNOWN` | `diagnostic` | 否 | 仅模型和规则均无有效协议结果时使用，不能代替合法 NEUTRAL。 |
-
-测试时不能只检查事件组中“出现过某个事件”。必须同时核对事件数量、发布顺序和每条
-事件的 `should_trigger_behavior_tree`；尤其禁止让 `EVT_VOICE_COMMAND_KNOWN` 与具体
-动作事件同时进入行为树，避免同一句生成两个动作候选。
-
-### 3.5 产品示例的相似句测试表
-
-下列“测试相似句”均已确认不在当前 1808 个确定性匹配入口中，适合直接验证 Model Intent。
-测试团队还应围绕每行自行补充同义改写，但期望标签必须遵守训练标注协议，不能仅凭
-最终事件反推模型标签。日志必须同时核对 `raw_nlu_tag` 和按序发布的 `event_types`。
-
-| 产品类别 / 原示例 | 测试相似句示例 | 期望 `raw_nlu_tag` | 期望事件（按顺序） |
-|---|---|---|---|
-| 走 / 去 | 往前走几步 | `NONE\|GO\|DO` | `EVT_VOICE_COMMAND_WALK` → `EVT_VOICE_COMMAND_KNOWN` |
-| 过来 / 回来 / 到我这儿来 | 赶紧回到我身边 | `NONE\|COME\|DO` | `EVT_VOICE_COMMAND_COME` → `EVT_VOICE_COMMAND_KNOWN` |
-| 跟着我 / 跟我走 | 一路跟在我后面 | `NONE\|FOLLOW\|DO` | `EVT_VOICE_COMMAND_FOLLOW` → `EVT_VOICE_COMMAND_KNOWN` |
-| 出去玩 / 出去溜溜 | 咱们到外面溜达 | `NONE\|GO_OUT\|DO` | `EVT_VOICE_COMMAND_GO_OUT` → `EVT_VOICE_COMMAND_KNOWN` |
-| 回家 | 现在回到你的窝里 | `NONE\|GO_HOME\|DO` | `EVT_VOICE_COMMAND_GO_HOME` → `EVT_VOICE_COMMAND_KNOWN` |
-| 靠近点 | 再贴近我一些 | `NONE\|APPROACH\|DO` | `EVT_VOICE_COMMAND_APPROACH` → `EVT_VOICE_COMMAND_KNOWN` |
-| 退后 | 向后退两步 | `NONE\|BACK\|DO` | `EVT_VOICE_COMMAND_BACK_UP` → `EVT_VOICE_COMMAND_KNOWN` |
-| 坐 / 坐下 / 蹲下 | 把屁股坐好 | `NONE\|SIT\|DO` | `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
-| 趴下 / 躺下 | 趴到垫子上 | `NONE\|LIE\|DO` | `EVT_VOICE_COMMAND_LIE_DOWN` → `EVT_VOICE_COMMAND_KNOWN` |
-| 装死 | 假装中枪倒下 | `NONE\|PLAY_DEAD\|DO` | `EVT_VOICE_COMMAND_PLAY_DEAD` → `EVT_VOICE_COMMAND_KNOWN` |
-| 起来 / 站起来 | 起立一下 | `NONE\|STAND\|DO` | `EVT_VOICE_COMMAND_STAND_UP` → `EVT_VOICE_COMMAND_KNOWN` |
-| 站好 / 站着 | 保持站立姿势 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_STAND_STILL` → `EVT_VOICE_COMMAND_KNOWN` |
-| 别动 / 等着 / 不许动 | 保持原地不要走 | `NONE\|STAY\|DO` | `EVT_VOICE_COMMAND_HOLD_POSITION` → `EVT_VOICE_COMMAND_KNOWN` |
-| 握手 / 抬手 | 把爪子递给我 | `NONE\|SHAKE\|DO` | `EVT_VOICE_COMMAND_SHAKE_HAND` → `EVT_VOICE_COMMAND_KNOWN` |
-| 击掌 / 拍手 | 抬起爪子和我碰掌 | `NONE\|HIGH_FIVE\|DO` | `EVT_VOICE_COMMAND_HIGH_FIVE` → `EVT_VOICE_COMMAND_KNOWN` |
-| 转圈 | 原地绕一整圈 | `NONE\|SPIN\|DO` | `EVT_VOICE_COMMAND_SPIN` → `EVT_VOICE_COMMAND_KNOWN` |
-| 翻滚 | 在地上滚一圈 | `NONE\|ROLL\|DO` | `EVT_VOICE_COMMAND_ROLL_OVER` → `EVT_VOICE_COMMAND_KNOWN` |
-| 放下 / 松开 / 松口 | 把嘴里的东西松开 | `NONE\|DROP\|DO` | `EVT_VOICE_COMMAND_DROP` → `EVT_VOICE_COMMAND_KNOWN` |
-| 安静 / 闭嘴 / 别叫 | 现在不要发出叫声 | `NONE\|BARK\|STOP` | `EVT_VOICE_COMMAND_QUIET` → `EVT_VOICE_COMMAND_KNOWN` |
-| 昵称：小狗 / 小宝贝等 | 旺财看看我 | `CALL\|NONE\|NONE` | `EVT_VOICE_CALL_NAME` |
-| 夸奖 / 鼓励 | 你今天表现得特别优秀 | `PRAISE\|NONE\|NONE` | `EVT_VOICE_PRAISE` |
-| 夸奖并要求坐下 | 你表现很好现在坐好 | `PRAISE\|SIT\|DO` | `EVT_VOICE_PRAISE` → `EVT_VOICE_COMMAND_SIT` → `EVT_VOICE_COMMAND_KNOWN` |
-| 一般责备 / 纠正 | 你这样做真的不听话 | `SCOLD\|NONE\|NONE` | `EVT_VOICE_SCOLD` |
-| 不准吃饭 | 不允许再碰这些吃的 | `SCOLD\|EAT\|STOP` | `EVT_VOICE_SCOLD` → `EVT_VOICE_COMMAND_KNOWN` |
-| 不怕不怕 / 没事没事 | 别紧张我就在这里 | `COMFORT\|NONE\|NONE` | `EVT_VOICE_COMFORT` |
-| 疼不疼 / 你怎么了 | 身体有没有哪里难受 | `NONE\|DOG_STATUS\|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 摸摸头 / 抱抱 | 让我抱抱安慰你 | `COMFORT\|NONE\|NONE` | `EVT_VOICE_COMFORT` |
-| 吃饭 / 吃零食 / 吃罐罐 | 现在去吃点东西 | `NONE\|EAT\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 肚子饿不饿 / 想不想吃 / 吃啥 | 现在是不是有点饿 | `NONE\|EAT\|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 去尿尿 / 去便便 | 该去尿尿了 | `NONE\|TOILET\|DO` | `EVT_VOICE_COMMAND_TOILET` → `EVT_VOICE_COMMAND_KNOWN` |
-| 擦一擦手 / 脚 | 把爪子洗干净 | `NONE\|CLEAN\|DO` | `EVT_VOICE_COMMAND_CLEAN` → `EVT_VOICE_COMMAND_KNOWN` |
-| 睡觉 / 睡吧 / 休息 | 回窝好好休息一会儿 | `NONE\|SLEEP\|DO` | `EVT_VOICE_COMMAND_SLEEP` → `EVT_VOICE_COMMAND_KNOWN` |
-| 来玩 / 一起玩 / 玩不玩 | 咱们一起做个游戏 | `PLAYFUL\|PLAY\|DO` | `EVT_VOICE_PLAY_INTERACTION`（去重后 1 条） |
-| 拔河比赛 | 和我进行一场拔河 | `PLAYFUL\|TUG\|DO` | `EVT_VOICE_PLAY_INTERACTION`（去重后 1 条） |
-| 我不要 / 我不玩 | 这个游戏先不要继续了 | `NONE\|PLAY\|STOP` | `EVT_VOICE_PLAY_INTERACTION` |
-| 去找爸爸 / 去找妈妈 | 帮我找到家里的爸爸 | `NONE\|FIND_PERSON\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 跳个舞 | 给大家表演一段舞蹈 | `NONE\|DANCE\|DO` | `EVT_VOICE_PLAY_INTERACTION` |
-| 拿给我 / 给我 / 去拿 / 叼回来 / 捡球 | 把那只球叼到我面前 | `NONE\|FETCH\|DO` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_COMMAND_KNOWN` |
-| 查询受支持目标 | 看看那个球在哪里 | `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_COMMAND_FETCH` → `EVT_VOICE_STATUS_CARE` |
-| 查询不支持目标 | 看看那个布偶娃娃在哪里 | `NONE\|FIND_TOY\|QUERY` | `EVT_VOICE_STATUS_CARE`；`object_name=NONE` |
-| 找泛指玩具 | 看看玩具被放在哪里 | `NONE\|FIND_TOY\|DO` | `EVT_VOICE_COMMAND_KNOWN`；`object_name=NONE` |
-| 我要出门了 / 你自己在家 / 等我回来 / 拜拜 | 我现在要去上班了 | `NONE\|OWNER_LEAVE\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 我回来了 | 我已经到家啦 | `NONE\|OWNER_RETURN\|DO` | `EVT_VOICE_COMMAND_KNOWN` |
-| 你在干嘛 / 你在哪里 / 你想什么 | 告诉我你现在在做什么 | `NONE\|DOG_STATUS\|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 喜欢吗 / 好玩吗 | 这个游戏你觉得有意思吗 | `NONE\|DOG_PREFERENCE\|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 你听得懂吗 / 你会什么 / 你学会了吗 | 你现在能够完成哪些动作 | `NONE\|DOG_CAPABILITY\|QUERY` | `EVT_VOICE_STATUS_CARE` |
-| 我好想你 | 一整天没见到你我很想念 | `OWNER_NEGATIVE\|NONE\|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` |
-| 主人消极状态表达 | 最近事情太多让我很焦虑 | `OWNER_NEGATIVE\|NONE\|NONE` | `EVT_VOICE_NEGATIVE_EMOTION` |
-| 主人积极状态表达 | 今天所有事情都特别顺心 | `OWNER_POSITIVE\|NONE\|NONE` | `EVT_VOICE_POSITIVE_EMOTION` |
-
-产品文档中的“饥饿值、排泄值、清洁值、困倦值”等执行条件属于行为树/Action 的下游
-前置条件，不是 Voice 的分类标签。Voice 只授权白名单具体事件进入行为树；是否满足
-数值门限、是否真正执行仍必须另做下游验收。
-
-### 3.6 结果判定要求
-
-每条 Model Intent 用例必须同时满足：
-
-1. `stage=intent result=parsed`，且 `social/intent/control` 与期望标签逐轴一致；
-2. `event_publish.raw_nlu_tag` 与期望完整三轴一致，不能只检查某一个轴；
-3. `event_types` 的数量和顺序与表格一致，同一大类事件必须去重；
-4. 所有模型事件均为 `intent_source=rkllm`（模型不可用并明确测试规则回退时才
-   允许 `rule_rkllm_compatible`）；只有白名单具体事件允许
-   `should_trigger_behavior_tree=true`，业务大类和 KNOWN 摘要必须为 `false`；
-5. 合法 `NONE|NONE|NONE` 应发布一条不可执行的 `EVT_VOICE_NEUTRAL`；只有模型和规则均
-   没有有效协议结果时才允许非执行诊断事件 `EVT_VOICE_COMMAND_UNKNOWN`。
-6. `FETCH/FIND_TOY` 还必须出现 `stage=object_target`。只有 `result=matched` 且
-   `object_name` 属于 18 类白名单时允许发布可执行 FETCH；`unsupported/unavailable`
-   均不得发布具体事件。
-
-## 4. 词/句与事件逐条对齐表
-
-| 用例 ID | 核心 | 源行 | 中文词/句 | `command_key` | `command_id` | 期望 `event_type` | `emotion` | `control` | `action_name` | BT |
-|---|:---:|---:|---|---|---|---|---|---|---|:---:|
-| `CAT-001` | 是 | 1 | `走` | `WALK` | `CMD_WALK` | `EVT_VOICE_COMMAND_WALK` | `NONE` | `DO` | `ACT_WALK` | 是 |
-| `CAT-002` | 是 | 1 | `去` | `WALK` | `CMD_WALK` | `EVT_VOICE_COMMAND_WALK` | `NONE` | `DO` | `ACT_WALK` | 是 |
-| `CAT-003` | 是 | 2 | `过来` | `COME` | `CMD_COME_HERE` | `EVT_VOICE_COMMAND_COME` | `NONE` | `DO` | `ACT_COME` | 是 |
-| `CAT-004` | 是 | 2 | `来` | `COME` | `CMD_COME_HERE` | `EVT_VOICE_COMMAND_COME` | `NONE` | `DO` | `ACT_COME` | 是 |
-| `CAT-005` | 是 | 2 | `回来` | `COME` | `CMD_COME_HERE` | `EVT_VOICE_COMMAND_COME` | `NONE` | `DO` | `ACT_COME` | 是 |
-| `CAT-006` | 是 | 2 | `来这` | `COME` | `CMD_COME_HERE` | `EVT_VOICE_COMMAND_COME` | `NONE` | `DO` | `ACT_COME` | 是 |
-| `CAT-007` | 是 | 2 | `到我这儿来` | `COME` | `CMD_COME_HERE` | `EVT_VOICE_COMMAND_COME` | `NONE` | `DO` | `ACT_COME` | 是 |
-| `CAT-008` | 是 | 3 | `跟着我` | `FOLLOW` | `CMD_FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` | `NONE` | `DO` | `ACT_FOLLOW` | 是 |
-| `CAT-009` | 是 | 3 | `跟我走` | `FOLLOW` | `CMD_FOLLOW` | `EVT_VOICE_COMMAND_FOLLOW` | `NONE` | `DO` | `ACT_FOLLOW` | 是 |
-| `CAT-010` | 是 | 4 | `出去玩` | `GO_OUT` | `CMD_GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` | `NONE` | `DO` | `ACT_GO_OUT_TO_PLAY` | 是 |
-| `CAT-011` | 是 | 4 | `出去溜溜` | `GO_OUT` | `CMD_GO_OUT` | `EVT_VOICE_COMMAND_GO_OUT` | `NONE` | `DO` | `ACT_GO_OUT_TO_PLAY` | 是 |
-| `CAT-012` | 是 | 5 | `回家` | `GO_HOME` | `CMD_GO_HOME` | `EVT_VOICE_COMMAND_GO_HOME` | `NONE` | `DO` | `ACT_GO_HOME` | 是 |
-| `CAT-013` | 是 | 6 | `靠近点` | `APPROACH` | `CMD_APPROACH` | `EVT_VOICE_COMMAND_APPROACH` | `NONE` | `DO` | `ACT_COME_CLOSER` | 是 |
-| `CAT-014` | 是 | 7 | `退后` | `BACK_UP` | `CMD_BACK_UP` | `EVT_VOICE_COMMAND_BACK_UP` | `NONE` | `DO` | `ACT_BACK_UP` | 是 |
-| `CAT-015` | 是 | 8 | `坐` | `SIT` | `CMD_SIT` | `EVT_VOICE_COMMAND_SIT` | `NONE` | `DO` | `ACT_SIT` | 是 |
-| `CAT-016` | 是 | 8 | `坐下` | `SIT` | `CMD_SIT` | `EVT_VOICE_COMMAND_SIT` | `NONE` | `DO` | `ACT_SIT` | 是 |
-| `CAT-017` | 是 | 8 | `蹲下` | `SIT` | `CMD_SIT` | `EVT_VOICE_COMMAND_SIT` | `NONE` | `DO` | `ACT_SIT` | 是 |
-| `CAT-018` | 是 | 9 | `趴下` | `LIE_DOWN` | `CMD_LIE_DOWN` | `EVT_VOICE_COMMAND_LIE_DOWN` | `NONE` | `DO` | `ACT_LIE_DOWN` | 是 |
-| `CAT-019` | 是 | 9 | `躺下` | `LIE_DOWN` | `CMD_LIE_DOWN` | `EVT_VOICE_COMMAND_LIE_DOWN` | `NONE` | `DO` | `ACT_LIE_DOWN` | 是 |
-| `CAT-020` | 是 | 10 | `biu` | `PLAY_DEAD` | `CMD_DEAD` | `EVT_VOICE_COMMAND_PLAY_DEAD` | `NONE` | `DO` | `ACT_PLAY_DEAD` | 是 |
-| `CAT-021` | 是 | 10 | `装死` | `PLAY_DEAD` | `CMD_DEAD` | `EVT_VOICE_COMMAND_PLAY_DEAD` | `NONE` | `DO` | `ACT_PLAY_DEAD` | 是 |
-| `CAT-022` | 是 | 11 | `起来` | `STAND_UP` | `CMD_STAND_UP` | `EVT_VOICE_COMMAND_STAND_UP` | `NONE` | `DO` | `ACT_STAND_UP` | 是 |
-| `CAT-023` | 是 | 11 | `站起来` | `STAND_UP` | `CMD_STAND_UP` | `EVT_VOICE_COMMAND_STAND_UP` | `NONE` | `DO` | `ACT_STAND_UP` | 是 |
-| `CAT-024` | 是 | 12 | `站好` | `STAND_STILL` | `CMD_STAND_STILL` | `EVT_VOICE_COMMAND_STAND_STILL` | `NONE` | `DO` | `ACT_STAND_STILL` | 是 |
-| `CAT-025` | 是 | 12 | `站着` | `STAND_STILL` | `CMD_STAND_STILL` | `EVT_VOICE_COMMAND_STAND_STILL` | `NONE` | `DO` | `ACT_STAND_STILL` | 是 |
-| `CAT-026` | 是 | 13 | `握手` | `SHAKE_HAND` | `CMD_HAND` | `EVT_VOICE_COMMAND_SHAKE_HAND` | `NONE` | `DO` | `ACT_SHAKE_HAND` | 是 |
-| `CAT-027` | 是 | 13 | `握个手` | `SHAKE_HAND` | `CMD_HAND` | `EVT_VOICE_COMMAND_SHAKE_HAND` | `NONE` | `DO` | `ACT_SHAKE_HAND` | 是 |
-| `CAT-028` | 是 | 13 | `抬手` | `SHAKE_HAND` | `CMD_HAND` | `EVT_VOICE_COMMAND_SHAKE_HAND` | `NONE` | `DO` | `ACT_SHAKE_HAND` | 是 |
-| `CAT-029` | 是 | 14 | `击掌` | `HIGH_FIVE` | `CMD_FIVE` | `EVT_VOICE_COMMAND_HIGH_FIVE` | `NONE` | `DO` | `ACT_HIGH_FIVE` | 是 |
-| `CAT-030` | 是 | 14 | `击个掌` | `HIGH_FIVE` | `CMD_FIVE` | `EVT_VOICE_COMMAND_HIGH_FIVE` | `NONE` | `DO` | `ACT_HIGH_FIVE` | 是 |
-| `CAT-031` | 是 | 14 | `拍手` | `HIGH_FIVE` | `CMD_FIVE` | `EVT_VOICE_COMMAND_HIGH_FIVE` | `NONE` | `DO` | `ACT_HIGH_FIVE` | 是 |
-| `CAT-032` | 是 | 15 | `转圈` | `SPIN` | `CMD_SPIN` | `EVT_VOICE_COMMAND_SPIN` | `NONE` | `DO` | `ACT_SPIN` | 是 |
-| `CAT-033` | 是 | 16 | `翻滚` | `ROLL_OVER` | `CMD_ROLL` | `EVT_VOICE_COMMAND_ROLL_OVER` | `NONE` | `DO` | `ACT_ROLL_OVER` | 是 |
-| `CAT-034` | 是 | 17 | `别动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
-| `CAT-035` | 是 | 17 | `等着` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
-| `CAT-036` | 是 | 17 | `停` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
-| `CAT-037` | 是 | 17 | `不准动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
-| `CAT-038` | 是 | 17 | `不许动` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
-| `CAT-039` | 是 | 17 | `老实点` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
-| `CAT-040` | 是 | 17 | `等等` | `HOLD_POSITION` | `CMD_HOLD_POSITION` | `EVT_VOICE_COMMAND_HOLD_POSITION` | `NONE` | `DO` | `ACT_HOLD_POSITION` | 是 |
-| `CAT-041` | 是 | 18 | `放下` | `DROP` | `CMD_SPIT` | `EVT_VOICE_COMMAND_DROP` | `NONE` | `DO` | `ACT_DROP` | 是 |
-| `CAT-042` | 是 | 18 | `松开` | `DROP` | `CMD_SPIT` | `EVT_VOICE_COMMAND_DROP` | `NONE` | `DO` | `ACT_DROP` | 是 |
-| `CAT-043` | 是 | 18 | `松口` | `DROP` | `CMD_SPIT` | `EVT_VOICE_COMMAND_DROP` | `NONE` | `DO` | `ACT_DROP` | 是 |
-| `CAT-044` | 是 | 18 | `张嘴` | `DROP` | `CMD_SPIT` | `EVT_VOICE_COMMAND_DROP` | `NONE` | `DO` | `ACT_DROP` | 是 |
-| `CAT-045` | 是 | 19 | `安静` | `QUIET` | `CMD_QUIET` | `EVT_VOICE_COMMAND_QUIET` | `NONE` | `DO` | `ACT_QUIET` | 是 |
-| `CAT-046` | 是 | 19 | `闭嘴` | `QUIET` | `CMD_QUIET` | `EVT_VOICE_COMMAND_QUIET` | `NONE` | `DO` | `ACT_QUIET` | 是 |
-| `CAT-047` | 是 | 19 | `别叫` | `QUIET` | `CMD_QUIET` | `EVT_VOICE_COMMAND_QUIET` | `NONE` | `DO` | `ACT_QUIET` | 是 |
-| `CAT-048` | 是 | 19 | `不许叫` | `QUIET` | `CMD_QUIET` | `EVT_VOICE_COMMAND_QUIET` | `NONE` | `DO` | `ACT_QUIET` | 是 |
-| `CAT-049` | 否 | 20, 21, 22, 23, 24 | `小狗` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
-| `CAT-050` | 否 | 20, 21, 22, 23, 24 | `小跟屁虫` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
-| `CAT-051` | 否 | 20, 21, 22, 23, 24 | `小宝贝` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
-| `CAT-052` | 否 | 20, 21, 22, 23, 24 | `乖狗狗` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
-| `CAT-053` | 否 | 20, 21, 22, 23, 24 | `小坏蛋` | `CALL_NAME` | `CMD_CALL_NAME` | `EVT_VOICE_COMMAND_CALL_NAME` | `CALL` | `NONE` | — | 否 |
-| `CAT-054` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真棒` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-055` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `好狗` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-056` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真乖` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-057` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真聪明` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-058` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `可爱` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-059` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `厉害` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-060` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `太棒了` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-061` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `好样的` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-062` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `我爱你` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-063` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `我喜欢你` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-064` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `你真有趣` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-065` | 否 | 25, 26, 27, 28, 29, 30, 31, 32, 33, 34 | `真有意思` | `PRAISE` | `CMD_PRAISE` | `EVT_VOICE_COMMAND_PRAISE` | `PRAISE` | `NONE` | — | 是 |
-| `CAT-066` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `不可以咬` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-067` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `你怎么不听话` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-068` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我要惩罚你咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-069` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `罚你站着` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-070` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `不准吃饭` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-071` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `321` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-072` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我不跟你玩咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-073` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我不理你咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-074` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `坏狗狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-075` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `笨狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-076` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `傻狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-077` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我要生气咯` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-078` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `臭狗` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-079` | 否 | 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 | `我讨厌你` | `SCOLD` | `CMD_SCOLD` | `EVT_VOICE_COMMAND_SCOLD` | `SCOLD` | `NONE` | — | 是 |
-| `CAT-080` | 否 | 48 | `不怕不怕` | `COMFORT_DONT_BE_AFRAID` | `CMD_COMFORT_DONT_BE_AFRAID` | `EVT_VOICE_COMMAND_COMFORT_DONT_BE_AFRAID` | `NONE` | `DO` | `ACT_COMFORT_DONT_BE_AFRAID` | 是 |
-| `CAT-081` | 否 | 49 | `疼不疼` | `ASK_IF_HURTS` | `CMD_ASK_IF_HURTS` | `EVT_VOICE_COMMAND_ASK_IF_HURTS` | `NONE` | `DO` | `ACT_ASK_IF_HURTS` | 是 |
-| `CAT-082` | 否 | 50 | `没事没事` | `COMFORT_REASSURE` | `CMD_COMFORT_REASSURE` | `EVT_VOICE_COMMAND_COMFORT_REASSURE` | `NONE` | `DO` | `ACT_COMFORT_REASSURE` | 是 |
-| `CAT-083` | 否 | 51 | `摸摸头` | `OFFER_HEAD_FOR_PET` | `CMD_OFFER_HEAD_FOR_PET` | `EVT_VOICE_COMMAND_OFFER_HEAD_FOR_PET` | `NONE` | `DO` | `ACT_OFFER_HEAD_FOR_PET` | 是 |
-| `CAT-084` | 否 | 52 | `抱抱` | `SEEK_HUG` | `CMD_SEEK_HUG` | `EVT_VOICE_COMMAND_SEEK_HUG` | `NONE` | `DO` | `ACT_SEEK_HUG` | 是 |
-| `CAT-085` | 否 | 53 | `吃饭` | `EAT_MEAL` | `CMD_EAT_MEAL` | `EVT_VOICE_COMMAND_EAT_MEAL` | `NONE` | `DO` | `ACT_EAT_MEAL` | 是 |
-| `CAT-086` | 否 | 54 | `吃零食` | `EAT_SNACK` | `CMD_EAT_SNACK` | `EVT_VOICE_COMMAND_EAT_SNACK` | `NONE` | `DO` | `ACT_EAT_SNACK` | 是 |
-| `CAT-087` | 否 | 55 | `吃罐罐` | `EAT_CANNED_FOOD` | `CMD_EAT_CANNED_FOOD` | `EVT_VOICE_COMMAND_EAT_CANNED_FOOD` | `NONE` | `DO` | `ACT_EAT_CANNED_FOOD` | 是 |
-| `CAT-088` | 否 | 56 | `肚子饿不饿` | `RESPOND_HUNGRY_QUERY` | `CMD_RESPOND_HUNGRY_QUERY` | `EVT_VOICE_COMMAND_RESPOND_HUNGRY_QUERY` | `NONE` | `DO` | `ACT_RESPOND_HUNGRY_QUERY` | 是 |
-| `CAT-089` | 否 | 57 | `想不想吃` | `RESPOND_WANT_EAT_QUERY` | `CMD_RESPOND_WANT_EAT_QUERY` | `EVT_VOICE_COMMAND_RESPOND_WANT_EAT_QUERY` | `NONE` | `DO` | `ACT_RESPOND_WANT_EAT_QUERY` | 是 |
-| `CAT-090` | 否 | 58 | `你在吃啥` | `RESPOND_EATING_QUERY` | `CMD_RESPOND_EATING_QUERY` | `EVT_VOICE_COMMAND_RESPOND_EATING_QUERY` | `NONE` | `DO` | `ACT_RESPOND_EATING_QUERY` | 是 |
-| `CAT-091` | 否 | 59 | `你想吃什么` | `RESPOND_FOOD_PREFERENCE_QUERY` | `CMD_RESPOND_FOOD_PREFERENCE_QUERY` | `EVT_VOICE_COMMAND_RESPOND_FOOD_PREFERENCE_QUERY` | `NONE` | `DO` | `ACT_RESPOND_FOOD_PREFERENCE_QUERY` | 是 |
-| `CAT-092` | 否 | 60, 61 | `去尿尿` | `TOILET` | `CMD_TOILET` | `EVT_VOICE_COMMAND_TOILET` | `NONE` | `DO` | — | 是 |
-| `CAT-093` | 否 | 60, 61 | `去便便` | `TOILET` | `CMD_TOILET` | `EVT_VOICE_COMMAND_TOILET` | `NONE` | `DO` | — | 是 |
-| `CAT-094` | 否 | 62 | `擦一擦手` | `CLEAN` | `CMD_CLEAN` | `EVT_VOICE_COMMAND_CLEAN` | `NONE` | `DO` | — | 是 |
-| `CAT-095` | 否 | 62 | `擦一擦脚` | `CLEAN` | `CMD_CLEAN` | `EVT_VOICE_COMMAND_CLEAN` | `NONE` | `DO` | — | 是 |
-| `CAT-096` | 否 | 63, 64, 65, 66 | `睡觉` | `SLEEP` | `CMD_SLEEP` | `EVT_VOICE_COMMAND_SLEEP` | `NONE` | `DO` | — | 是 |
-| `CAT-097` | 否 | 63, 64, 65, 66 | `睡吧` | `SLEEP` | `CMD_SLEEP` | `EVT_VOICE_COMMAND_SLEEP` | `NONE` | `DO` | — | 是 |
-| `CAT-098` | 否 | 63, 64, 65, 66 | `去睡` | `SLEEP` | `CMD_SLEEP` | `EVT_VOICE_COMMAND_SLEEP` | `NONE` | `DO` | — | 是 |
-| `CAT-099` | 否 | 63, 64, 65, 66 | `休息` | `SLEEP` | `CMD_SLEEP` | `EVT_VOICE_COMMAND_SLEEP` | `NONE` | `DO` | — | 是 |
-| `CAT-100` | 否 | 67, 68, 69, 70, 71, 72, 73 | `来玩` | `PLAY` | `CMD_PLAY` | `EVT_VOICE_COMMAND_PLAY` | `NONE` | `DO` | — | 是 |
-| `CAT-101` | 否 | 67, 68, 69, 70, 71, 72, 73 | `开始咯` | `PLAY` | `CMD_PLAY` | `EVT_VOICE_COMMAND_PLAY` | `NONE` | `DO` | — | 是 |
-| `CAT-102` | 否 | 67, 68, 69, 70, 71, 72, 73 | `抓小狗游戏` | `PLAY` | `CMD_PLAY` | `EVT_VOICE_COMMAND_PLAY` | `NONE` | `DO` | — | 是 |
-| `CAT-103` | 否 | 67, 68, 69, 70, 71, 72, 73 | `拔河比赛` | `PLAY` | `CMD_PLAY` | `EVT_VOICE_COMMAND_PLAY` | `NONE` | `DO` | — | 是 |
-| `CAT-104` | 否 | 67, 68, 69, 70, 71, 72, 73 | `谁要玩游戏` | `PLAY` | `CMD_PLAY` | `EVT_VOICE_COMMAND_PLAY` | `NONE` | `DO` | — | 是 |
-| `CAT-105` | 否 | 67, 68, 69, 70, 71, 72, 73 | `玩不玩` | `PLAY` | `CMD_PLAY` | `EVT_VOICE_COMMAND_PLAY` | `NONE` | `DO` | — | 是 |
-| `CAT-106` | 否 | 67, 68, 69, 70, 71, 72, 73 | `一起玩` | `PLAY` | `CMD_PLAY` | `EVT_VOICE_COMMAND_PLAY` | `NONE` | `DO` | — | 是 |
-| `CAT-107` | 否 | 74 | `我不要` | `REFUSE` | `CMD_REFUSE` | `EVT_VOICE_COMMAND_REFUSE` | `NONE` | `DO` | `ACT_REFUSE` | 是 |
-| `CAT-108` | 否 | 75 | `我不玩` | `REFUSE_PLAY` | `CMD_REFUSE_PLAY` | `EVT_VOICE_COMMAND_REFUSE_PLAY` | `NONE` | `DO` | `ACT_REFUSE_PLAY` | 是 |
-| `CAT-109` | 否 | 76 | `去找爸爸` | `FIND_DAD` | `CMD_FIND_DAD` | `EVT_VOICE_COMMAND_FIND_DAD` | `NONE` | `DO` | `ACT_FIND_DAD` | 是 |
-| `CAT-110` | 否 | 77 | `去找妈妈` | `FIND_MOM` | `CMD_FIND_MOM` | `EVT_VOICE_COMMAND_FIND_MOM` | `NONE` | `DO` | `ACT_FIND_MOM` | 是 |
-| `CAT-111` | 否 | 78 | `跳个舞` | `DANCE` | `CMD_DANCE` | `EVT_VOICE_COMMAND_DANCE` | `NONE` | `DO` | `ACT_DANCE` | 是 |
-| `CAT-112` | 否 | 79 | `拿给我` | `BRING_TO_ME` | `CMD_BRING_TO_ME` | `EVT_VOICE_COMMAND_BRING_TO_ME` | `NONE` | `DO` | `ACT_BRING_TO_ME` | 是 |
-| `CAT-113` | 否 | 80 | `给我` | `GIVE_TO_ME` | `CMD_GIVE_TO_ME` | `EVT_VOICE_COMMAND_GIVE_TO_ME` | `NONE` | `DO` | `ACT_GIVE_TO_ME` | 是 |
-| `CAT-114` | 否 | 81 | `去拿` | `GO_GET_IT` | `CMD_GO_GET_IT` | `EVT_VOICE_COMMAND_GO_GET_IT` | `NONE` | `DO` | `ACT_GO_GET_IT` | 是 |
-| `CAT-115` | 否 | 82 | `叼回来` | `BRING_IT_BACK` | `CMD_BRING_IT_BACK` | `EVT_VOICE_COMMAND_BRING_IT_BACK` | `NONE` | `DO` | `ACT_BRING_IT_BACK` | 是 |
-| `CAT-116` | 否 | 83 | `捡球` | `FETCH_BALL` | `CMD_FETCH_BALL` | `EVT_VOICE_COMMAND_FETCH_BALL` | `NONE` | `DO` | `ACT_FETCH_BALL` | 是 |
-| `CAT-117` | 否 | 84 | `找玩具` | `FIND_TOY` | `CMD_FIND_TOY` | `EVT_VOICE_COMMAND_FIND_TOY` | `NONE` | `DO` | `ACT_FIND_TOY` | 是 |
-| `CAT-118` | 否 | 85 | `我要出门了` | `OWNER_GOING_OUT` | `CMD_OWNER_GOING_OUT` | `EVT_VOICE_COMMAND_OWNER_GOING_OUT` | `NONE` | `DO` | `ACT_OWNER_GOING_OUT` | 是 |
-| `CAT-119` | 否 | 86 | `你自己在家` | `STAY_HOME_ALONE` | `CMD_STAY_HOME_ALONE` | `EVT_VOICE_COMMAND_STAY_HOME_ALONE` | `NONE` | `DO` | `ACT_STAY_HOME_ALONE` | 是 |
-| `CAT-120` | 否 | 87 | `等我回来` | `WAIT_FOR_OWNER_RETURN` | `CMD_WAIT_FOR_OWNER_RETURN` | `EVT_VOICE_COMMAND_WAIT_FOR_OWNER_RETURN` | `NONE` | `DO` | `ACT_WAIT_FOR_OWNER_RETURN` | 是 |
-| `CAT-121` | 否 | 88 | `拜拜` | `BYE_BYE` | `CMD_BYE_BYE` | `EVT_VOICE_COMMAND_BYE_BYE` | `NONE` | `DO` | `ACT_BYE_BYE` | 是 |
-| `CAT-122` | 否 | 89 | `再见` | `GOODBYE` | `CMD_GOODBYE` | `EVT_VOICE_COMMAND_GOODBYE` | `NONE` | `DO` | `ACT_GOODBYE` | 是 |
-| `CAT-123` | 否 | 90 | `我回来了` | `OWNER_RETURNED` | `CMD_OWNER_RETURNED` | `EVT_VOICE_COMMAND_OWNER_RETURNED` | `NONE` | `DO` | `ACT_OWNER_RETURNED` | 是 |
-| `CAT-124` | 否 | 91 | `你在干嘛` | `ASK_WHAT_DOING` | `CMD_ASK_WHAT_DOING` | `EVT_VOICE_COMMAND_ASK_WHAT_DOING` | `NONE` | `DO` | `ACT_ASK_WHAT_DOING` | 是 |
-| `CAT-125` | 否 | 92 | `你在哪里` | `ASK_WHERE_ARE_YOU` | `CMD_ASK_WHERE_ARE_YOU` | `EVT_VOICE_COMMAND_ASK_WHERE_ARE_YOU` | `NONE` | `DO` | `ACT_ASK_WHERE_ARE_YOU` | 是 |
-| `CAT-126` | 否 | 93 | `你怎么了` | `ASK_WHATS_WRONG` | `CMD_ASK_WHATS_WRONG` | `EVT_VOICE_COMMAND_ASK_WHATS_WRONG` | `NONE` | `DO` | `ACT_ASK_WHATS_WRONG` | 是 |
-| `CAT-127` | 否 | 94 | `你想什么` | `ASK_WHAT_THINKING` | `CMD_ASK_WHAT_THINKING` | `EVT_VOICE_COMMAND_ASK_WHAT_THINKING` | `NONE` | `DO` | `ACT_ASK_WHAT_THINKING` | 是 |
-| `CAT-128` | 否 | 95 | `舒服吗` | `ASK_IF_COMFORTABLE` | `CMD_ASK_IF_COMFORTABLE` | `EVT_VOICE_COMMAND_ASK_IF_COMFORTABLE` | `NONE` | `DO` | `ACT_ASK_IF_COMFORTABLE` | 是 |
-| `CAT-129` | 否 | 96 | `喜欢吗` | `ASK_IF_LIKES` | `CMD_ASK_IF_LIKES` | `EVT_VOICE_COMMAND_ASK_IF_LIKES` | `NONE` | `DO` | `ACT_ASK_IF_LIKES` | 是 |
-| `CAT-130` | 否 | 97 | `好玩吗` | `ASK_IF_FUN` | `CMD_ASK_IF_FUN` | `EVT_VOICE_COMMAND_ASK_IF_FUN` | `NONE` | `DO` | `ACT_ASK_IF_FUN` | 是 |
-| `CAT-131` | 否 | 98 | `你听得懂吗` | `ASK_IF_UNDERSTANDS` | `CMD_ASK_IF_UNDERSTANDS` | `EVT_VOICE_COMMAND_ASK_IF_UNDERSTANDS` | `NONE` | `DO` | `ACT_ASK_IF_UNDERSTANDS` | 是 |
-| `CAT-132` | 否 | 99 | `你会什么` | `ASK_ABILITIES` | `CMD_ASK_ABILITIES` | `EVT_VOICE_COMMAND_ASK_ABILITIES` | `NONE` | `DO` | `ACT_ASK_ABILITIES` | 是 |
-| `CAT-133` | 否 | 100 | `你学会了吗` | `ASK_IF_LEARNED` | `CMD_ASK_IF_LEARNED` | `EVT_VOICE_COMMAND_ASK_IF_LEARNED` | `NONE` | `DO` | `ACT_ASK_IF_LEARNED` | 是 |
-| `CAT-134` | 否 | 101 | `我好想你` | `EXPRESS_MISS_YOU` | `CMD_EXPRESS_MISS_YOU` | `EVT_VOICE_COMMAND_EXPRESS_MISS_YOU` | `NONE` | `DO` | `ACT_EXPRESS_MISS_YOU` | 是 |
-| `CAT-135` | 否 | 102 | `我累了` | `OWNER_TIRED` | `CMD_OWNER_TIRED` | `EVT_VOICE_COMMAND_OWNER_TIRED` | `NONE` | `DO` | `ACT_OWNER_TIRED` | 是 |
-| `CAT-136` | 否 | 102 | `好累` | `OWNER_TIRED` | `CMD_OWNER_TIRED` | `EVT_VOICE_COMMAND_OWNER_TIRED` | `NONE` | `DO` | `ACT_OWNER_TIRED` | 是 |
-| `CAT-137` | 否 | 103 | `我有点烦` | `OWNER_ANNOYED` | `CMD_OWNER_ANNOYED` | `EVT_VOICE_COMMAND_OWNER_ANNOYED` | `NONE` | `DO` | `ACT_OWNER_ANNOYED` | 是 |
-| `CAT-138` | 否 | 103 | `烦死了` | `OWNER_ANNOYED` | `CMD_OWNER_ANNOYED` | `EVT_VOICE_COMMAND_OWNER_ANNOYED` | `NONE` | `DO` | `ACT_OWNER_ANNOYED` | 是 |
-| `CAT-139` | 否 | 104 | `今天不开心` | `OWNER_UNHAPPY` | `CMD_OWNER_UNHAPPY` | `EVT_VOICE_COMMAND_OWNER_UNHAPPY` | `NONE` | `DO` | `ACT_OWNER_UNHAPPY` | 是 |
-| `CAT-140` | 否 | 104 | `不得劲` | `OWNER_UNHAPPY` | `CMD_OWNER_UNHAPPY` | `EVT_VOICE_COMMAND_OWNER_UNHAPPY` | `NONE` | `DO` | `ACT_OWNER_UNHAPPY` | 是 |
-| `CAT-141` | 否 | 105 | `过得不太顺利` | `OWNER_BAD_DAY` | `CMD_OWNER_BAD_DAY` | `EVT_VOICE_COMMAND_OWNER_BAD_DAY` | `NONE` | `DO` | `ACT_OWNER_BAD_DAY` | 是 |
-| `CAT-142` | 否 | 106 | `我要抑郁了` | `OWNER_DEPRESSED` | `CMD_OWNER_DEPRESSED` | `EVT_VOICE_COMMAND_OWNER_DEPRESSED` | `NONE` | `DO` | `ACT_OWNER_DEPRESSED` | 是 |
-| `CAT-143` | 否 | 106 | `心情不好` | `OWNER_DEPRESSED` | `CMD_OWNER_DEPRESSED` | `EVT_VOICE_COMMAND_OWNER_DEPRESSED` | `NONE` | `DO` | `ACT_OWNER_DEPRESSED` | 是 |
-| `CAT-144` | 否 | 107 | `压力好大` | `OWNER_STRESSED` | `CMD_OWNER_STRESSED` | `EVT_VOICE_COMMAND_OWNER_STRESSED` | `NONE` | `DO` | `ACT_OWNER_STRESSED` | 是 |
-| `CAT-145` | 否 | 108 | `我好孤独` | `OWNER_LONELY` | `CMD_OWNER_LONELY` | `EVT_VOICE_COMMAND_OWNER_LONELY` | `NONE` | `DO` | `ACT_OWNER_LONELY` | 是 |
-| `CAT-146` | 否 | 109 | `我头疼` | `OWNER_UNWELL` | `CMD_OWNER_UNWELL` | `EVT_VOICE_COMMAND_OWNER_UNWELL` | `NONE` | `DO` | `ACT_OWNER_UNWELL` | 是 |
-| `CAT-147` | 否 | 109 | `不舒服` | `OWNER_UNWELL` | `CMD_OWNER_UNWELL` | `EVT_VOICE_COMMAND_OWNER_UNWELL` | `NONE` | `DO` | `ACT_OWNER_UNWELL` | 是 |
-| `CAT-148` | 否 | 110 | `我现在心情美美的` | `OWNER_HAPPY` | `CMD_OWNER_HAPPY` | `EVT_VOICE_COMMAND_OWNER_HAPPY` | `NONE` | `DO` | `ACT_OWNER_HAPPY` | 是 |
-| `CAT-149` | 否 | 111 | `我今天很开心` | `OWNER_VERY_HAPPY` | `CMD_OWNER_VERY_HAPPY` | `EVT_VOICE_COMMAND_OWNER_VERY_HAPPY` | `NONE` | `DO` | `ACT_OWNER_VERY_HAPPY` | 是 |
-| `CAT-150` | 否 | 111 | `很高兴` | `OWNER_VERY_HAPPY` | `CMD_OWNER_VERY_HAPPY` | `EVT_VOICE_COMMAND_OWNER_VERY_HAPPY` | `NONE` | `DO` | `ACT_OWNER_VERY_HAPPY` | 是 |
-| `CAT-151` | 否 | 112 | `我感觉今天状态特别好` | `OWNER_FEELING_GREAT` | `CMD_OWNER_FEELING_GREAT` | `EVT_VOICE_COMMAND_OWNER_FEELING_GREAT` | `NONE` | `DO` | `ACT_OWNER_FEELING_GREAT` | 是 |
-| `CAT-152` | 否 | 113 | `我今天感觉特别棒` | `OWNER_FEELING_EXCELLENT` | `CMD_OWNER_FEELING_EXCELLENT` | `EVT_VOICE_COMMAND_OWNER_FEELING_EXCELLENT` | `NONE` | `DO` | `ACT_OWNER_FEELING_EXCELLENT` | 是 |
-| `CAT-153` | 否 | 114 | `我现在浑身都很轻松` | `OWNER_RELAXED` | `CMD_OWNER_RELAXED` | `EVT_VOICE_COMMAND_OWNER_RELAXED` | `NONE` | `DO` | `ACT_OWNER_RELAXED` | 是 |
-| `CAT-154` | 否 | 115 | `今天真是个好日子` | `OWNER_WONDERFUL_DAY` | `CMD_OWNER_WONDERFUL_DAY` | `EVT_VOICE_COMMAND_OWNER_WONDERFUL_DAY` | `NONE` | `DO` | `ACT_OWNER_WONDERFUL_DAY` | 是 |
-| `CAT-155` | 否 | 116 | `我今天太幸运了` | `OWNER_FEELING_LUCKY` | `CMD_OWNER_FEELING_LUCKY` | `EVT_VOICE_COMMAND_OWNER_FEELING_LUCKY` | `NONE` | `DO` | `ACT_OWNER_FEELING_LUCKY` | 是 |
-| `CAT-156` | 否 | —（新增） | `自己去玩吧` | `PLAY_ALONE` | `CMD_PLAY_ALONE` | `EVT_VOICE_COMMAND_PLAY_ALONE` | `NONE` | `DO` | `ACT_PLAY_ALONE` | 是 |
-| `CAT-157` | 否 | —（新增） | `这是啥` | `INSPECT_TOY` | `CMD_INSPECT_TOY` | `EVT_VOICE_COMMAND_INSPECT_TOY` | `NONE` | `DO` | `ACT_INSPECT_TOY` | 是 |
-| `CAT-158` | 否 | —（新增） | `这是什么` | `INSPECT_TOY` | `CMD_INSPECT_TOY` | `EVT_VOICE_COMMAND_INSPECT_TOY` | `NONE` | `DO` | `ACT_INSPECT_TOY` | 是 |
-
-“自己去玩吧”语义为“去随机位置自己玩”，使用独立事件，区别于 `PLAY`、`GO_OUT`、
-`REFUSE_PLAY`。验收时应只发布一个 `EVT_VOICE_COMMAND_PLAY_ALONE`，
-`specific_event_type` 与其相同，`dispatch_role=specific_command`，
-`is_executable=true`、`should_trigger_behavior_tree=true`，不调用 Intent，不附带 KNOWN。
-否定句“不要自己去玩吧”不得命中该词条；“小狗，自己去玩吧”应按受控扩展命中。
-此条 `source_rows=[]`，事件 slots 不含 `catalog_source_rows`。下游需新增精确事件映射，
-Voice 测试通过不能作为 Tree/Action 已执行的依据。
-
-
-“这是啥？”与“这是什么？”使用独立直驱事件 `EVT_VOICE_COMMAND_INSPECT_TOY`，
-`command_id=CMD_INSPECT_TOY`，`control=DO`，允许进入 Tree；不调用 Intent，不附带 KNOWN。
-问号由文本规范化去除；“小狗，这是啥”按 query 受控扩展命中。
-Tree 路由为 `inspect_toy`，Action 持续检测球、飞盘、拉环，锁定玩具后导航靠近，
-确认到达后依次完成低头抬头、左右观察和身体伸展组合。Voice 只发布事件，不负责运动。
-
-## 5. 批量测试汇总
-
-全量测试报告至少汇总：
-
-- 路由覆盖：命中的不同 `command_key` 数 / `83`。
-- 短语覆盖：已执行短语数 / `158`。
-- 核心覆盖：已执行核心路由数 / `19`。
-- 每条短语的计划次数、成功次数和准确率。
-- Voice 发布结果与下游 Tree/Action 结果分开判定。
+全局约束：
+1、注意移动速度使用全局速度变量，速度给定范围，非固定某速度，演示速度范围为[0.3-0.5]
+2、通用动作序列：正常人主动发起的唤醒后或交互后，指定完单次任务后，10s内无其他输入（视觉触觉听觉）均[抬头左右看观察人]，30s内无语音/视觉任务识别输入，随机选择平静动作池[坐下,趴下,转圈,走开,挠头,舔鼻子,抖毛]
+3、找人逻辑：用哨兵模式感应人是否在附近，如在附近则启动声源定位朝向人，用视觉识别人，往人跟前走，移动到人跟前50-100cm处停下，不会每次都在同一个固定位置
+4、有随机执行的动作序列，且具备分类属性的动作不单一调用，放在动作分类列表池中随机获取
+5、所有动作序列在单次与人互动中不得重复超过3次（无互动半小时判断单次互动结束）

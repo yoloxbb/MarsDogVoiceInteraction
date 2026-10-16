@@ -23,7 +23,8 @@ def detectors():
     config = load_config(Path(__file__).parents[1] / "config/voice.yaml")
     config = config["providers"]["kws"]["config"]
     guarded = KWSSherpaProvider(config)
-    baseline = KWSSherpaProvider({**config, "negation_guard_enabled": False})
+    baseline = KWSSherpaProvider({**config, "negation_guard_enabled": False,
+                                "repeat_early_command_keys": []})
     try:
         guarded.start()
         baseline.start()

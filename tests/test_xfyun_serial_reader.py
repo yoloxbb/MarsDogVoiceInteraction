@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import serial
 
+from marsdog_voice_interaction.adapters.wakeup import xfyun_serial_reader as reader_module
 from marsdog_voice_interaction.adapters.wakeup.xfyun_serial_reader import (
     XFYunSerialReader,
     _encode_frame,
@@ -195,3 +196,41 @@ def test_reset_clears_partial_frames_and_duplicate_cache() -> None:
     reader._process_data(packet)
     assert reader.get_message() is not None
     assert len(writes) == 2
+
+
+@pytest.mark.parametrize("error", [OSError(5, "Input/output error"),
+                                   serial.SerialException("USB disconnected")])
+def test_device_io_errors_stop_reader_so_provider_can_reconnect(monkeypatch, error):
+    class BrokenSerial:
+        is_open = True
+
+        @property
+        def in_waiting(self):
+            raise error
+
+        def read(self, size):
+            pytest.fail("in_waiting must raise before read is called")
+
+        def close(self):
+            self.is_open = False
+
+    reader = XFYunSerialReader()
+    reader._ser = BrokenSerial()
+    reader._running = True
+    monkeypatch.setattr(reader_module.time, "sleep",
+                        lambda _: pytest.fail("Device I/O errors must not retry a dead descriptor"))
+    reader._reader_loop()
+    assert not reader.is_running
+    assert reader.last_error == str(error)
+    assert not reader._ser.is_open
+
+
+def test_unexpected_closed_port_stops_reader_instead_of_waiting_forever(monkeypatch):
+    reader = XFYunSerialReader()
+    reader._ser = SimpleNamespace(is_open=False)
+    reader._running = True
+    monkeypatch.setattr(reader_module.time, "sleep",
+                        lambda _: pytest.fail("Closed port must return control to reconnect logic"))
+    reader._reader_loop()
+    assert not reader.is_running
+    assert "unexpectedly closed" in reader.last_error

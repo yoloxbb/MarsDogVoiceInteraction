@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class WakeupXFYunSerialProvider(BaseProvider):
     """Wakeup provider using XFYun/AIUI serial module.
 
-    Opens the configured USB serial port, polls for aiui_event messages,
+    Resolves the configured USB serial port, polls for aiui_event messages,
     filters by voice_wake_event_types, parses the nested info JSON,
     and converts to MarsDog wakeup events.
     """
@@ -41,7 +41,11 @@ class WakeupXFYunSerialProvider(BaseProvider):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
 
-        self.port = config.get("port", "/dev/ttyACM0")
+        self.port = str(config.get("port") or "auto").strip() or "auto"
+        self.usb_vid = config.get("usb_vid", 0x1A86)
+        self.usb_pid = config.get("usb_pid", 0x55D4)
+        self.serial_number = str(config.get("serial_number") or "").strip()
+        self._resolved_port = self.port
         self.baudrate = int(config.get("baudrate", 115200))
         self.timeout = float(config.get("timeout", 0.2))
         self.protocol = str(config.get("protocol", "auto"))
@@ -118,44 +122,100 @@ class WakeupXFYunSerialProvider(BaseProvider):
 
     def _connect(self, *, initial: bool) -> bool:
         self._close_reader()
+        self._resolved_port = self.port
         try:
+            self._resolved_port = self._resolve_port()
             reader = XFYunSerialReader(
-                port=self.port,
+                port=self._resolved_port,
                 baudrate=self.baudrate,
                 timeout=self.timeout,
                 protocol=self.protocol,
             )
-            reader.open()
             self.reader = reader
+            reader.open()
             self.available = True
             self._next_reconnect_at = 0.0
             logger.info(
                 "XFYun wakeup %s — port=%s baud=%d events=%s",
                 "started" if initial else "reconnected",
-                self.port,
+                self._resolved_port,
                 self.baudrate,
                 self.voice_wake_event_types,
             )
             return True
         except Exception as exc:
-            self.reader = None
+            self._close_reader()
             self.available = False
             self._next_reconnect_at = (
                 time.monotonic() + self._reconnect_interval_sec
             )
             logger.warning(
                 "XFYun wakeup unavailable on %s: %s — retrying in %.1fs",
-                self.port,
+                self._resolved_port,
                 exc,
                 self._reconnect_interval_sec,
             )
             return False
 
+    @staticmethod
+    def _usb_id(value: Any, name: str) -> int:
+        """Accept YAML integers or strings such as '0x1a86'."""
+        try:
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                raise ValueError
+            parsed = int(value, 0) if isinstance(value, str) else value
+            if not 0 <= parsed <= 0xFFFF:
+                raise ValueError
+            return parsed
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an integer from 0 to 65535") from exc
+
+    def _resolve_port(self) -> str:
+        """Resolve each connection attempt; never guess between USB devices.
+
+        Explicit paths remain authoritative. Auto mode enumerates device
+        identities without opening ports, including after a disconnect.
+        """
+        if self.port.lower() != "auto":
+            return self.port
+
+        from serial.tools import list_ports
+
+        vid = self._usb_id(self.usb_vid, "usb_vid")
+        pid = self._usb_id(self.usb_pid, "usb_pid")
+        ports = sorted(list_ports.comports(), key=lambda port: port.device)
+        matches = [
+            port for port in ports
+            if port.vid == vid and port.pid == pid
+            and (not self.serial_number or port.serial_number == self.serial_number)
+        ]
+        selector = f"VID:PID={vid:04x}:{pid:04x} serial_number={self.serial_number!r}"
+        if len(matches) != 1:
+            details = "; ".join(
+                f"{port.device} VID={port.vid!r} PID={port.pid!r} "
+                f"serial_number={port.serial_number!r}"
+                for port in (matches or ports)
+            ) or "none"
+            if matches:
+                raise RuntimeError(
+                    f"Multiple wakeup serial ports match {selector}: {details}. "
+                    "Set serial_number or an explicit port to select one."
+                )
+            raise RuntimeError(
+                f"No wakeup serial port matches {selector}; detected ports: {details}"
+            )
+        selected = matches[0]
+        logger.info(
+            "XFYun wakeup auto-selected port=%s VID:PID=%04x:%04x serial_number=%r",
+            selected.device, vid, pid, selected.serial_number,
+        )
+        return str(selected.device)
+
     def _mark_disconnected(self, reason: str) -> None:
         if self.reader is not None or self.available:
             logger.warning(
                 "XFYun wakeup disconnected on %s: %s",
-                self.port,
+                self._resolved_port,
                 reason,
             )
         self._close_reader()

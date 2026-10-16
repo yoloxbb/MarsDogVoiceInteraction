@@ -13,7 +13,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         DeclareLaunchArgument(
             "config_path",
-            default_value=PathJoinSubstitution([share, "config", "voice.yaml"]),
+            default_value=PathJoinSubstitution([share, "config", "voice.respeaker.yaml"]),
         ),
         DeclareLaunchArgument(
             "log_level",

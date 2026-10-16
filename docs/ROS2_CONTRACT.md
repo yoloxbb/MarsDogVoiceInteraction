@@ -1,5 +1,8 @@
 # 语音 ROS2 契约
 
+下游接入步骤、消息示例及验收用例见 [开发对接文档](DOWNSTREAM_INTEGRATION.md)，
+全部固定路由与新增参数路由见 [命令映射表 CSV](DOWNSTREAM_COMMAND_MAP.csv)。
+
 ## 概览
 
 | Topic / Service | 类型 | QoS |
@@ -27,8 +30,16 @@ utterance_id                                str            单次语音的唯一
 wake_id                                     str            每次有效硬件唤醒的唯一 ID；会话内再次唤醒会更新
 
 wake_word                                   str            唤醒词原文（如 "xiao3 wei1 xiao3 wei1"）
-wake_angle                                  float          XFYun 原始唤醒源方向角（度），未做安装标定
-wake_confidence                             float          归一化唤醒置信度，范围 [0,1]
+wake_angle                                  float          硬件原始方向角（度），未标定；Flex 无效时 -1
+wake_angle_valid                            bool           方向是否可用；false 不得用于转向
+wake_angle_age_ms                           float          Flex 方向总年龄（含主机排队）；未知 -1
+wake_audio_age_ms                           float          Flex 候选音频帧到事件入队时间；未知 -1
+wake_angle_source                           str            硬件方向来源，如 auto / none
+wake_provider                               str            来源标识，Flex 为 respeaker_serial
+wake_keyword_id                             int            Flex 唤醒词表中的 ID；非事件唯一 ID
+wake_threshold                              float          Flex 模型候选门槛
+wake_min_score                              float          Flex 固件最终事件门槛
+wake_confidence                             float          归一化模型分值 [0,1]，不是校准正确率
 wake_score_raw                              float          唤醒硬件原始分数，仅诊断使用
 
 asr_text                                    str            ASR 转写文本
@@ -36,23 +47,26 @@ language                                    str            语言标签：zh / e
 
 speaker_id                                  str            `owner`、`family_member_1`～`family_member_4`；`unknown` 表示未匹配
 speaker_confidence                          float          声纹余弦匹配分数，不是校准后的身份概率
-speaker_role                                str            唤醒身份：owner / family / stranger / undetermined
-speaker_status                              str            唤醒声纹状态：pending / matched / no_match / ambiguous / insufficient_audio / unavailable
-speaker_reason                              str            声纹拒识或不可用原因；诊断用
+speaker_role                                str            唤醒身份角色；即时 KWS 声纹未完成时为 undetermined
+speaker_status                              str            唤醒声纹状态；即时 KWS 为 pending；关闭逐句核验时为 not_checked
+speaker_reason                              str            唤醒声纹拒识/不可用原因
+sound_id                                    str            有效 VAD update 事件唯一 ID；与语音会话独立
+sound_trigger_stamp                         float          触发候选的有效 update 接收时间，Unix 秒
+doa / doa_valid / doa_age_ms / doa_source    float/bool/float/str  声源更新的角度快照、有效性、到发布时的年龄、来源
 
-social                                      str            Model Intent SOCIAL 标签
-intent                                      str            Model Intent INTENT 标签
+social                                      str            社交标签；固定词库和 Model Intent 均可提供
+intent                                      str            意图标签；参数句式也使用 FETCH / GO_TO_LOCATION
 control                                     str            控制标签（见意图协议）
 emotion                                     str            兼容字段，当前镜像 social
 action                                      str            兼容字段；模型事件镜像 intent，具体指令保留 command_key
 
 command_id                                  str            指令 ID（如 CMD_SIT、CMD_COME_HERE）
-intent_category                             str            意图类别：command / cancel / clarify / praise / blame / emotion / none
-intent_source                               str            决策来源：command_lexicon / rule_rkllm_compatible / rkllm / kws
+intent_category                             str            意图类别：command / cancel / clarify / praise / blame / social / emotion / none
+intent_source                               str            决策来源，如 command_lexicon / parameterized_command / rule_rkllm_compatible / rkllm / kws / invalid_protocol_fallback
 intent_confidence                           float          意图分类置信度
-nlu_protocol                                str            当前为 rkllm_social_intent_control_v1
-raw_nlu_tag                                 str            经严格校验的 SOCIAL|INTENT|CONTROL 原始三元组
-specific_event_type                         str            KNOWN 摘要对应的具体指令事件；非摘要可为空
+nlu_protocol                                str            三轴语义为 rkllm_social_intent_control_v1；参数句式等可为空
+raw_nlu_tag                                 str            经严格校验的 SOCIAL|INTENT|CONTROL 三元组；未提供时为空
+specific_event_type                         str            关联的具体指令事件；具体命令可与 event_type 相同，未提供时为空
 dispatch_role                               str            recognition_summary / specific_command / social_reaction / semantic_classification / diagnostic
 slots                                       array          槽位 [{"key": "...", "value": "..."}]
 response_text                               str            预留：LLM 口语回复
@@ -74,6 +88,18 @@ latency_ms                                  float          处理延迟（ms）
 一次 offset/sign 标定。其他事件继续携带同一完整 header，未使用声源角时忽略
 `wake_angle` 即可。
 
+Flex 适配在 schema_version=2 中追加方向有效性与诊断字段。旧设备缺少有效性字段时，
+Voice 对显式提供的有限角度保留旧语义；显式 false 或非布尔标志不能变成有效方向。
+Flex 的 score 直接作为 wake_confidence / wake_score_raw，不能复用讯飞分数尺度。
+Voice 在开启或刷新唤醒会话前检查方向：`wake_angle=-1`、布尔角度、缺失/非有限
+角度或显式 `wake_angle_valid=false`（含非布尔有效性字段）时，统一标记
+`wake_angle=-1, wake_angle_valid=false`，仍发布 `EVT_VOICE_WAKEUP`、启动命令录音，
+并按配置关联该次唤醒声纹。Flex 方向年龄超过 600 ms 仅使方向无效；整次唤醒仍受
+`wake_event_max_age_sec`、防抖和声纹注册期间拦截约束。
+有效的 `0°` 正常接受；旧设备有数值角度但没有有效性字段时保留兼容。
+下游仍须检查方向有效性和年龄，防止历史事件或排队后过期的方向触发转向/接近。
+详见 [ReSpeaker 接入说明](RESPEAKER_INTEGRATION.md)。
+
 ### event_type 枚举
 
 #### 唤醒
@@ -81,6 +107,45 @@ latency_ms                                  float          处理延迟（ms）
 |---|---|
 | `EVT_VOICE_WAKEUP` | 硬件或 pipeline Mock 唤醒，携带 `wake_id`、`wake_word` / `wake_angle` / `wake_confidence`；声纹未完成时 `speaker_status=pending`，不表示呼名语义 |
 | `EVT_VOICE_WAKE_SPEAKER_RESULT` | 同一 `interaction_id` + `wake_id` 的唤醒声纹最终结果；不执行命令 |
+
+#### 呼唤位置关键词
+
+ReSpeaker 固件普通 KWS 表中的“这儿”“这里这里”“到这来”通过 `type=keyword`
+单独发布 `EVT_VOICE_CALL_HERE`，不发布 `EVT_VOICE_WAKEUP` 或唤醒声纹结果。
+三个词不在默认主机 `config/wake_keywords.txt` 中，也不占用固件最多三个唤醒词的名额。
+普通 KWS 支持 16 个词；主机 Sherpa 没有此三词容量限制。
+设备持续识别，但 Voice 仅在已经处于唤醒会话时发布：
+原始设备 `doa_valid` 必须严格为 JSON true，角度必须是有效数值且不等于 -1，
+并通过方向年龄检查；在主机对应 `wake_angle_valid=true,0 <= wake_angle < 360`。
+未唤醒、会话已结束、命中早于当前会话或方向无效时不发布。
+不会创建或刷新语音会话、启动命令录音、
+清理待处理语音或打断当前录音。旧配置的串口 wake 或主机 Sherpa 若返回这三个词，
+也使用同一事件；其他普通 `keyword` 均忽略，不能落入唤醒分支。
+
+事件保留 `wake_word/wake_provider/wake_keyword_id/wake_confidence` 及
+`wake_angle/wake_angle_valid/wake_angle_age_ms/wake_angle_source`；这些字段在此表示
+关键词及其方向，不能据此当作唤醒。方向无效时不发布，也不使用历史 DOA 补偿绕过检查。
+`interaction_id/wake_id` 固定为空，独立 `utterance_id` 可用于消息去重；不继承已有会话身份，
+`speaker_id=unknown,speaker_role=undetermined,speaker_status=not_checked`。
+设备普通 KWS 的 `wake_provider/intent_source=respeaker_keyword`；
+`intent_category=call_here,dispatch_role=call_here`，
+`social=CALL,intent=NONE,action=NONE,control=NONE`，
+`is_executable=false,should_trigger_behavior_tree=false`。这是独立通知；
+需要下游响应时按新事件显式接入，不能复用唤醒会话入口或据此直接执行 COME。
+关键词通知通过会话和方向检查后才在节点防抖，互不占用正常唤醒的去重窗口；
+未唤醒或方向无效的命中不占用关键词防抖窗口。事件时效和声纹录入占用检查仍适用。
+
+#### 通用声音声源
+
+`EVT_VOICE_SOUND_SOURCE_DETECTED` 直接判断 ReSpeaker JSON：
+`type=vad,state=update,doa_valid=true` 时发布；false 或 start/end 不发布。
+方向数值及年龄仍须有效且未过期。每条有效更新下发一次，不要求 start，也不等待 end 或模型分类。
+
+该事件使用 `sound_id` 去重，`interaction_id/wake_id/utterance_id` 为空，
+不继承唤醒主人身份、不改变语音会话。`doa` 来自有效 update；
+`doa_age_ms` 包含固件方向年龄和主机排队时间，下游须检查接收时的时效。
+`should_trigger_behavior_tree=true,is_executable=false,dispatch_role=sound_source` 请求通用行为路由；
+Tree 需增加此事件的映射。完整字段、配置和监听命令见 [声源事件](SOUND_SOURCE_EVENTS.md)。
 
 #### 声纹识别
 | event_type | 说明 |
@@ -90,10 +155,11 @@ latency_ms                                  float          处理延迟（ms）
 | `EVT_VOICE_UNMASTER_ID` | 未匹配、`speaker_id=unknown`，或命中历史非固定身份名称 |
 
 `EVT_VOICE_STRANGER_ID` 仅保留为旧代码兼容常量，新运行时不再发布。上述三个身份
-事件都通过 `/perception/audio_event` 交给行为树等下游消费，Voice 不直接调用动作
-系统。
+事件通过 `/perception/audio_event` 交给行为树等下游消费，Voice 不直接调用动作
+系统；仅当 `interaction.utterance_speaker_enabled=true` 时，才逐句核验并发布这些身份事件。
+当前正式配置启用逐句核验，每句话根据自身音频发布对应的 `EVT_VOICE_MASTER_ID/FOLK_ID/UNMASTER_ID`。
 
-这三个身份事件仍针对**每一句后续语音**。唤醒身份使用
+唤醒身份使用
 `EVT_VOICE_WAKE_SPEAKER_RESULT`：有效语音明确低于匹配阈值才是
 `speaker_role=stranger`；没有音频、多个语音片段、声纹分差不足或模型不可用均为
 `undetermined`，不能当成陌生人。正式配置在待机时使用同一麦克风保留最近 3 秒的
@@ -101,6 +167,10 @@ latency_ms                                  float          处理延迟（ms）
 `wake_id` 关联并忽略过期结果。
 Tree 对同一 `interaction_id` 的新 `wake_id` 更新声源和身份关联，但保留现有
 会话及正在执行的动作；它只将声纹结果记录到当前会话，不自动选择新的动作。
+唤醒声纹结果只描述该次唤醒者。每句后续语音独立运行声纹核验，身份事件、
+`speech` 和 ASR 业务事件使用该句的 `speaker_id/speaker_confidence`。
+即使主人唤醒，下一句识别为家人或 unknown 时也按该句结果下发。
+提前发布的 KWS 事件为 `unknown/pending`，稍后的身份结果用同一 `utterance_id` 关联。
 主人、家人、陌生人的差异化行为需要另行确定具体映射。
 
 #### ASR 转写
@@ -111,10 +181,10 @@ Tree 对同一 `interaction_id` 的新 `wake_id` 更新声源和身份关联，�
 #### 确定性产品词库与兼容指令
 | event_type | command_id | 说明 |
 |---|---|---|
-| `EVT_VOICE_COMMAND_CALL_NAME` | `CMD_CALL_NAME` | 词库昵称调用：小狗/小跟屁虫/小宝贝/乖狗狗/小坏蛋；仅表示社交呼名，固定不可执行，不携带硬件唤醒语义 |
+| `EVT_VOICE_COMMAND_CALL_NAME` | `CMD_CALL_NAME` | 词库昵称调用：小狗/小坏蛋/跟屁虫等；仅表示社交呼名，固定不可执行，不携带硬件唤醒语义 |
 | `EVT_VOICE_COMMAND_PRAISE` | `CMD_PRAISE` | 词库精确命中的夸赞表达；非动作命令，以 `social_reaction` 授权 Tree 一次性反应，不占用 Model Intent 的 `EVT_VOICE_PRAISE` |
 | `EVT_VOICE_COMMAND_SCOLD` | `CMD_SCOLD` | 词库精确命中的责备表达；非动作命令，以 `social_reaction` 授权 Tree 一次性反应，不占用 Model Intent 的 `EVT_VOICE_SCOLD` |
-| `EVT_VOICE_COMMAND_WALK` | `CMD_WALK` | 走/去 |
+| `EVT_VOICE_COMMAND_WALK` | `CMD_WALK` | 独立短语“去”精确命中或“走开”；“去+地点”由地点句式处理，“走”归 FOLLOW |
 | `EVT_VOICE_COMMAND_COME` | `CMD_COME_HERE` | 过来/回来/到我这儿 |
 | `EVT_VOICE_COMMAND_GO_OUT` | `CMD_GO_OUT` | 出去玩/出去溜溜 |
 | `EVT_VOICE_COMMAND_GO_HOME` | `CMD_GO_HOME` | 回家 |
@@ -124,17 +194,18 @@ Tree 对同一 `interaction_id` 的新 `wake_id` 更新声源和身份关联，�
 | `EVT_VOICE_COMMAND_HIGH_FIVE` | `CMD_FIVE` | 击掌 |
 | `EVT_VOICE_COMMAND_SIT` | `CMD_SIT` | 坐下 |
 | `EVT_VOICE_COMMAND_LIE_DOWN` | `CMD_LIE_DOWN` | 趴下 |
-| `EVT_VOICE_COMMAND_STAND_UP` | `CMD_STAND_UP` | 站起来 |
-| `EVT_VOICE_COMMAND_STAND_STILL` | `CMD_STAND_STILL` | 站好/站着 |
+| `EVT_VOICE_COMMAND_STAND_UP` | `CMD_STAND_UP` | 站起来/站好/站着 |
+| `EVT_VOICE_COMMAND_STAND_STILL` | `CMD_STAND_STILL` | 保持站立/站着别动/站住 |
 | `EVT_VOICE_COMMAND_WAIT` | `CMD_WAIT` | 等一下 |
-| `EVT_VOICE_COMMAND_FOLLOW` | `CMD_FOLLOW` | 跟着我 |
+| `EVT_VOICE_COMMAND_FOLLOW` | `CMD_FOLLOW` | 跟着我/走/跟上 |
 | `EVT_VOICE_COMMAND_ROLL_OVER` | `CMD_ROLL` | 翻滚 |
 | `EVT_VOICE_COMMAND_SPIN` | `CMD_SPIN` | 转圈 |
 | `EVT_VOICE_COMMAND_RETURN` | `CMD_BACK` | 兼容事件；确定性词库中的“回来”不再使用此事件 |
-| `EVT_VOICE_COMMAND_DROP` | `CMD_SPIT` | 吐掉 |
+| `EVT_VOICE_COMMAND_DROP` | `CMD_SPIT` | 吐掉/松口/不可以咬 |
 | `EVT_VOICE_COMMAND_PLAY_DEAD` | `CMD_DEAD` | 装死 |
 | `EVT_VOICE_COMMAND_BRING` | `CMD_BRING_OBJECT` | 把东西拿来 |
-| `EVT_VOICE_COMMAND_FETCH` | `CMD_FETCH_OBJECT` | 去找东西 |
+| `EVT_VOICE_COMMAND_FETCH` | `CMD_FETCH_OBJECT` | 带物品参数的取物，如“把球拿来”；未知目标摘要不可执行 |
+| `EVT_VOICE_COMMAND_GO_TO_LOCATION` | `CMD_GO_TO_LOCATION` | 带地点参数，如“到客厅去”；地图点位由调用方绑定，未知地点摘要不可执行 |
 | `EVT_VOICE_COMMAND_STOP` | `CMD_STOP` | 停止 |
 | `EVT_VOICE_COMMAND_HOLD_POSITION` | `CMD_HOLD_POSITION` | 别动/等着/停/不许动；普通保持位置，不是全局急停 |
 | `EVT_VOICE_COMMAND_QUIET` | `CMD_QUIET` | 安静/闭嘴/别叫 |
@@ -146,8 +217,8 @@ Tree 对同一 `interaction_id` 的新 `wake_id` 更新声源和身份关联，�
 `EVT_VOICE_COMMAND_TOILET/CLEAN/SLEEP/PLAY`。
 完整的短语、事件和动作名对应以 `config/command_catalog.yaml` 为权威源。
 
-硬件唤醒、Model Intent 呼名和词库昵称调用是三个独立事件：硬件或 pipeline Mock
-唤醒固定为 `EVT_VOICE_WAKEUP`，没有 `utterance_id`；Model Intent 的 `social=CALL`
+硬件唤醒、兼容 Model Intent 呼名映射和词库昵称调用是三个独立事件：硬件或 pipeline Mock
+唤醒固定为 `EVT_VOICE_WAKEUP`，没有 `utterance_id`；只有显式启用可选 Model Intent provider 时，`social=CALL`
 沿用 `EVT_VOICE_CALL_NAME`；词库昵称固定为 `EVT_VOICE_COMMAND_CALL_NAME`，携带
 当前语句的 `utterance_id`、`command_id=CMD_CALL_NAME`、
 `dispatch_role=specific_command` 和词库匹配槽位，但其语义固定为
@@ -228,26 +299,24 @@ Tree、Vision 或 Action，不能把 Voice 发布成功视为这些下游已经�
 
 | 值 | 说明 |
 |---|---|
-| `interaction_timeout` | 空闲或总时长阈值触发；非空 ASR 和即时 KWS 命令刷新空闲计时。正式配置空闲超时 20 秒、总时长上限 0（禁用） |
+| `interaction_timeout` | 空闲或总时长阈值触发；非空 ASR 和即时 KWS 命令刷新空闲计时。正式配置空闲超时 30 秒、总时长上限 0（禁用） |
 | `stop_listening` | 外部通过 `/perception/voice/task` 主动停止 |
 
 ### 完整确定性产品词库
 
 ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短语精确匹配。
-当前目录覆盖产品表 116 条源数据（不含表头），加上新增“自己去玩吧”“这是啥”“这是什么”，共 83 个路由组和 158 条
-标准中文词/句；每条标准词/句通过五类受控规则生成 10 条扩展，共 1580 条扩展，
-另有 70 条人工登记的变体（用于 ASR 稳定错写与自然口语说法），合计
-1808 条运行时精确匹配入口。19 组核心训练指令是这个完整目录的子集。产品表中 138 条英文参考短语及新增 1 条参考短语
-只作元数据，当前不进入直接匹配，避免跨分类重复表达产生错误事件。
-新增词条“自己去玩吧”的契约为 `command_key=PLAY_ALONE`、
-`command_id=CMD_PLAY_ALONE`、`event_type=specific_event_type=EVT_VOICE_COMMAND_PLAY_ALONE`，
-`dispatch_role=specific_command`、`control=DO`、`is_executable=true`、
-`should_trigger_behavior_tree=true`；slots 包含 `action_name=ACT_PLAY_ALONE` 和
-`behavior=去随机位置自己玩`，不含产品表行号 `catalog_source_rows`。该事件需下游单独映射。
+当前目录以 `docs/语音识别内容.xlsx` 为源：49个功能条目中，43个固定路由包含
+222条标准词句、2220条扩展、123条复用变体，共2565个精确入口；其中核心子集21组。
+`source_row_count=43` 描述固定路由覆盖；`source_total_row_count=49` 还包含4种参数句式、闲聊和声源入口。
+`source_rows` / `slots.catalog_source_rows` 使用 Sheet1 实际行号（3～41、47～50）。
+英文 No 是表内制止短语，参与大小写归一化后的精确匹配；无英文参考列。
+完整事件和行为说明见生成的 [测试矩阵](COMMAND_CATALOG_TEST_MATRIX.md) 和 [CSV](DOWNSTREAM_COMMAND_MAP.csv)。
+“去/走开”“自己去玩吧”“翻滚”等旧路由已移出词库。前移使用 `MOVE_FORWARD`，
+不复用旧 `WALK` 随机走动；“叫两声/说话”优先 `BARK`，不再同时归入社交问候。
 
 匹配成功时：
 
-- 83 个启用路由组均必须声明非空且唯一的 `command_key/command_id/event_type`；目录
+- 43 个启用路由组均必须声明非空且唯一的 `command_key/command_id/event_type`；目录
   禁止使用 `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的
   `EVT_VOICE_INTENT_*`。缺失、重复或越界时节点启动失败；
 - 所有目录条目只发布自身的具体特殊事件，不额外发布
@@ -321,18 +390,22 @@ DOG_PREFERENCE / DOG_CAPABILITY
 │   │                                                    ││
 │   │  每轮发布的典型事件顺序：                           ││
 │   │                                                    ││
+│   │  ⓪ 首个有效 KWS → 否定检查 → 具体命令             ││
+│   │     已发布则跳过本句③，后续 KWS 不再发命令        ││
+│   │                                                    ││
 │   │  ① MASTER_ID / FOLK_ID / UNMASTER_ID              ││
 │   │     ← speaker_id / speaker_confidence              ││
 │   │                                                    ││
 │   │  ② "speech"                                       ││
 │   │     ← asr_text / language / latency_ms             ││
 │   │                                                    ││
-│   │  ③ command_lexicon 精确匹配                        ││
+│   │  ③ 无 KWS 发布且未拦截：完整 ASR 路由              ││
+│   │     command_lexicon 精确匹配                        ││
 │   │     ├─ 核心命中 → 目录指定特殊事件                 ││
 │   │     ├─ 其他命中 → 目录指定特殊事件                 ││
-│   │     └─ 未命中 → Model Intent/兼容规则 → 大类/白名单动作/摘要││
+│   │     └─ 未命中 → 取物/地点句式 → RKLLM             ││
 │   │                                                    ││
-│   │  ①-③ 共享同一个 utterance_id                       ││
+│   │  ⓪-③ 共享同一个 utterance_id                       ││
 │   └────────────────────────────────────────────────────┘│
 │                          │                             │
 │   EVT_STATE_CHANGED      │  交互结束（超时 / 主动停止） │
@@ -343,31 +416,64 @@ DOG_PREFERENCE / DOG_CAPABILITY
 
 ### KWS 即时发布与整句仲裁
 
-正式配置使用 `publish_mode=immediate`，并启用 `negation_guard_enabled`。
+正式配置使用 `publish_mode=immediate`，启用 `negation_guard_enabled`，并关闭 RKLLM 与规则意图。
+第一次有效 KWS 命中通过否定检查后取得该句业务结果，无需重复命中或等待 ASR。
 动作 KWS 命中后等待 `negation_guard_window_sec=0.25` 秒后续音频，
 独立否定检测流先处理相同音频，再允许发布目录指定的具体事件，
-并记录 `stage_complete stage=kws result=published_immediate`。同一句中的每个事件
-发布一次，后续语句可以再次发布相同事件。即时事件携带当前会话、语句和唤醒编号，
-`asr_text=""`，`speaker_id=unknown`，`speaker_role=undetermined`，
-`speaker_status=pending`，`speaker_confidence=0`。身份与完整 ASR 文本由后续事件提供。
-同句的业务结果使用 KWS 来源；同句没有 KWS 命令且未被拦截时执行 ASR 业务路由。
+并记录 `stage_complete stage=kws result=published_immediate`。同一句仅发布第一个
+KWS 命令，后续不同关键词记录 `suppressed_after_first_kws`；下一句可以再次发布相同事件。
+即时事件携带当前会话、语句和唤醒编号，
+`asr_text=""`，该句声纹结果尚未完成时为 `speaker_id=unknown/speaker_status=pending`。
+正式配置逐句核验声纹；VAD 完成后发布该句身份事件和 `speech`，以同一 `utterance_id` 关联。
+同句的业务结果使用 KWS 来源；后续 ASR 不调用 RKLLM。
+同句没有有效 KWS 发布且未被拦截时，ASR 先匹配完整词库，再匹配取物/地点句式；
+仍未匹配则发布 UNKNOWN。正式配置关闭 RKLLM 和规则意图提供器。
 
-否定词表为“不要 / 别 / 不准 / 不许”，使用独立模型实例和解码流，标签仅在 Voice
+声学否定词表为“不要 / 别 / 不准 / 不许”，
+使用独立模型实例和解码流，标签仅在 Voice
 内部流转，绝不作为 ROS 动作事件。命中后清除本句待发布命令，并锁住后续 KWS 与
 ASR/模型动作回退；下一句重置。检测流异常也阻止本句动作回退。
-“别动 / 不准动 / 不许动 / 别叫 / 不许叫”只有完整 ASR 精确命中对应目录时放行，
-不对整个 HOLD_POSITION 或 QUIET 类别免检。
+“别动 / 别动啊 / 不要动 / 不准动 / 不许动 / 不许动啊 / 不可以”、
+“别叫 / 别叫了 / 不要叫 / 不许叫”、“不可以吃 / 不可以咬”只有完整 ASR
+精确命中对应目录与有限控制短语白名单时放行，不按整个动作类别免检。
+两种发布模式均保留声学否定拦截；精确命中目录 SCOLD 的完整句也可发布社交反应，
+例如“罚你不准吃饭”，但不会执行其中的动作片段。该例外不适用于同音匹配。
 通过检查的即时事件 slots 增加 `kws_negation_guard=passed` 与 `kws_guard_window_ms`。
 确认窗口按音频进度计时，VAD 结束不会缩短窗口；未确认命令由正常 ASR 路由处理。
 
-VAD 完成后，后台串行执行 ASR、声纹和意图推理，下一句继续进行 VAD 和 KWS。
+VAD 完成后，后台串行执行 ASR、该句声纹和必要的意图推理；正式配置
+`interaction.utterance_speaker_enabled=true`，下一句继续进行 VAD 和 KWS。
 等待识别的音频受 `capture_buffer_sec` 容量和保留时间限制；超限或过期记录
 `speech_processing_queue result=discarded`。会话结束或重新唤醒后，旧任务结果丢弃。
 即时 KWS 命令刷新会话空闲计时。拦截不代替完整语义判断：否定词漏检、引用句、
 已发布后的改口仍可能误执行。`kws_guard result=late_veto` 记录迟到的否定信号，
 不会撤回已发布动作；必须结合 `published_event_types` 判断是否成功拦截。
 
-`publish_mode=deferred` 在 VAD 完成后使用整句 ASR 仲裁：
+可选的 `publish_mode=deferred` 重复命令提前发布由 `providers.kws.config` 配置；
+正式 immediate 配置不使用该通道：
+
+| 参数 | 可选配置示例 | 含义 |
+|---|---|---|
+| `repeat_early_command_keys` | `[COME]` | 允许提前发布的 KWS 命令标签；空列表禁用 |
+| `repeat_early_min_hits` | `2` | 连续有效命中数，必须为至少 2 的整数 |
+| `repeat_early_min_gap_sec` | `0.3` | 相邻有效命中的最短音频间隔，抑制紧邻的解码重报 |
+| `repeat_early_max_gap_sec` | `1.5` | 最长间隔，超出则重新计数 |
+
+不同命令标签会打断连续计数；同句存在其他命令候选时不提前发布。第二次有效命中
+仍需通过完整 `negation_guard_window_sec` 窗口，启用此通道必须启用否定检测。
+满足条件后，不等待 VAD 或 ASR，发布一次目录定义的 `EVT_VOICE_COMMAND_COME` /
+`CMD_COME_HERE`，`intent_source=kws`、`asr_text=""`、身份为 `unknown/pending`；
+该句结束后独立核验声纹，通过同一 `utterance_id` 关联身份结果。
+slots 中 `match_strategy/recognition_strategy=kws_repeat_early`，
+`kws_repeat_hits` 为有效命中次数，保留 `kws_negation_guard/kws_guard_window_ms`。
+日志为 `stage_complete stage=kws result=published_repeat_early`；整句处理完成为
+`utterance_complete result=published_kws_repeat_early`。同句后续 KWS/ASR 不再发布
+其他业务事件，仍输出完整文本和身份结果。下一句可再次触发。
+计数基于标签而非全文，“过来/回来”等 `COME` 同义关键词可混合计数；重复参数句
+和引用句仍可能提前触发，迟到的否定仅记录 `late_veto`，已发布事件不会自动撤回。
+`immediate` 模式仍使用原有单次命中发布规则。
+
+未提前发布的 `deferred` 语句在 VAD 完成后使用整句 ASR 仲裁：
 
 - 没有 KWS 候选时选择 ASR 链路；
 - 同一句出现多个不同 KWS 候选时选择 ASR 链路；
@@ -375,10 +481,57 @@ VAD 完成后，后台串行执行 ASR、声纹和意图推理，下一句继续
   ASR 词库命中同一事件；冲突时选择 ASR，未确认时 KWS 不执行；
 - 长文本选择 ASR 链路，即使其中包含 KWS 关键词；
 - `priority_command_keys` 还必须命中 `priority_asr_aliases` 中同一命令的精确错写，才
-  允许覆盖；正式配置的白名单为 `吃罐罐→去滚罐`；
+  允许覆盖；本版正式配置的白名单为空；
 - ASR 为空时由 `kws_fallback_on_asr_empty` 决定是否选择单个候选；
 - 只有被选来源发布一个具体业务事件；词库/KWS 不附带 KNOWN 摘要；
-- 声纹身份事件与 `speech` 是链路证据，不参与业务结果互斥。
+- 启用逐句声纹时，身份事件与 `speech` 是链路证据，不参与业务结果互斥。
+
+### 带参数的取物与地点命令
+
+同句未有 KWS 发布且确定性词库未命中时，先匹配完整取物/地点句式；
+固定句式本身不依赖 Model Intent。`intent_source=parameterized_command`，
+`slots.match_strategy=sentence_template`。正式 immediate 模式中，已发布的 KWS 命令
+不会被后续句式结果替换或补充参数；本版已移除旧 GO_GET_IT 关键词及单字 KWS，
+但其他短词误命中的可能性仍需现场验收。
+在可选 deferred 模式中，句式结果优先于零散候选，保留精确错写白名单例外。
+
+| 输入示例 | event_type | command_id | slots |
+|---|---|---|---|
+| 去追球 | `EVT_VOICE_COMMAND_CHASE_BALL` | `CMD_CHASE_BALL` | `command_key=CHASE_BALL`、`action_name=ACT_CHASE_BALL`、`catalog_source_rows=37`；下游执行追球和随机放球，最多5分钟 |
+| 去拿球 / 把球拿来 | `EVT_VOICE_COMMAND_FETCH` | `CMD_FETCH_OBJECT` | `object_name=dog toy ball`、`object_mention=球`、目标词库版本 |
+| 去拿玩具 / 去找玩具 | `EVT_VOICE_COMMAND_FETCH` | `CMD_FETCH_OBJECT` | `object_name=NONE`、`object_group=toy`、`object_mention=玩具`、`object_match_source=semantic_group` |
+| 去门口 | `EVT_VOICE_COMMAND_GO_TO_LOCATION` | `CMD_GO_TO_LOCATION` | `location_id=entrance`、`location_name=门口` |
+| 去门口拿狗绳 | `EVT_VOICE_COMMAND_FETCH_FROM_LOCATION` | `CMD_FETCH_FROM_LOCATION` | `location_id=entrance`、`object_name=dog leash` |
+| 到客厅去 | `EVT_VOICE_COMMAND_GO_TO_LOCATION` | `CMD_GO_TO_LOCATION` | `location_id=living_room`、`location_name=客厅`、`location_mention=客厅`、地点词库版本 |
+| 回卧室去 | `EVT_VOICE_COMMAND_GO_TO_LOCATION` | `CMD_GO_TO_LOCATION` | `location_id=bedroom`、`location_name=卧室`、`location_mention=卧室` |
+| 去厨房拿狗绳子 | `EVT_VOICE_COMMAND_FETCH_FROM_LOCATION` | `CMD_FETCH_FROM_LOCATION` | `location_id=kitchen`、`object_name=dog leash`、`catalog_source_rows=45` |
+| 去找主人 | `EVT_VOICE_COMMAND_FIND_PERSON` | `CMD_FIND_PERSON` | `person_mention=主人`、`person_id=owner`、`person_name=主人`、`catalog_source_rows=43` |
+
+
+已支持目标：`control=DO`、`dispatch_role=specific_command`、`is_executable=true`、
+`should_trigger_behavior_tree=true`。上述标志仅授权调用方处理命令，不证明动作已实现。
+`interaction_id/utterance_id/wake_id/asr_text/speaker_id` 沿用 AudioEvent v2。
+地点标识为 `dog_bed/room/bedroom/living_room/kitchen/entrance`，别名由
+`config/location_targets.yaml` 管理。**Voice 不绑定地图、不填坐标；调用方需接入新增地点事件，
+自行解析点位并执行。**地点命令不冒用 `GO_HOME`，不会把不同地点统一送回默认家位置。
+
+目标物提取要求整个名词匹配已知类别：“篮球鞋”不能因包含“球”而被当成球，
+“球和飞盘”也不能被截成单一目标。泛称“玩具”是已支持的语义组：保留
+`object_name=NONE`，显式携带 `object_group=toy`、`object_match_source=semantic_group`，
+两个执行标志为 true，不携带 `unsupported_object`；由下游选择具体玩具，不把 toy 当成
+视觉检测类别。“去厨房拿玩具”等组合句同样保留地点和语义组。
+未知物品（如尚未配置的“咬绳”“玩具箱”）保留
+`object_mention`，`object_name=NONE`、`reason=unsupported_object`；未知地点保留
+`location_mention/location_name`，`location_id=NONE`、`reason=unsupported_location`。
+未知人物发布 `person_id=NONE`、`reason=unregistered_person`；`config/person_targets.yaml`
+当前仅配置“主人 → owner”，与视觉身份槽位对齐；“去找爸爸/妈妈”等未登记人物不可执行。
+下游仍需完成人脸注册和寻人动作接入，Voice 的执行标志不代表已经找到或能够定位主人。
+声纹注册不会自动填写寻人目录；`speaker_registry.json` 中的 owner/family 等说话者槽位
+须经身份系统确认与可定位人物的对应关系，再填写 `person_id/name/aliases` 并重启 Voice。
+组合取物同时校验地点和物品，任一不支持都不授权执行；二者都未知时 reason 为
+`unsupported_object_and_location`。这些情况仍发布相应识别事件，但 `dispatch_role=recognition_summary`、`is_executable=false`、
+`should_trigger_behavior_tree=false`。调用方可读取名称；接入新的可执行目标前需对齐词表。
+否定句、陈述句和带“吗”等语气的问句不由这些句式授权动作。
 
 配置位于 `providers.kws.config`：`publish_mode=immediate/deferred`、
 `arbitration_mode=exclusive`、`short_max_chars_zh`、`short_max_words_en`、
@@ -387,7 +540,8 @@ VAD 完成后，后台串行执行 ASR、声纹和意图推理，下一句继续
 `priority_command_keys + priority_asr_aliases` 精确错写白名单用于 deferred 模式。
 不支持的模式会在启动时失败。
 长度阈值只作用于已配置 KWS 候选，不会自动把目录中的一字/两字词加入关键词文件；
-单字关键词默认不启用，必须经过独立误触发验收后显式配置。
+当前KWS词表不含单字，单字命令由整句ASR精确匹配；具体范围以 `config/kws_keywords_raw.txt` 为准；
+新增关键词仍需独立误触发验收。
 
 ### 非语音字段说明
 
@@ -515,13 +669,13 @@ float64 latency_ms     # 处理耗时
 有效语音等待后台 ASR 判定时保持会话有效，ASR 完成后按结果判断空闲超时；
 主动停止和会话总时长上限仍然生效。
 空字符串、纯空白、ASR 异常以及尚未发布的 KWS 候选保持原计时。
-正式配置 `idle_timeout_sec=20`，最后一次有效活动后静默 20 秒结束会话；
+正式配置 `idle_timeout_sec=30`，最后一次有效活动后静默 30 秒结束会话；
 `max_duration_sec=0` 不设绝对上限。
 每次通过去重和时效检查的硬件再次唤醒也刷新 idle 计时，不重置会话开始时间、
 `interaction_id` 或有效 hold；其 `wake_id` 更新。`wake_debounce_sec=0.8` 过滤
 硬件重报，`wake_event_max_age_sec=8` 拒绝过旧唤醒。
-后续 ASR 指令仍逐句核验
-声纹，不能继承唤醒身份作为执行授权。
+后续 ASR 指令逐句核验声纹，正式配置 `interaction.utterance_speaker_enabled=true`。
+每句身份来自该句的音频，唤醒结果独立发布；提前 KWS 命令通过同一 `utterance_id` 关联稍后的身份结果。
 可调用 `stop_listening` 主动结束。ASR 活动仍记录为 `last_activity_reason=asr_result`。
 
 跳过唤醒环节，直接开始录音。用于外部触发（如视觉模块联动）。
@@ -829,11 +983,9 @@ IDLE ──(WAKEUP)──▶ ATTENTION ──(SPEECH_START)──▶ INTERACTION
 | 意图 | 规则 + RKLLM（Qwen2.5-5B） | `model` (RKLLM) |
 
 
-### “这是啥？”玩具探索直驱命令
+### 产品表执行边界
 
-`这是啥？` / `这是什么？` → `CMD_INSPECT_TOY` / `EVT_VOICE_COMMAND_INSPECT_TOY`。
-事件 `dispatch_role=specific_command`、`specific_event_type=event_type`、`control=DO`，
-`is_executable=true`、`should_trigger_behavior_tree=true`；词库命中后跳过 Intent，
-只发布一个具体事件。`slots.action_name=ACT_INSPECT_TOY` 是描述元数据，
-Tree 发往 Action 的行为名为 `inspect_toy`。持续检测、玩具选择、导航和动作由 Action 执行。
-这两条词句的 `source_rows=[]`，不改变产品表 116 行覆盖口径。
+本版不再收录“这是啥/这是什么”的旧 INSPECT_TOY 路由。表内的移动速度、
+10～30 cm挪动、80～110°转向、速度±5%、动作池随机选择、重复次数、UWB/电量条件、
+找人/找物超时及人离开画面30秒等要求保留在目录元数据中，须由下游独立实现和验收。
+固定事件的 `action_name` 是参考名称，不是 Action 服务支持该动作的证明。

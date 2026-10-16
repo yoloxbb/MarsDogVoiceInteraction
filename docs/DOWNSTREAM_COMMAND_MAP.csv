@@ -1,0 +1,74 @@
+﻿source_rows,command_key,command_id,event_type,standard_phrases,variants,behavior,secondary_behavior,notes,is_executable,should_trigger_behavior_tree,dispatch_role
+3,CALL_NAME,CMD_CALL_NAME,EVT_VOICE_COMMAND_CALL_NAME,小火小火 | 小狗 | 跟屁虫 | 嘬嘬嘬,小狗狗,"主人：
+找人+过来
+他人：
+找人（但不主动过来去）",采用通用序列,1、唤醒后只要识别到人体，无需重新唤醒，直到人离开画面30s后需重新唤醒,false,false,specific_command
+4,QUIET,CMD_QUIET,EVT_VOICE_COMMAND_QUIET,安静 | 闭嘴 | 别叫 | 不许叫,别叫了 | 安静点 | 不要叫,停止叫声（如有）,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+5,HOLD_POSITION,CMD_HOLD_POSITION,EVT_VOICE_COMMAND_HOLD_POSITION,等等 | 定 | 别动 | 停 | 不准动 | 不许动 | 老实点 | 不可以 | No,别动啊 | 不要动 | 不许动啊 | 停下 | 停止 | 停下来 | 等着 | 等一下,停止运动+眼珠子左右移动观察人,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+6,FOLLOW,CMD_FOLLOW,EVT_VOICE_COMMAND_FOLLOW,走 | 跟我走 | 跟着我 | 跟上 | 跟我来,跟着我走,跟人随行（需要使用UWB信标，如无UWB仅单次短暂跟声源移动3m）,不采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+7,COME,CMD_COME_HERE,EVT_VOICE_COMMAND_COME,过来 | 来 | 回来 | 来这 | 到我这儿来 | 走上前来,过来一点 | 往我这儿来 | 往我这来 | 到我这边来,找人,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+8,APPROACH,CMD_APPROACH,EVT_VOICE_COMMAND_APPROACH,再过来点 | 再过来些 | 靠近点,靠近一点 | 走近点 | 再近点 | 过来点,往声源处挪动10-30cm,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+9,MOVE_FORWARD,CMD_MOVE_FORWARD,EVT_VOICE_COMMAND_MOVE_FORWARD,往前走走 | 前进 | 向前走,,往前挪动10-30cm,采用通用序列,,true,true,specific_command
+10,BACK_UP,CMD_BACK_UP,EVT_VOICE_COMMAND_BACK_UP,往后退 | 靠后 | 退后 | 后退 | 往后稍稍,再退 | 退一点 | 往后一点 | 往后退一点点,往后挪动10-30cm,采用通用序列,,true,true,specific_command
+11,TURN_LEFT,CMD_TURN_LEFT,EVT_VOICE_COMMAND_TURN_LEFT,向左转 | 往左转 | 转到左边来,左转,左转80-110°,采用通用序列,,true,true,specific_command
+12,TURN_RIGHT,CMD_TURN_RIGHT,EVT_VOICE_COMMAND_TURN_RIGHT,向右转 | 往右转 | 转到右边来,右转,右转80-110°,采用通用序列,,true,true,specific_command
+13,SPEED_UP,CMD_SPEED_UP,EVT_VOICE_COMMAND_SPEED_UP,走快点 | 快点走 | 快跟上,快点 | 快一点 | 快些 | 快一些 | 走快一点 | 走快些 | 走快一些 | 再快点 | 再快一点 | 快点快点 | 快走 | 跑快点 | 跑快一点,速度+5%,采用通用序列,,true,true,specific_command
+14,SLOW_DOWN,CMD_SLOW_DOWN,EVT_VOICE_COMMAND_SLOW_DOWN,走慢点 | 慢点走 | 慢慢走,慢点 | 慢一点 | 慢些 | 慢一些 | 走慢一点 | 走慢些 | 走慢一些 | 再慢点 | 再慢一点 | 慢点慢点 | 跑慢点,速度-5%,采用通用序列,,true,true,specific_command
+15,SIT,CMD_SIT,EVT_VOICE_COMMAND_SIT,坐 | 坐下 | 蹲下,坐下来 | 坐下去,原地坐下,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+16,LIE_DOWN,CMD_LIE_DOWN,EVT_VOICE_COMMAND_LIE_DOWN,趴 | 躺 | 趴下 | 躺下,趴下来 | 趴在地上,随机[板鸭趴、侧躺],采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+17,STAND_UP,CMD_STAND_UP,EVT_VOICE_COMMAND_STAND_UP,站起来 | 起来 | 站好 | 站着,起立,站起来,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+18,LOOK_DOWN,CMD_LOOK_DOWN,EVT_VOICE_COMMAND_LOOK_DOWN,低头 | 看地板 | 头低一点,,随机角度低头看（需要开物体识别）,采用通用序列,,true,true,specific_command
+19,LOOK_UP,CMD_LOOK_UP,EVT_VOICE_COMMAND_LOOK_UP,抬头 | 往上看 | 看上边,,随机角度抬头看（需要开物体识别）,采用通用序列,,true,true,specific_command
+20,BARK,CMD_BARK,EVT_VOICE_COMMAND_BARK,叫两声 | 汪两声 | 说话,,[平静汪，激动汪],采用通用序列,,true,true,specific_command
+21,SHAKE_HAND,CMD_HAND,EVT_VOICE_COMMAND_SHAKE_HAND,握手 | 握个手 | 抬手 | 握手手 | 手手,来握个手 | 伸手 | 握爪 | 握爪子,"随机[左手握手,右手握手]",采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+22,HIGH_FIVE,CMD_FIVE,EVT_VOICE_COMMAND_HIGH_FIVE,击掌 | 击个掌 | 拍手,来击掌 | 拍个手 | 击个手掌,"随机[左手击掌,右手击掌]",采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+23,SPIN,CMD_SPIN,EVT_VOICE_COMMAND_SPIN,转圈 | 转一圈 | 转个圈 | 转一转,给我转一圈 | 原地转圈,转圈,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+24,DROP,CMD_SPIT,EVT_VOICE_COMMAND_DROP,吐掉 | 放下 | 松开 | 松口 | 张嘴 | 不可以吃 | 不可以咬,吐出来 | 把东西放下,张嘴,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+25,CIRCLE_AROUND,CMD_CIRCLE_AROUND,EVT_VOICE_COMMAND_CIRCLE_AROUND,绕圈 | 绕着转一圈 | 绕一圈,,围着人绕圈,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+26,PLAY_DEAD,CMD_DEAD,EVT_VOICE_COMMAND_PLAY_DEAD,装死 | 倒下来,躺下装死 | 装死吧你 | 装饰 | biu,[缓慢板鸭趴闭眼、缓慢侧躺闭眼、缓慢仰躺闭眼],采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
+27,SOCIAL_GREETING,CMD_SOCIAL_GREETING,EVT_VOICE_COMMAND_SOCIAL_GREETING,哈喽 | 你叫什么名字 | 你叫啥 | 你在干嘛 | 你听得懂吗 | 你会说话吗 | 你会说什么,hello,"平静动作池[抬头看人，平静汪，抖毛，舔鼻子，随机转眼球]
+好奇-互动式动作池[嗅闻鞋子，歪头]",采用通用序列,,true,true,specific_command
+28,SLEEP,CMD_SLEEP,EVT_VOICE_COMMAND_SLEEP,困了吗 | 去睡觉 | 睡吧 | 去休息 | 回窝睡觉,我要睡了 | 睡觉去 | 睡觉 | 去睡 | 休息,[导航去狗窝，原地趴下],[侧躺睡，鸭趴睡，蜷曲睡，仰睡],,true,true,specific_command
+29,FOOD_CARE,CMD_FOOD_CARE,EVT_VOICE_COMMAND_FOOD_CARE,想吃啥 | 想吃不 | 喝水吗 | 吃不吃 | 吃罐罐,吃罐头,[抬头看人，激动转圈，咧嘴吐舌头，舔鼻子，去拿狗碗，嘴巴嚼巴咽口水声],采用通用序列,,true,true,specific_command
+30,PLAY,CMD_PLAY,EVT_VOICE_COMMAND_PLAY,来玩 | 跟我玩 | 玩不玩 | 一起玩 | 玩游戏,开始喽,兴奋-互动式动作池[鞠躬邀玩，激动转圈，激动汪，激动小跳，叼狗绳来，叼玩具来],采用通用序列,,true,true,specific_command
+31,PLAY_END,CMD_PLAY_END,EVT_VOICE_COMMAND_PLAY_END,不玩了 | 不想玩了 | 玩累了 | 结束游戏 | 下次再玩,我不玩,[板鸭趴，侧躺，露肚皮，回狗窝，去喝水，去吃饭],采用通用序列,,true,true,specific_command
+32,GO_OUT,CMD_GO_OUT,EVT_VOICE_COMMAND_GO_OUT,出去玩 | 出门溜溜 | 一块出去走走 | 想不想出去玩,出去溜溜,兴奋-互动式动作池[激动转圈，激动汪，激动小跳，叼狗绳来],采用通用序列,"1、没有UWB不出门
+2、电量不足不出门",true,true,specific_command
+33,TUG_OF_WAR,CMD_TUG_OF_WAR,EVT_VOICE_COMMAND_TUG_OF_WAR,来拔河 | 拔河游戏 | 看谁力气大,,跟人拔河,采用通用序列,结合UWB，单次指令最多玩5mins,true,true,specific_command
+34,CHASE,CMD_CHASE,EVT_VOICE_COMMAND_CHASE,追逐游戏 | 来追我呀 | 来抓我呀 | 抓小狗游戏 | 看谁跑的快,,追逐人,采用通用序列,结合UWB，单次指令最多玩5mins,true,true,specific_command
+35,HIDE_AND_SEEK,CMD_HIDE_AND_SEEK,EVT_VOICE_COMMAND_HIDE_AND_SEEK,来捉迷藏 | 躲藏游戏,,找发起游戏的人,"如找到人，执行一个兴奋动作池子
+如超时1-3mins未找到，则执行一个探索动作池子",结合UWB哨兵，单次指令最多玩5mins,true,true,specific_command
+36,FETCH_FRISBEE,CMD_FETCH_FRISBEE,EVT_VOICE_COMMAND_FETCH_FRISBEE,飞盘游戏,,巡回衔取,采用通用序列,结合UWB，单次指令最多玩5mins,true,true,specific_command
+37,CHASE_BALL,CMD_CHASE_BALL,EVT_VOICE_COMMAND_CHASE_BALL,去追球,,追球+追到后随机点位放球,采用通用序列,单次指令最多玩5mins,true,true,specific_command
+38,PRAISE,CMD_PRAISE,EVT_VOICE_COMMAND_PRAISE,真棒 | 好狗 | 真乖 | 真聪明 | 可爱 | 厉害 | 太棒了 | 好样的 | 我爱你 | 我喜欢你 | 你真有趣 | 真有意思 | 小跟屁虫 | 小宝贝 | 乖狗狗 | 好狗狗,好棒啊 | 小宝贝儿 | 棒棒的 | 太厉害了 | 太厉害 | 好厉害 | 你真厉害 | 厉害了 | 真厉害 | 好厉害啊 | 你太厉害了,"愉悦-互动式动作池[用头蹭人,用身体蹭人,翻肚皮,单眼wink,叼玩具找人玩,伸出舌头舔人,前爪轻扒鞋子]",采用通用序列,,false,true,social_reaction
+39,SCOLD,CMD_SCOLD,EVT_VOICE_COMMAND_SCOLD,你怎么不听话 | 不跟你玩了 | 不理你 | 不想理你 | 讨厌你 | 我生气了 | 我要惩罚你咯 | 罚你站着 | 罚你不准吃饭 | 坏狗狗 | 傻狗 | 笨狗,我要惩罚你喽 | 我不跟你玩了 | 我不理你喽 | 我要生气喽 | 臭宝 | 我要生气了 | 我要惩罚你 | 我不理你了 | 臭狗 | 我讨厌你 | 不准吃饭,"好奇-互动式动作池[歪头,随机转眼球,咧嘴吐舌头]
+焦虑-互动式动作池[扒拉主人的腿,求摸摸,求抱抱]
+焦虑-非互动式动作池[呜咽,哼唧,舔毛,舔鼻子,舔舌头,挠痒痒]",采用通用序列,,false,true,social_reaction
+40,OWNER_UNHAPPY,CMD_OWNER_UNHAPPY,EVT_VOICE_COMMAND_OWNER_UNHAPPY,累 | 烦 | 不开心 | 不得劲 | 难过 | 心情不好 | 不舒服 | 孤独 | 压力大 | 难受 | 哭唧唧 | 悲伤,我累了 | 好累 | 我有点烦 | 烦死了 | 今天不开心 | 过得不太顺利 | 我要抑郁了 | 压力好大 | 我好孤独 | 我头疼,"特技动作池[抬手,握手]
+愉悦-互动式动作池[用头蹭人,用身体蹭人,叼玩具放脚边,鞠躬邀玩]
+好奇-互动式动作池[随机转眼球,歪头]",在主人脚边趴下,,true,true,specific_command
+41,OWNER_HAPPY,CMD_OWNER_HAPPY,EVT_VOICE_COMMAND_OWNER_HAPPY,开心 | 高兴 | 幸运 | 耶 | 太好了 | 太妙了,我现在心情美美的 | 我今天很开心 | 很高兴 | 我感觉今天状态特别好 | 我今天感觉特别棒 | 我现在浑身都很轻松 | 今天真是个好日子 | 我今天太幸运了,"愉悦-互动式动作池[用头蹭人,用身体蹭人,翻肚皮,单眼wink,叼玩具找人玩,伸出舌头舔人]
+兴奋-互动式动作池[鞠躬邀玩，激动转圈，激动汪，激动小跳，叼狗绳来，叼玩具来]",采用通用序列,,true,true,specific_command
+47,OWNER_RETURNED,CMD_OWNER_RETURNED,EVT_VOICE_COMMAND_OWNER_RETURNED,我回来啦 | 想我了吗 | 回来咯 | 猜猜我是谁 | 谁回来啦 | 谁来啦 | 我来啦,我回来了,"主人：
+兴奋-互动式动作池[兴奋摇尾，激动转圈，兴奋扑人，鞠躬玩耍，激动疯跑，踱步哼唧，激动绕圈，叼来物品邀玩，激动汪]
+他人：
+好奇-互动式动作池[好奇摇尾，绕圈观察，嗅闻鞋子，咬裤脚]",不采用通用序列,只要单次声纹识别到身份，视觉里人物无切换则不必反复开启声纹识别,true,true,specific_command
+48,OWNER_GOING_OUT,CMD_OWNER_GOING_OUT,EVT_VOICE_COMMAND_OWNER_GOING_OUT,我走啦 | 我出门啦 | 我出去啦 | 我出去一下 | 我去上班啦 | 我撤退啦 | 我先溜啦 | 我回去啦 | 拜拜 | 再见 | 乖乖等我回来哦,我要出门了,"主人：
+[找人，走到门口附近，露肚皮，板鸭趴]
+焦虑-非互动式动作池[舔毛,舔鼻子,舔舌头,挠痒痒]
+他人：[观察门口，舔鼻子]",不采用通用序列,只要单次声纹识别到身份，视觉里人物无切换则不必反复开启声纹识别,true,true,specific_command
+49,WHAT_IS_THIS,CMD_WHAT_IS_THIS,EVT_VOICE_COMMAND_WHAT_IS_THIS,你看看这是啥 | 快看 | 看过来 | 瞧瞧这是啥 | 你瞅瞅这是啥 | 这是什么 | 这是啥 | 那是啥 | 那是什么 | 这是什么东西 | 看前边,,开启物体识别+找物,采用通用序列,,true,true,specific_command
+50,WHO_IS_IT,CMD_WHO_IS_IT,EVT_VOICE_COMMAND_WHO_IS_IT,看 | 看看谁回来了 | 看下谁来了 | 这是谁 | 我是谁 | 你知道我是谁吗 | 他是谁 | 谁呀 | 什么人,,开启人脸识别+找人,采用通用序列,,true,true,specific_command
+42,FETCH,CMD_FETCH_OBJECT,EVT_VOICE_COMMAND_FETCH,"[去拿xx/拿xx过来/找xx过来/找xx来]
+xx为狗绳/狗绳子、玩具、狗碗等物品",,[uwb/视觉随机点位搜索物品位置+叼取物品+找人],如执行超时[1-2分钟]，则结束任务，开始找人,参数行标志代表目标已支持分支；未知目标两个标志均 false,true,true,specific_command
+43,FIND_PERSON,CMD_FIND_PERSON,EVT_VOICE_COMMAND_FIND_PERSON,"去找xx
+xx为录入身份信息的人",,找指定身份的人,如执行超时[1-2分钟]，则结束任务，导航回到起始点附近,参数行标志代表目标已支持分支；未知目标两个标志均 false,true,true,specific_command
+44,GO_TO_LOCATION,CMD_GO_TO_LOCATION,EVT_VOICE_COMMAND_GO_TO_LOCATION,"[去xx/到xx去/回xx去]
+xx为狗窝、房间、卧室、客厅、厨房等有地图标记的地点",,导航去到指定地点附近,如执行超时[1-2分钟]，则结束任务，开始找人,参数行标志代表目标已支持分支；未知目标两个标志均 false,true,true,specific_command
+45,FETCH_FROM_LOCATION,CMD_FETCH_FROM_LOCATION,EVT_VOICE_COMMAND_FETCH_FROM_LOCATION,"[去xx/到xx去/回xx去]+[去拿yy/拿yy过来/找yy过来/找yy来]
+xx为狗窝、房间、卧室、客厅、厨房等有地图标记的地点
+yy为狗绳/狗绳子、玩具、狗碗等物品",,导航去到指定地点附近+用视觉/uwb搜索某物+叼取物品+找人,如执行超时[1-2分钟]，则结束任务，开始找人,参数行标志代表目标已支持分支；未知目标两个标志均 false,true,true,specific_command
+46,CHAT_FALLBACK,CMD_UNKNOWN,EVT_VOICE_COMMAND_UNKNOWN,无明确意图及匹配词的闲聊内容,,"好奇动作池[歪头，随机抬头看，眼球随机转]
+平静动作池[舔鼻子，舔毛，抖毛，板鸭趴，走开]",采用通用序列,未匹配文本发布 UNKNOWN，不触发闲聊动作池,false,false,diagnostic
+51,SOUND_SOURCE,,EVT_VOICE_SOUND_SOURCE_DETECTED,"1、唤醒词
+2、高于周围环境或谈话声音频率的声音如[嘬嘬嘬]、[嘿嘿嘿]、拍手声、突发异响等",,转向声源+移动到声源附近+开启人脸识别+物体识别+姿态识别(默认有人开启姿态识别),采用通用序列,有效 CDC vad/update 与 DOA 触发通用声音活动事件；不区分拍手等声音类别；动作序列由下游实现,false,true,sound_source

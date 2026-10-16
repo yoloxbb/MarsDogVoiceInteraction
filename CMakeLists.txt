@@ -24,6 +24,7 @@ install(DIRECTORY config launch lib DESTINATION share/${PROJECT_NAME})
 
 install(PROGRAMS
   scripts/voice_interaction
+  scripts/speaker_service
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,0 +1,637 @@
+# 表格行到事件的人工审核映射；标准词句和行为说明从 XLSX 读取。
+version: 2026-10-16-workbook-v14
+source: docs/语音识别内容.xlsx
+sheet: Sheet1
+rows:
+  3:
+    command_key: CALL_NAME
+    command_id: CMD_CALL_NAME
+    event_type: EVT_VOICE_COMMAND_CALL_NAME
+    core: false
+    emotion: CALL
+    control: NONE
+    phrases:
+    - 小火小火
+    - 小狗
+    - 跟屁虫
+    - 嘬嘬嘬
+  4:
+    command_key: QUIET
+    command_id: CMD_QUIET
+    event_type: EVT_VOICE_COMMAND_QUIET
+    core: true
+    control: DO
+    action_name: ACT_QUIET
+  5:
+    command_key: HOLD_POSITION
+    command_id: CMD_HOLD_POSITION
+    event_type: EVT_VOICE_COMMAND_HOLD_POSITION
+    core: true
+    control: DO
+    action_name: ACT_HOLD_POSITION
+  6:
+    command_key: FOLLOW
+    command_id: CMD_FOLLOW
+    event_type: EVT_VOICE_COMMAND_FOLLOW
+    core: true
+    control: DO
+    action_name: ACT_FOLLOW
+  7:
+    command_key: COME
+    command_id: CMD_COME_HERE
+    event_type: EVT_VOICE_COMMAND_COME
+    core: true
+    control: DO
+    action_name: ACT_COME
+  8:
+    command_key: APPROACH
+    command_id: CMD_APPROACH
+    event_type: EVT_VOICE_COMMAND_APPROACH
+    core: true
+    control: DO
+    action_name: ACT_COME_CLOSER
+  9:
+    command_key: MOVE_FORWARD
+    command_id: CMD_MOVE_FORWARD
+    event_type: EVT_VOICE_COMMAND_MOVE_FORWARD
+    core: true
+    action_name: ACT_MOVE_FORWARD
+  10:
+    command_key: BACK_UP
+    command_id: CMD_BACK_UP
+    event_type: EVT_VOICE_COMMAND_BACK_UP
+    core: true
+    control: DO
+    action_name: ACT_BACK_UP
+  11:
+    command_key: TURN_LEFT
+    command_id: CMD_TURN_LEFT
+    event_type: EVT_VOICE_COMMAND_TURN_LEFT
+    core: true
+    action_name: ACT_TURN_LEFT
+  12:
+    command_key: TURN_RIGHT
+    command_id: CMD_TURN_RIGHT
+    event_type: EVT_VOICE_COMMAND_TURN_RIGHT
+    core: true
+    action_name: ACT_TURN_RIGHT
+  13:
+    command_key: SPEED_UP
+    command_id: CMD_SPEED_UP
+    event_type: EVT_VOICE_COMMAND_SPEED_UP
+    core: true
+    action_name: ACT_SPEED_UP
+  14:
+    command_key: SLOW_DOWN
+    command_id: CMD_SLOW_DOWN
+    event_type: EVT_VOICE_COMMAND_SLOW_DOWN
+    core: true
+    action_name: ACT_SLOW_DOWN
+  15:
+    command_key: SIT
+    command_id: CMD_SIT
+    event_type: EVT_VOICE_COMMAND_SIT
+    core: true
+    control: DO
+    action_name: ACT_SIT
+  16:
+    command_key: LIE_DOWN
+    command_id: CMD_LIE_DOWN
+    event_type: EVT_VOICE_COMMAND_LIE_DOWN
+    core: true
+    control: DO
+    action_name: ACT_LIE_DOWN
+  17:
+    command_key: STAND_UP
+    command_id: CMD_STAND_UP
+    event_type: EVT_VOICE_COMMAND_STAND_UP
+    core: true
+    control: DO
+    action_name: ACT_STAND_UP
+  18:
+    command_key: LOOK_DOWN
+    command_id: CMD_LOOK_DOWN
+    event_type: EVT_VOICE_COMMAND_LOOK_DOWN
+    core: false
+    control: DO
+    action_name: ACT_LOOK_DOWN
+  19:
+    command_key: LOOK_UP
+    command_id: CMD_LOOK_UP
+    event_type: EVT_VOICE_COMMAND_LOOK_UP
+    core: false
+    control: DO
+    action_name: ACT_LOOK_UP
+  20:
+    command_key: BARK
+    command_id: CMD_BARK
+    event_type: EVT_VOICE_COMMAND_BARK
+    core: true
+    action_name: ACT_BARK
+    # 社交问候中的「说话」仍统一归 BARK，并保留受控整句扩展。
+    phrases: [叫两声, 汪两声, 说话]
+  21:
+    command_key: SHAKE_HAND
+    command_id: CMD_HAND
+    event_type: EVT_VOICE_COMMAND_SHAKE_HAND
+    core: true
+    control: DO
+    action_name: ACT_SHAKE_HAND
+  22:
+    command_key: HIGH_FIVE
+    command_id: CMD_FIVE
+    event_type: EVT_VOICE_COMMAND_HIGH_FIVE
+    core: true
+    control: DO
+    action_name: ACT_HIGH_FIVE
+  23:
+    command_key: SPIN
+    command_id: CMD_SPIN
+    event_type: EVT_VOICE_COMMAND_SPIN
+    core: true
+    control: DO
+    action_name: ACT_SPIN
+  24:
+    command_key: DROP
+    command_id: CMD_SPIT
+    event_type: EVT_VOICE_COMMAND_DROP
+    core: true
+    control: DO
+    action_name: ACT_DROP
+  25:
+    command_key: CIRCLE_AROUND
+    command_id: CMD_CIRCLE_AROUND
+    event_type: EVT_VOICE_COMMAND_CIRCLE_AROUND
+    core: true
+    action_name: ACT_CIRCLE_AROUND
+  26:
+    command_key: PLAY_DEAD
+    command_id: CMD_DEAD
+    event_type: EVT_VOICE_COMMAND_PLAY_DEAD
+    core: true
+    control: DO
+    action_name: ACT_PLAY_DEAD
+  27:
+    command_key: SOCIAL_GREETING
+    command_id: CMD_SOCIAL_GREETING
+    event_type: EVT_VOICE_COMMAND_SOCIAL_GREETING
+    core: false
+    action_name: ACT_SOCIAL_GREETING
+    exclude_phrases:
+    - 叫两声
+    - 说话
+  28:
+    command_key: SLEEP
+    command_id: CMD_SLEEP
+    event_type: EVT_VOICE_COMMAND_SLEEP
+    core: false
+    control: DO
+    action_name: ACT_SLEEP
+  29:
+    command_key: FOOD_CARE
+    command_id: CMD_FOOD_CARE
+    event_type: EVT_VOICE_COMMAND_FOOD_CARE
+    core: false
+    action_name: ACT_FOOD_CARE
+  30:
+    command_key: PLAY
+    command_id: CMD_PLAY
+    event_type: EVT_VOICE_COMMAND_PLAY
+    core: false
+    control: DO
+    action_name: ACT_PLAY
+  31:
+    command_key: PLAY_END
+    command_id: CMD_PLAY_END
+    event_type: EVT_VOICE_COMMAND_PLAY_END
+    core: false
+    action_name: ACT_PLAY_END
+  32:
+    command_key: GO_OUT
+    command_id: CMD_GO_OUT
+    event_type: EVT_VOICE_COMMAND_GO_OUT
+    core: false
+    control: DO
+    action_name: ACT_GO_OUT_TO_PLAY
+  33:
+    command_key: TUG_OF_WAR
+    command_id: CMD_TUG_OF_WAR
+    event_type: EVT_VOICE_COMMAND_TUG_OF_WAR
+    core: false
+    action_name: ACT_TUG_OF_WAR
+  34:
+    command_key: CHASE
+    command_id: CMD_CHASE
+    event_type: EVT_VOICE_COMMAND_CHASE
+    core: false
+    action_name: ACT_CHASE
+  35:
+    command_key: HIDE_AND_SEEK
+    command_id: CMD_HIDE_AND_SEEK
+    event_type: EVT_VOICE_COMMAND_HIDE_AND_SEEK
+    core: false
+    action_name: ACT_HIDE_AND_SEEK
+  36:
+    command_key: FETCH_FRISBEE
+    command_id: CMD_FETCH_FRISBEE
+    event_type: EVT_VOICE_COMMAND_FETCH_FRISBEE
+    core: false
+    action_name: ACT_FETCH_FRISBEE
+  37:
+    command_key: CHASE_BALL
+    command_id: CMD_CHASE_BALL
+    event_type: EVT_VOICE_COMMAND_CHASE_BALL
+    core: false
+    control: DO
+    action_name: ACT_CHASE_BALL
+  38:
+    command_key: PRAISE
+    command_id: CMD_PRAISE
+    event_type: EVT_VOICE_COMMAND_PRAISE
+    core: false
+    emotion: PRAISE
+    control: NONE
+  39:
+    command_key: SCOLD
+    command_id: CMD_SCOLD
+    event_type: EVT_VOICE_COMMAND_SCOLD
+    core: false
+    emotion: SCOLD
+    control: NONE
+  40:
+    command_key: OWNER_UNHAPPY
+    command_id: CMD_OWNER_UNHAPPY
+    event_type: EVT_VOICE_COMMAND_OWNER_UNHAPPY
+    core: false
+    control: DO
+    action_name: ACT_OWNER_UNHAPPY
+  41:
+    command_key: OWNER_HAPPY
+    command_id: CMD_OWNER_HAPPY
+    event_type: EVT_VOICE_COMMAND_OWNER_HAPPY
+    core: false
+    control: DO
+    action_name: ACT_OWNER_HAPPY
+  47:
+    command_key: OWNER_RETURNED
+    command_id: CMD_OWNER_RETURNED
+    event_type: EVT_VOICE_COMMAND_OWNER_RETURNED
+    core: false
+    control: DO
+    action_name: ACT_OWNER_RETURNED
+  48:
+    command_key: OWNER_GOING_OUT
+    command_id: CMD_OWNER_GOING_OUT
+    event_type: EVT_VOICE_COMMAND_OWNER_GOING_OUT
+    core: false
+    control: DO
+    action_name: ACT_OWNER_GOING_OUT
+  49:
+    command_key: WHAT_IS_THIS
+    command_id: CMD_WHAT_IS_THIS
+    event_type: EVT_VOICE_COMMAND_WHAT_IS_THIS
+    core: false
+    control: DO
+    action_name: ACT_WHAT_IS_THIS
+  50:
+    command_key: WHO_IS_IT
+    command_id: CMD_WHO_IS_IT
+    event_type: EVT_VOICE_COMMAND_WHO_IS_IT
+    core: false
+    control: DO
+    action_name: ACT_WHO_IS_IT
+phrase_variants:
+  CALL_NAME:
+  - 小狗狗
+  - 跟屁虫
+  QUIET:
+  - 别叫了
+  - 安静点
+  - 不要叫
+  HOLD_POSITION:
+  - 别动啊
+  - 不要动
+  - 不许动啊
+  - 不可以
+  - 'No'
+  - 定
+  - 停下
+  - 停止
+  - 停下来
+  - 等着
+  - 等一下
+  FOLLOW:
+  - 跟着我走
+  - 跟我来
+  - 跟上
+  COME:
+  - 过来一点
+  - 往我这儿来
+  - 往我这来
+  - 到我这边来
+  - 过来一点
+  APPROACH:
+  - 靠近一点
+  - 走近点
+  - 再近点
+  - 过来点
+  - 再过来些
+  BACK_UP:
+  - 往后退
+  - 后退
+  - 再退
+  - 退一点
+  - 往后一点
+  - 往后退一点点
+  TURN_LEFT:
+  - 左转
+  TURN_RIGHT:
+  - 右转
+  SPEED_UP:
+  - 快点
+  - 快一点
+  - 快些
+  - 快一些
+  - 走快一点
+  - 走快些
+  - 走快一些
+  - 再快点
+  - 再快一点
+  - 快点快点
+  - 快走
+  - 跑快点
+  - 跑快一点
+  SLOW_DOWN:
+  - 慢点
+  - 慢一点
+  - 慢些
+  - 慢一些
+  - 走慢一点
+  - 走慢些
+  - 走慢一些
+  - 再慢点
+  - 再慢一点
+  - 慢点慢点
+  - 跑慢点
+  SIT:
+  - 坐下来
+  - 坐下去
+  LIE_DOWN:
+  - 趴下来
+  - 趴在地上
+  STAND_UP:
+  - 起立
+  SHAKE_HAND:
+  - 来握个手
+  - 伸手
+  - 握手手
+  - 手手
+  - 握爪
+  - 握爪子
+  HIGH_FIVE:
+  - 来击掌
+  - 拍个手
+  - 击个手掌
+  SPIN:
+  - 转一圈
+  - 转个圈
+  - 给我转一圈
+  - 原地转圈
+  - 转一转
+  DROP:
+  - 吐掉
+  - 吐出来
+  - 把东西放下
+  - 不可以吃
+  PLAY_DEAD:
+  - 躺下装死
+  - 装死吧你
+  - 装饰
+  - biu
+  - 倒下来
+  SOCIAL_GREETING:
+  - hello
+  SLEEP:
+  - 去睡觉
+  - 我要睡了
+  - 睡觉去
+  - 睡觉
+  - 去睡
+  - 休息
+  PLAY:
+  - 开始喽
+  PRAISE:
+  - 好狗狗
+  - 好棒啊
+  - 小宝贝儿
+  - 棒棒的
+  - 太厉害了
+  - 太厉害
+  - 好厉害
+  - 你真厉害
+  - 厉害了
+  - 真厉害
+  - 好厉害啊
+  - 你太厉害了
+  - 好狗狗
+  SCOLD:
+  - 我要惩罚你喽
+  - 我不跟你玩了
+  - 我不理你喽
+  - 我要生气喽
+  - 不跟你玩了
+  - 不理你
+  - 不想理你
+  - 讨厌你
+  - 臭宝
+  - 我要生气了
+  - 我要惩罚你
+  - 罚你不准吃饭
+  - 我不理你了
+  - 我生气了
+  - 臭狗
+  - 我讨厌你
+  - 不准吃饭
+  GO_OUT:
+  - 出去溜溜
+  OWNER_RETURNED:
+  - 我回来了
+  OWNER_GOING_OUT:
+  - 我要出门了
+  FOOD_CARE:
+  - 吃罐头
+  PLAY_END:
+  - 我不玩
+  OWNER_UNHAPPY:
+  - 我累了
+  - 好累
+  - 我有点烦
+  - 烦死了
+  - 今天不开心
+  - 不得劲
+  - 过得不太顺利
+  - 我要抑郁了
+  - 心情不好
+  - 压力好大
+  - 我好孤独
+  - 我头疼
+  - 不舒服
+  OWNER_HAPPY:
+  - 我现在心情美美的
+  - 我今天很开心
+  - 很高兴
+  - 我感觉今天状态特别好
+  - 我今天感觉特别棒
+  - 我现在浑身都很轻松
+  - 今天真是个好日子
+  - 我今天太幸运了
+expansion:
+  enabled: true
+  variants_per_phrase: 10
+  default_profile: command
+  profiles:
+    command:
+    - id: polite_please
+      template: 请{phrase}
+    - id: polite_please_you
+      template: 请你{phrase}
+    - id: polite_trouble
+      template: 麻烦{phrase}
+    - id: polite_trouble_you
+      template: 麻烦你{phrase}
+    - id: address_puppy
+      template: 小狗，{phrase}
+    - id: address_doggy
+      template: 狗狗，{phrase}
+    - id: address_baby
+      template: 宝贝，{phrase}
+    - id: suffix_once
+      template: '{phrase}一下'
+    - id: suffix_ba
+      template: '{phrase}吧'
+    - id: suffix_ya
+      template: '{phrase}呀'
+    query:
+    - id: address_puppy
+      template: 小狗，{phrase}
+    - id: address_doggy
+      template: 狗狗，{phrase}
+    - id: address_baby
+      template: 宝贝，{phrase}
+    - id: ask_preface
+      template: 我想问，{phrase}
+    - id: wonder_preface
+      template: 我想知道，{phrase}
+    - id: tell_me_preface
+      template: 跟我说说，{phrase}
+    - id: suffix_ne
+      template: '{phrase}呢'
+    - id: suffix_ya
+      template: '{phrase}呀'
+    - id: suffix_a
+      template: '{phrase}啊'
+    - id: suffix_ma
+      template: '{phrase}嘛'
+    statement:
+    - id: address_puppy
+      template: 小狗，{phrase}
+    - id: address_doggy
+      template: 狗狗，{phrase}
+    - id: address_baby
+      template: 宝贝，{phrase}
+    - id: tell_you_preface
+      template: 跟你说，{phrase}
+    - id: want_say_preface
+      template: 我想说，{phrase}
+    - id: actually_preface
+      template: 其实，{phrase}
+    - id: suffix_a
+      template: '{phrase}啊'
+    - id: suffix_ya
+      template: '{phrase}呀'
+    - id: suffix_ne
+      template: '{phrase}呢'
+    - id: suffix_o
+      template: '{phrase}哦'
+    social:
+    - id: address_puppy
+      template: 小狗，{phrase}
+    - id: address_doggy
+      template: 狗狗，{phrase}
+    - id: address_baby
+      template: 宝贝，{phrase}
+    - id: tell_you_preface
+      template: 跟你说，{phrase}
+    - id: listen_preface
+      template: 听我说，{phrase}
+    - id: suffix_a
+      template: '{phrase}啊'
+    - id: suffix_ya
+      template: '{phrase}呀'
+    - id: suffix_o
+      template: '{phrase}哦'
+    - id: suffix_ne
+      template: '{phrase}呢'
+    - id: suffix_la
+      template: '{phrase}啦'
+    vocative:
+    - id: prefix_hello
+      template: 喂，{phrase}
+    - id: prefix_hey
+      template: 嘿，{phrase}
+    - id: suffix_a
+      template: '{phrase}啊'
+    - id: suffix_ya
+      template: '{phrase}呀'
+    - id: suffix_o
+      template: '{phrase}哦'
+    - id: suffix_ei
+      template: '{phrase}诶'
+    - id: suffix_ai
+      template: '{phrase}哎'
+    - id: suffix_yo
+      template: '{phrase}哟'
+    - id: suffix_na
+      template: '{phrase}呐'
+    - id: suffix_ne
+      template: '{phrase}呢'
+  command_profiles:
+    CALL_NAME: vocative
+    PRAISE: social
+    SCOLD: social
+    OWNER_GOING_OUT: statement
+    OWNER_RETURNED: statement
+    OWNER_UNHAPPY: statement
+    OWNER_HAPPY: statement
+    SOCIAL_GREETING: query
+    FOOD_CARE: query
+    PLAY_END: statement
+    WHAT_IS_THIS: query
+    WHO_IS_IT: query
+  phrase_profiles:
+    困了吗: query
+    玩不玩: query
+    想不想出去玩: query
+    吃罐罐: command
+non_catalog_rows:
+  42: FETCH
+  43: FIND_PERSON
+  44: GO_TO_LOCATION
+  45: FETCH_FROM_LOCATION
+  46: CHAT_FALLBACK
+  51: SOUND_SOURCE
+kws_command_keys:
+- COME
+- SHAKE_HAND
+- HIGH_FIVE
+- SIT
+- LIE_DOWN
+- STAND_UP
+- FOLLOW
+- SPIN
+- DROP
+- PLAY_DEAD
+- BACK_UP
+- APPROACH
+- HOLD_POSITION
+- QUIET

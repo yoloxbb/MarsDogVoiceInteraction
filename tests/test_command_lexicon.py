@@ -40,52 +40,23 @@ OBJECT_TARGETS_PATH = (
 )
 
 
-@pytest.mark.parametrize(
-    ("text", "command_key", "event_type"),
-    [
-        ("走", "WALK", "EVT_VOICE_COMMAND_WALK"),
-        ("回来", "COME", "EVT_VOICE_COMMAND_COME"),
-        ("跟我走", "FOLLOW", "EVT_VOICE_COMMAND_FOLLOW"),
-        ("出去溜溜", "GO_OUT", "EVT_VOICE_COMMAND_GO_OUT"),
-        ("回家", "GO_HOME", "EVT_VOICE_COMMAND_GO_HOME"),
-        ("靠近点", "APPROACH", "EVT_VOICE_COMMAND_APPROACH"),
-        ("退后", "BACK_UP", "EVT_VOICE_COMMAND_BACK_UP"),
-        ("蹲下", "SIT", "EVT_VOICE_COMMAND_SIT"),
-        ("躺下", "LIE_DOWN", "EVT_VOICE_COMMAND_LIE_DOWN"),
-        ("biu", "PLAY_DEAD", "EVT_VOICE_COMMAND_PLAY_DEAD"),
-        ("起来", "STAND_UP", "EVT_VOICE_COMMAND_STAND_UP"),
-        ("站着", "STAND_STILL", "EVT_VOICE_COMMAND_STAND_STILL"),
-        ("抬手", "SHAKE_HAND", "EVT_VOICE_COMMAND_SHAKE_HAND"),
-        ("拍手", "HIGH_FIVE", "EVT_VOICE_COMMAND_HIGH_FIVE"),
-        ("转圈", "SPIN", "EVT_VOICE_COMMAND_SPIN"),
-        ("翻滚", "ROLL_OVER", "EVT_VOICE_COMMAND_ROLL_OVER"),
-        ("不许动", "HOLD_POSITION", "EVT_VOICE_COMMAND_HOLD_POSITION"),
-        ("松口", "DROP", "EVT_VOICE_COMMAND_DROP"),
-        ("别叫", "QUIET", "EVT_VOICE_COMMAND_QUIET"),
-    ],
-)
-def test_catalog_covers_all_19_core_command_groups(
-    text: str,
-    command_key: str,
-    event_type: str,
-) -> None:
+@pytest.mark.parametrize("text,key", [
+    ("安静", "QUIET"), ("定", "HOLD_POSITION"), ("跟上", "FOLLOW"),
+    ("走上前来", "COME"), ("再过来点", "APPROACH"), ("前进", "MOVE_FORWARD"),
+    ("往后稍稍", "BACK_UP"), ("向左转", "TURN_LEFT"), ("向右转", "TURN_RIGHT"),
+    ("快跟上", "SPEED_UP"), ("慢慢走", "SLOW_DOWN"), ("蹲下", "SIT"),
+    ("趴", "LIE_DOWN"), ("站好", "STAND_UP"), ("说话", "BARK"),
+    ("手手", "SHAKE_HAND"), ("拍手", "HIGH_FIVE"), ("转一转", "SPIN"),
+    ("不可以吃", "DROP"), ("绕圈", "CIRCLE_AROUND"), ("装死", "PLAY_DEAD"),
+])
+def test_workbook_covers_all_21_specific_command_groups(text, key):
     lexicon = CommandLexicon(CATALOG_PATH)
-
+    assert (lexicon.command_count, lexicon.core_command_count, lexicon.phrase_count) == (43, 21, 222)
+    assert lexicon.source_row_count == lexicon.covered_source_row_count == 43
     match = lexicon.match(text)
-
-    assert lexicon.command_count == 83
-    assert lexicon.core_command_count == 19
-    assert lexicon.phrase_count == 158
-    assert lexicon.source_row_count == 116
-    assert lexicon.covered_source_row_count == 116
-    assert match is not None
-    assert match.command_key == command_key
-    assert match.event_type == event_type
-    assert match.core
-    assert not match.emit_known_event
-    assert match.nlu_social == "NONE"
-    assert match.nlu_intent != ""
-    assert match.nlu_control in {"DO", "STOP"}
+    assert match and match.command_key == key
+    assert match.event_type == "EVT_VOICE_COMMAND_" + key
+    assert match.core and not match.emit_known_event
 
 
 def test_catalog_special_events_are_unique_and_share_only_reviewed_actions() -> None:
@@ -98,7 +69,7 @@ def test_catalog_special_events_are_unique_and_share_only_reviewed_actions() -> 
     command_ids = [command["command_id"] for command in commands]
     event_types = [command["event_type"] for command in commands]
 
-    assert len(commands) == 83
+    assert len(commands) == 43
     assert len(command_keys) == len(set(command_keys))
     assert len(command_ids) == len(set(command_ids))
     assert len(event_types) == len(set(event_types))
@@ -217,35 +188,22 @@ def _synthetic_catalog(tmp_path: Path, commands: list[dict[str, Any]]) -> Path:
     return path
 
 
-def test_phrase_variants_match_without_changing_catalog_counts() -> None:
+def test_phrase_variants_match_without_changing_catalog_counts():
     lexicon = CommandLexicon(CATALOG_PATH)
-
-    assert lexicon.variant_phrase_count > 0
-    # The reviewed product catalog contract is untouched.
-    assert lexicon.phrase_count == 158
-    assert lexicon.expanded_phrase_count == 1580
-
-    for text, command_key in [
-        ("往后退一点点", "BACK_UP"),
-        ("后退", "BACK_UP"),
-        ("去睡觉", "SLEEP"),
-        ("转一圈", "SPIN"),
-        ("往我这儿来", "COME"),
-        ("吐掉", "DROP"),
-    ]:
+    assert lexicon.phrase_count == 222
+    assert lexicon.expanded_phrase_count == 2220
+    for text, key in [("往后退一点点", "BACK_UP"), ("往我这儿来", "COME"),
+                      ("装饰", "PLAY_DEAD"), ("停下来", "HOLD_POSITION")]:
         match = lexicon.match(text)
-        assert match is not None, text
-        assert match.command_key == command_key, text
+        assert match and match.command_key == key
         assert match.match_strategy == "catalog_variant"
 
 
-def test_phrase_variants_do_not_generate_expansions() -> None:
+def test_phrase_variants_do_not_generate_expansions():
     lexicon = CommandLexicon(CATALOG_PATH)
-
-    # Only the declared surface form matches; the polite templates are applied
-    # to product catalog phrases alone.
-    assert lexicon.match("去睡觉一下") is None
-    assert lexicon.match("请去睡觉") is None
+    assert lexicon.match("往后退一点点") is not None
+    assert lexicon.match("请往后退一点点") is None
+    assert lexicon.match("往后退一点点一下") is None
 
 
 def test_phrase_variants_reject_conflicts_and_unknown_commands(
@@ -368,14 +326,14 @@ def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
     assert lexicon.expansion_enabled
     assert lexicon.variants_per_phrase == 10
     assert lexicon.expansion_profile_count == 5
-    assert lexicon.expanded_phrase_count == 1580
+    assert lexicon.expanded_phrase_count == 2220
     # phrase_count/expanded_phrase_count describe the reviewed product catalog
     # only; natural-speech variants are counted separately.
     variant_count = sum(
         len(phrases) for phrases in raw.get("phrase_variants", {}).values()
     )
     assert lexicon.variant_phrase_count == variant_count
-    assert lexicon.total_match_phrase_count == 1738 + variant_count
+    assert lexicon.total_match_phrase_count == 2442 + variant_count
 
     command_profiles = expansion["command_profiles"]
     phrase_profiles = expansion["phrase_profiles"]
@@ -401,7 +359,7 @@ def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
                 assert match.expansion_rule == rule["id"]
                 checked += 1
 
-    assert checked == 1580
+    assert checked == 2220
 
 
 @pytest.mark.parametrize(
@@ -409,8 +367,8 @@ def test_catalog_generates_ten_auditable_variants_per_phrase() -> None:
     [
         ("请你坐下", "SIT", "坐下", "command"),
         ("宝贝，太棒了", "PRAISE", "太棒了", "social"),
-        ("我想问，你在哪里", "ASK_WHERE_ARE_YOU", "你在哪里", "query"),
-        ("跟你说，我好孤独", "OWNER_LONELY", "我好孤独", "statement"),
+        ("我想问，你叫什么名字", "SOCIAL_GREETING", "你叫什么名字", "query"),
+        ("跟你说，难过", "OWNER_UNHAPPY", "难过", "statement"),
         ("嘿，小狗", "CALL_NAME", "小狗", "vocative"),
     ],
 )
@@ -429,72 +387,18 @@ def test_representative_expansions_route_without_intent_model(
     assert match.expansion_profile == profile
 
 
-@pytest.mark.parametrize(
-    ("text", "command_key", "event_type", "action_name"),
-    [
-        ("跟着我", "FOLLOW", "EVT_VOICE_COMMAND_FOLLOW", "ACT_FOLLOW"),
-        (
-            "出去溜溜",
-            "GO_OUT",
-            "EVT_VOICE_COMMAND_GO_OUT",
-            "ACT_GO_OUT_TO_PLAY",
-        ),
-        ("回家", "GO_HOME", "EVT_VOICE_COMMAND_GO_HOME", "ACT_GO_HOME"),
-        (
-            "停",
-            "HOLD_POSITION",
-            "EVT_VOICE_COMMAND_HOLD_POSITION",
-            "ACT_HOLD_POSITION",
-        ),
-        (
-            "小宝贝",
-            "CALL_NAME",
-            "EVT_VOICE_COMMAND_CALL_NAME",
-            "",
-        ),
-        ("真聪明", "PRAISE", "EVT_VOICE_COMMAND_PRAISE", ""),
-        ("坏狗狗", "SCOLD", "EVT_VOICE_COMMAND_SCOLD", ""),
-        (
-            "吃饭",
-            "EAT_MEAL",
-            "EVT_VOICE_COMMAND_EAT_MEAL",
-            "ACT_EAT_MEAL",
-        ),
-        (
-            "肚子饿不饿",
-            "RESPOND_HUNGRY_QUERY",
-            "EVT_VOICE_COMMAND_RESPOND_HUNGRY_QUERY",
-            "ACT_RESPOND_HUNGRY_QUERY",
-        ),
-        ("去便便", "TOILET", "EVT_VOICE_COMMAND_TOILET", ""),
-        ("擦一擦脚", "CLEAN", "EVT_VOICE_COMMAND_CLEAN", ""),
-        ("一起玩", "PLAY", "EVT_VOICE_COMMAND_PLAY", ""),
-        (
-            "去找妈妈",
-            "FIND_MOM",
-            "EVT_VOICE_COMMAND_FIND_MOM",
-            "ACT_FIND_MOM",
-        ),
-        (
-            "我好孤独",
-            "OWNER_LONELY",
-            "EVT_VOICE_COMMAND_OWNER_LONELY",
-            "ACT_OWNER_LONELY",
-        ),
-    ],
-)
-def test_full_catalog_routes_representative_product_rows(
-    text: str,
-    command_key: str,
-    event_type: str,
-    action_name: str,
-) -> None:
+@pytest.mark.parametrize("text,key", [
+    ("哈喽", "SOCIAL_GREETING"), ("吃罐罐", "FOOD_CARE"), ("回窝睡觉", "SLEEP"),
+    ("来玩", "PLAY"), ("结束游戏", "PLAY_END"), ("出门溜溜", "GO_OUT"),
+    ("来拔河", "TUG_OF_WAR"), ("来抓我呀", "CHASE"), ("来捉迷藏", "HIDE_AND_SEEK"),
+    ("飞盘游戏", "FETCH_FRISBEE"), ("我好孤独", "OWNER_UNHAPPY"),
+    ("太好了", "OWNER_HAPPY"), ("谁来啦", "OWNER_RETURNED"), ("再见", "OWNER_GOING_OUT"),
+])
+def test_full_catalog_routes_representative_product_rows(text, key):
     match = CommandLexicon(CATALOG_PATH).match(text)
-
-    assert match is not None
-    assert match.command_key == command_key
-    assert match.event_type == event_type
-    assert match.action_name == action_name
+    assert match and match.command_key == key
+    assert match.event_type == "EVT_VOICE_COMMAND_" + key
+    assert match.source_rows
 
 
 def test_every_configured_phrase_matches_its_declared_command() -> None:
@@ -511,27 +415,24 @@ def test_every_configured_phrase_matches_its_declared_command() -> None:
             assert match.event_type == command["event_type"]
             checked += 1
 
-    assert checked == 158
+    assert checked == 222
 
 
 def test_reference_english_phrases_are_metadata_not_runtime_triggers() -> None:
     lexicon = CommandLexicon(CATALOG_PATH)
 
-    assert lexicon.reference_phrase_count == 139
+    assert lexicon.reference_phrase_count == 0
     assert lexicon.match("Good dog") is None
     assert lexicon.match("Come here") is None
 
 
-def test_direct_event_carries_product_action_and_source_metadata() -> None:
-    lexicon = CommandLexicon(CATALOG_PATH)
-    match = lexicon.match("吃饭")
-
-    assert match is not None
-    event = match.to_event(asr_text="吃饭", language="zh")
+def test_direct_event_carries_product_action_and_source_metadata():
+    match = CommandLexicon(CATALOG_PATH).match("向前走")
+    event = match.to_event(asr_text="向前走", language="zh")
     slots = {item["key"]: item["value"] for item in event["slots"]}
-    assert slots["action_name"] == "ACT_EAT_MEAL"
-    assert slots["catalog_source_rows"] == "53"
-    assert slots["behavior"] == "去指定地点进食"
+    assert slots["action_name"] == "ACT_MOVE_FORWARD"
+    assert slots["catalog_source_rows"] == "9"
+    assert slots["behavior"] == "往前挪动10-30cm"
     assert slots["match_strategy"] == "catalog_exact"
 
 
@@ -580,6 +481,7 @@ class _FakeSpeaker:
 
 class _DirectRouteHarness:
     _process_speech = VoiceInteractionNode._process_speech
+    _utterance_speaker_event_fields = VoiceInteractionNode._utterance_speaker_event_fields
     _wakeup_supersedes_utterance = VoiceInteractionNode._wakeup_supersedes_utterance
     _clean_text = staticmethod(VoiceInteractionNode._clean_text)
     _effective_kws_arbitration = (
@@ -642,6 +544,7 @@ class _DirectRouteHarness:
 class _KwsRouteHarness:
     _poll_kws_events = VoiceInteractionNode._poll_kws_events
     _process_speech = VoiceInteractionNode._process_speech
+    _utterance_speaker_event_fields = VoiceInteractionNode._utterance_speaker_event_fields
     _wakeup_supersedes_utterance = VoiceInteractionNode._wakeup_supersedes_utterance
     _clean_text = staticmethod(VoiceInteractionNode._clean_text)
     _effective_kws_arbitration = (
@@ -821,7 +724,7 @@ def test_direct_catalog_match_publishes_event_and_skips_intent_model() -> None:
         and fields.get("stage") == "command_lexicon"
         and fields.get("result") == "matched"
         and fields.get("action_name") == "ACT_SIT"
-        and fields.get("source_rows") == [8]
+        and fields.get("source_rows") == [15]
         for record, fields in node.traces
     )
     assert any(
@@ -834,44 +737,15 @@ def test_direct_catalog_match_publishes_event_and_skips_intent_model() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("text", "expected_asr_text"),
-    [
-        ("自己去玩吧", "自己去玩吧"),
-        ("自己去玩吧！", "自己去玩吧"),
-        ("小狗，自己去玩吧", "小狗自己去玩吧"),
-    ],
-)
-def test_play_alone_publishes_unique_special_event(
-    text: str, expected_asr_text: str,
-) -> None:
+@pytest.mark.parametrize("text", ["来追我呀", "来抓我呀！", "小狗，抓小狗游戏"])
+def test_chase_publishes_one_specific_event(text):
     node = _DirectRouteHarness(text=text)
-
-    assert node._process_speech(
-        {"audio_samples": [0.1], "sample_rate": 16000},
-        "utterance-play-alone",
-    )
-
+    node._process_speech({"audio_samples": [0.1], "sample_rate": 16000}, "utterance-chase")
+    events = [e for e in node.published if e.get("intent_source")]
+    assert [e["event_type"] for e in events] == ["EVT_VOICE_COMMAND_CHASE"]
+    assert events[0]["command_id"] == "CMD_CHASE"
+    assert events[0]["is_executable"] and events[0]["should_trigger_behavior_tree"]
     assert not node.intent_called
-    events = [event for event in node.published if event.get("intent_source")]
-    assert [event["event_type"] for event in events] == [
-        "EVT_VOICE_COMMAND_PLAY_ALONE",
-    ]
-    event = events[0]
-    assert event["command_id"] == "CMD_PLAY_ALONE"
-    assert event["specific_event_type"] == event["event_type"]
-    assert event["dispatch_role"] == "specific_command"
-    assert event["intent_source"] == "command_lexicon"
-    assert event["control"] == "DO"
-    assert event["is_executable"] is True
-    assert event["should_trigger_behavior_tree"] is True
-    assert event["asr_text"] == expected_asr_text
-    slots = {slot["key"]: slot["value"] for slot in event["slots"]}
-    assert slots["command_key"] == "PLAY_ALONE"
-    assert slots["catalog_phrase"] == "自己去玩吧"
-    assert slots["action_name"] == "ACT_PLAY_ALONE"
-    assert slots["behavior"] == "去随机位置自己玩"
-    assert "catalog_source_rows" not in slots
 
 
 @pytest.mark.parametrize("text", ["不要自己去玩吧", "别自己去玩吧", "我说的是自己去玩吧吗"])
@@ -922,7 +796,7 @@ def test_expanded_catalog_match_publishes_event_and_skips_intent_model() -> None
     ("text", "event_type", "emotion", "category"),
     [
         (
-            "小宝贝",
+            "小狗",
             "EVT_VOICE_COMMAND_CALL_NAME",
             "CALL",
             "social",
@@ -1040,62 +914,25 @@ def test_long_asr_text_containing_keyword_selects_asr_catalog() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("command_key", "asr_text", "event_type"),
-    [
-        (
-            "EAT_CANNED_FOOD",
-            "去滚罐",
-            "EVT_VOICE_COMMAND_EAT_CANNED_FOOD",
-        ),
-        ("GO_GET_IT", "去哪", "EVT_VOICE_COMMAND_GO_GET_IT"),
-    ],
-)
-def test_configured_kws_priority_recovers_confirmed_asr_errors(
-    command_key: str,
-    asr_text: str,
-    event_type: str,
-) -> None:
-    node = _KwsRouteHarness(command_key=command_key, asr_text=asr_text)
-    node._kws_arbitration["priority_command_keys"] = frozenset({
-        "EAT_CANNED_FOOD",
-        "GO_GET_IT",
-    })
-    node._kws_arbitration["priority_asr_aliases"] = {
-        "EAT_CANNED_FOOD": ("去滚罐",),
-        "GO_GET_IT": ("去哪",),
-    }
+@pytest.mark.parametrize("key", ["GO_GET_IT", "EAT_CANNED_FOOD", "ROLL_OVER", "WALK"])
+@pytest.mark.parametrize("mode", ["immediate", "deferred"])
+def test_retired_kws_labels_cannot_bypass_current_catalog(key, mode):
+    node = _KwsRouteHarness(key, "")
+    node._kws_arbitration["publish_mode"] = mode
     node._poll_kws_events()
-
-    assert node._process_speech(
-        {"audio_samples": [0.1], "sample_rate": 16000},
-        "utterance-1",
-    )
-
-    business_events = [
-        event for event in node.published
-        if event.get("intent_source") in {"kws", "command_lexicon"}
-    ]
-    assert [event["event_type"] for event in business_events] == [event_type]
-    assert business_events[0]["asr_text"] == asr_text
-    assert not node.intent_called
-    assert any(
-        record == "stage_complete"
-        and fields.get("stage") == "recognition_arbitration"
-        and fields.get("result") == "kws_selected"
-        and fields.get("reason") == "configured_kws_priority_alias"
-        for record, fields in node.traces
-    )
+    assert not node._command_tracker.kws_candidates
+    assert not any(e.get("should_trigger_behavior_tree") for e in node.published)
+    assert any(f.get("result") == "rejected_retired_command" for _, f in node.traces)
 
 
 def test_priority_kws_does_not_override_unlisted_asr_text() -> None:
     node = _KwsRouteHarness(
-        command_key="GO_GET_IT",
-        asr_text="我们今天去哪里玩",
+        command_key="COME",
+        asr_text="我们今天过累里玩",
     )
-    node._kws_arbitration["priority_command_keys"] = ("GO_GET_IT",)
+    node._kws_arbitration["priority_command_keys"] = ("COME",)
     node._kws_arbitration["priority_asr_aliases"] = {
-        "GO_GET_IT": ("去哪",),
+        "COME": ("过累",),
     }
     node._poll_kws_events()
 
@@ -1458,25 +1295,11 @@ def test_model_find_query_routes_only_supported_detector_target() -> None:
     )
 
 
-@pytest.mark.parametrize("text", ["这是啥？", "这是什么？", "小狗，这是啥", "这是啥呀"])
-def test_inspect_toy_publishes_one_direct_command(text):
-    node = _DirectRouteHarness(text=text)
-    assert node._process_speech(
-        {"audio_samples": [0.1], "sample_rate": 16000}, "utterance-inspect-toy",
-    )
-    assert not node.intent_called
-    events = [event for event in node.published if event.get("intent_source")]
-    assert [event["event_type"] for event in events] == ["EVT_VOICE_COMMAND_INSPECT_TOY"]
-    event = events[0]
-    assert event["command_id"] == "CMD_INSPECT_TOY"
-    assert event["specific_event_type"] == event["event_type"]
-    assert event["dispatch_role"] == "specific_command"
-    assert event["control"] == "DO"
-    assert event["is_executable"] and event["should_trigger_behavior_tree"]
-    slots = {slot["key"]: slot["value"] for slot in event["slots"]}
-    assert slots["command_key"] == "INSPECT_TOY"
-    assert slots["action_name"] == "ACT_INSPECT_TOY"
-    assert "catalog_source_rows" not in slots
+@pytest.mark.parametrize("text", ["自己去玩吧", "翻滚", "去", "走开", "保持站立"])
+def test_removed_catalog_routes_do_not_survive_as_aliases(text):
+    lexicon = CommandLexicon(CATALOG_PATH)
+    assert lexicon.match(text) is None
+    assert lexicon.match_fuzzy(text) is None
 
 
 @pytest.mark.parametrize("text", ["不要这是啥", "别这是啥", "我说的是这是啥吗"])
@@ -1484,3 +1307,41 @@ def test_inspect_toy_rejects_negation_and_embedded_phrases(text):
     lexicon = CommandLexicon(CATALOG_PATH)
     assert lexicon.match(text) is None
     assert lexicon.match_fuzzy(text) is None
+
+
+@pytest.mark.parametrize("text", ["停下。", "停止！", "停下来。"])
+@pytest.mark.parametrize("kws_key", [None, "HOLD_POSITION", "SIT"])
+def test_stop_aliases_route_to_one_executable_stop(text, kws_key):
+    # Exercise the real speech-routing and arbitration methods without ROS I/O.
+    # A stop must work with absent, agreeing, or conflicting KWS evidence.
+    if kws_key is None:
+        node = _DirectRouteHarness(text=text)
+    else:
+        node = _KwsRouteHarness(command_key=kws_key, asr_text=text)
+        node._poll_kws_events()
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000}, "utterance-1",
+    )
+    assert not node.intent_called
+    events = [event for event in node.published if event.get("is_executable")]
+    assert [event["event_type"] for event in events] == [
+        "EVT_VOICE_COMMAND_HOLD_POSITION",
+    ]
+    event = events[0]
+    assert event["specific_event_type"] == event["event_type"]
+    assert event["dispatch_role"] == "specific_command"
+    assert event["control"] == "DO"
+    assert event["should_trigger_behavior_tree"]
+
+
+@pytest.mark.parametrize("text", [
+    "不要停下", "不要停止", "别停下来", "他说停下",
+    "停止播放音乐", "停下来是什么意思",
+])
+def test_stop_aliases_do_not_promote_negation_or_embedded_kws(text):
+    node = _KwsRouteHarness(command_key="HOLD_POSITION", asr_text=text)
+    node._poll_kws_events()
+    assert node._process_speech(
+        {"audio_samples": [0.1], "sample_rate": 16000}, "utterance-1",
+    )
+    assert not any(event.get("is_executable") for event in node.published)

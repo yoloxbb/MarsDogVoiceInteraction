@@ -1,0 +1,220 @@
+# Full configuration for the Flex enumerated on 2026-10-15.
+# ALSA CARD=CDC and CDC serial must be rechecked on another host.
+logging:
+  level: INFO
+  dir: ../log
+  console: true
+  file: true
+  event_trace: true
+
+audio_debug:
+  enabled: true
+  output_dir: ../log/voice_debug
+  save_raw_capture: true
+  save_vad_segment: true
+  save_asr_input: true
+  compare_asr: false
+  debug_disable_extra_pre_roll: false
+  # 保留的 utterance 目录数上限，超出后按时间删除最旧的；<= 0 表示不清理。
+  max_utterances: 200
+
+mock:
+  enabled: false
+  mode: pipeline
+  event_interval_sec: 5.0
+  avoid_immediate_repeat: true
+
+storage:
+  # 声纹 API 只能使用此目录，HTTP 请求不能覆盖该路径。
+  root: ../data
+
+command_lexicon:
+  enabled: true
+  catalog: command_catalog.yaml
+  # ASR 近音错字（坐虾→坐下、爬下→趴下）的拼音同音兜底。默认开启。
+  # 关掉即退回严格整句精确匹配；怀疑误执行时优先关此项定位。
+  fuzzy_matching: true
+
+object_target_routing:
+  enabled: true
+  catalog: object_targets.yaml
+
+parameterized_commands:
+  enabled: true
+  locations: location_targets.yaml
+  persons: person_targets.yaml
+
+speaker_api:
+  enabled: true
+  host: 0.0.0.0
+  port: 8091
+  max_upload_mb: 20
+  max_batch_files: 5
+  # 新样本与其他身份任一样本的余弦相似度达到该值时，拒绝跨身份重复注册。
+  cross_identity_similarity_threshold: 0.75
+  # 新增样本须与本身份已有样本相容；初始阈值需用真人录音校准。
+  same_identity_similarity_threshold: 0.5
+
+sound_source:
+  # 暂时关闭声源/异响事件；需要恢复时设为 true。
+  enabled: false
+  # 直接判断 CDC JSON：type=vad、state=update、doa_valid=true 时下发声源事件。
+  max_doa_age_ms: 600.0
+
+topics:
+  audio_event: /perception/audio_event
+  enrollment_event: /perception/voice/enrollment_event
+  voice_task: /perception/voice/task
+
+interaction:
+  # 非空 ASR 或已经发布的即时 KWS 命令刷新空闲计时。
+  # 正式配置 30 秒；正数时静默超过该时长即结束会话，0 或负数 = 不因空闲退出。
+  idle_timeout_sec: 300
+  hold_max_lease_sec: 20.0
+  # 0 = 不设会话总时长上限，由空闲超时、stop_listening 或节点关闭结束。
+  max_duration_sec: 0.0
+  # ⚠️ 测试专用：true 时 VAD 检测到任何语音即刷新空闲计时器，不再要求
+  # 「ASR 返回非空文本」。仅 VAD 有声音、ASR 为空也会续期 —— 生产保持 false。
+  # 开启方法：本项设 true 即可（max_duration_sec 正式配置已为 0）。
+  refresh_on_any_speech: false
+  # 会话内再次收到硬件唤醒时刷新 idle 计时，并用唤醒词音频单独识别说话人。
+  wake_speaker_enabled: true
+  # 每句独立做声纹核验，使用该句的识别结果下发身份。
+  utterance_speaker_enabled: true
+  wake_audio_window_sec: 2.5
+  # Bounded overlap for commands immediately following the wake word; tune with PCM.
+  wake_command_pre_roll_sec: 0.3
+  wake_event_max_age_sec: 8.0
+  wake_debounce_sec: 0.8
+
+providers:
+  wakeup:
+    type: respeaker_sherpa
+    enabled: true
+    config:
+      # Custom Flex 0.5.x application CDC; never use the 303a:1001 bootloader.
+      port: auto
+      usb_vid: 0x303a
+      usb_pid: 0x4013
+      serial_number: "FLEX-ESP32S3-0001"
+      baudrate: 115200
+      timeout: 0.2
+      settle_sec: 0.5
+      handshake_timeout_sec: 2.0
+      heartbeat_sec: 10.0
+      reconnect_interval_sec: 2.0
+      max_angle_age_ms: 600.0  # 仅限制转向方向；过期仍发布唤醒并启动识别。
+      # type 为 respeaker_sherpa 时，主机 sherpa 同时在常开麦克风上听唤醒词，和固件谁先认出算谁；
+      # 10-15 录音 15 声：固件认出 7、sherpa 12、合起来 14。需要 audio.wake_history_sec > 0。
+      sherpa_model_dir: ../../models/wakeup/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
+      sherpa_keywords_file: wake_keywords.txt
+      sherpa_keywords_threshold: 0.25
+      sherpa_num_threads: 1
+      doa_window_sec: 2.0   # sherpa 唤醒取这段时间里 Flex 报的最新有效方向
+      dedupe_sec: 1.5       # 两路先后认出同一声，间隔内的后一个丢掉
+  audio:
+    type: sherpa
+    enabled: true
+    config:
+      device: "ReSpeaker Flex UAC I/O + CDC"
+      # arecord 使用 ALSA PCM 标识；CARD 名称不依赖 USB 重连后的数字编号。
+      arecord_device: "plughw:CARD=CDC,DEV=0"
+      # 连续录音打开失败或 USB 掉线后，每 2 秒重试同一配置设备。
+      reconnect_interval_sec: 2.0
+      vad_model: ../../models/vad/silero_vad.onnx
+      sample_rate: 16000
+      max_duration_sec: 8.0
+      # 等待语音和开始说话后的上限分别计时，避免接近等待上限时截断。
+      max_speech_duration_sec: 8.0
+      read_timeout_sec: 2.0
+      # 会话内持续录音，识别期间最多缓存 6 秒；溢出/过期丢弃，不执行残句。
+      continuous_capture: true
+      capture_buffer_sec: 6.0
+      # 单麦克风待机时仅在内存保留最近 3 秒，供唤醒声纹识别。
+      wake_history_sec: 3.0
+      vad_threshold: 0.5
+      min_silence_dur: 0.3
+      min_speech_dur: 0.25
+      pre_roll_sec: 0.3
+      upload_post_roll_sec: 0.2
+      upload_join_silence_sec: 0.1
+      upload_max_duration_sec: 60.0
+      upload_min_speech_sec: 0.5
+      num_threads: 2
+  kws:
+    type: sherpa
+    enabled: true
+    config:
+      model_dir: ../../models/wakeup/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
+      keywords_file: kws_keywords.txt
+      sample_rate: 16000
+      num_threads: 2
+      keywords_score: 1.0
+      # 现场负样本优先：避免环境短音节在低阈值下被当成动作词。
+      keywords_threshold: 0.4
+      num_trailing_blanks: 1
+      event_confidence: 0.9
+      # 两种模式均检测否定词，防止 ASR 漏掉否定前缀。
+      # 命中否定词后锁住本句动作；下一句重新开始。
+      negation_guard_enabled: true
+      negation_keywords_file: kws_negation_keywords.txt
+      negation_guard_window_sec: 0.25
+      # 首次有效 KWS 命中通过否定检查后发布；同句只采用该业务结果。
+      # 无有效 KWS 结果时：ASR → 词库/参数句式；仍未匹配则发布 UNKNOWN。
+      publish_mode: immediate
+      arbitration_mode: exclusive
+      # 以下仲裁参数用于 deferred 模式。
+      asr_long_text_wins: true
+      kws_fallback_on_asr_empty: false
+      short_requires_asr_agreement: true
+      short_max_chars_zh: 2
+      short_max_words_en: 2
+      # 只有已确认的”命令 + ASR 错写”精确组合允许 KWS 覆盖；不得泛化。
+      priority_command_keys: []
+      priority_asr_aliases: {}
+  asr:
+    type: sherpa
+    enabled: true
+    config:
+      model_type: sense_voice
+      asr_model: ../../models/asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/model.int8.onnx
+      tokens: ../../models/asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/tokens.txt
+      sample_rate: 16000
+      # 可选 zh / en / ja / ko / yue / auto。auto 让 SenseVoice 自判语种。
+      # 2026-09-18 用 155 条 TTS 黄金集实测：zh 命中 146/155，auto 仅 140/155。
+      # auto 会把中文短词判成日/韩 —— 「走」「坐」→ そう。、「真乖」→ gen과.、
+      # 「可爱」→ 可い。、「拜拜」→ 拜e拜e。。
+      # 字表里也没有可匹配的英文短语：catalog 的 reference_phrases_en 只是参考
+      # 译文，只被计数、不进匹配表。故没有理由开 auto，保持 zh。
+      language: zh
+      use_itn: true
+      num_threads: 2
+  speaker:
+    type: sherpa
+    enabled: true
+    config:
+      speaker_model: ../../models/speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
+      match_threshold: 0.3
+      # 第一、第二身份的余弦分差不足时拒识；初始值需用板端真人录音校准。
+      min_score_margin: 0.05
+      # 最短有效语音长度（16k 采样点），低于该值无法产生可靠声纹，直接判定 audio_too_short。
+      min_samples: 8000
+      num_threads: 2
+  intent_rule:
+    type: rule
+    enabled: false
+    config: {}
+  intent_llm:
+    type: rkllm
+    enabled: false
+    config:
+      model: ../../models/llm/qwen2_5_5b_rk3588_260903_w8a8.rkllm
+      lib_path: ../lib/librkllmrt.so
+      platform: rk3588
+      max_context_len: 512
+      max_new_tokens: 256
+      top_k: 1
+      top_p: 1.0
+      temperature: 0.0
+      repeat_penalty: 1.0
+      system_prompt: "Classify the owner's MasDog utterance. Return exactly one label in SOCIAL|INTENT|CONTROL format and nothing else."

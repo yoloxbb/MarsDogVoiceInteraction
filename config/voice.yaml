@@ -37,6 +37,11 @@ object_target_routing:
   enabled: true
   catalog: object_targets.yaml
 
+parameterized_commands:
+  enabled: true
+  locations: location_targets.yaml
+  persons: person_targets.yaml
+
 speaker_api:
   enabled: true
   host: 0.0.0.0
@@ -55,8 +60,8 @@ topics:
 
 interaction:
   # 非空 ASR 或已经发布的即时 KWS 命令刷新空闲计时。
-  # 正式配置 20 秒；正数时静默超过该时长即结束会话，0 或负数 = 不因空闲退出。
-  idle_timeout_sec: 20.0
+  # 正式配置 30 秒；正数时静默超过该时长即结束会话，0 或负数 = 不因空闲退出。
+  idle_timeout_sec: 300
   hold_max_lease_sec: 20.0
   # 0 = 不设会话总时长上限，由空闲超时、stop_listening 或节点关闭结束。
   max_duration_sec: 0.0
@@ -66,6 +71,8 @@ interaction:
   refresh_on_any_speech: false
   # 会话内再次收到硬件唤醒时刷新 idle 计时，并用唤醒词音频单独识别说话人。
   wake_speaker_enabled: true
+  # 每句独立做声纹核验，使用该句的识别结果下发身份。
+  utterance_speaker_enabled: true
   wake_audio_window_sec: 2.5
   wake_event_max_age_sec: 8.0
   wake_debounce_sec: 0.8
@@ -76,7 +83,11 @@ providers:
     enabled: true
     config:
       # 唤醒数据来自外置 WCH 串口；ListenGo 内置 CDC 串口未输出唤醒数据。
-      port: /dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0004-if00
+      # 启动及每次断线重连时按 USB 身份重新枚举，不依赖 ttyACM 编号或旧序列号。
+      port: auto
+      usb_vid: 0x1a86
+      usb_pid: 0x55d4
+      # 多个同型号设备同时接入时，配置 serial_number: "0004" 或显式 port。
       protocol: aiui
       baudrate: 115200
       timeout: 0.2
@@ -104,7 +115,7 @@ providers:
       # 单麦克风待机时仅在内存保留最近 3 秒，供唤醒声纹识别。
       wake_history_sec: 3.0
       vad_threshold: 0.5
-      min_silence_dur: 0.5
+      min_silence_dur: 0.3
       min_speech_dur: 0.25
       pre_roll_sec: 0.3
       upload_post_roll_sec: 0.2
@@ -125,25 +136,24 @@ providers:
       keywords_threshold: 0.4
       num_trailing_blanks: 1
       event_confidence: 0.9
-      # 即时模式先经独立否定词检测，并等待 250 ms 后续音频通过检测。
+      # 两种模式均检测否定词，防止 ASR 漏掉否定前缀。
       # 命中否定词后锁住本句动作；下一句重新开始。
       negation_guard_enabled: true
       negation_keywords_file: kws_negation_keywords.txt
       negation_guard_window_sec: 0.25
-      # 通过拦截检查后发布目录指定事件；同句 ASR 提供文本和声纹信息。
-      # deferred 模式在整句 ASR 完成后仲裁。
+      # 首次有效 KWS 命中通过否定检查后发布；同句只采用该业务结果。
+      # 无有效 KWS 结果时：ASR → 词库/参数句式；仍未匹配则发布 UNKNOWN。
       publish_mode: immediate
       arbitration_mode: exclusive
       # 以下仲裁参数用于 deferred 模式。
       asr_long_text_wins: true
-      kws_fallback_on_asr_empty: true
+      kws_fallback_on_asr_empty: false
       short_requires_asr_agreement: true
       short_max_chars_zh: 2
       short_max_words_en: 2
       # 只有已确认的”命令 + ASR 错写”精确组合允许 KWS 覆盖；不得泛化。
-      priority_command_keys: [EAT_CANNED_FOOD]
-      priority_asr_aliases:
-        EAT_CANNED_FOOD: [去滚罐]
+      priority_command_keys: []
+      priority_asr_aliases: {}
   asr:
     type: sherpa
     enabled: true

@@ -1,64 +1,56 @@
-g uò l ái @COME
-w ò sh ǒu @SHAKE_HAND
-j ī zh ǎng @HIGH_FIVE
-z uò x ià @SIT
-p ā x ià @LIE_DOWN
-zh àn q ǐ l ái @STAND_UP
-d ěng y ī x ià @WAIT
-g ēn zh e w ǒ @FOLLOW
-f ān g ǔn @ROLL_OVER
-zh uàn q uān @SPIN
-h uí l ái @COME
-t ǔ d iào @DROP
-zh uāng s ǐ @PLAY_DEAD
-h uí j iā @GO_HOME
-t uì h òu @BACK_UP
-k ào j ìn d iǎn @APPROACH
-q ǐ l ái @STAND_UP
-d ūn x ià @SIT
-t ǎng x ià @LIE_DOWN
-zh àn h ǎo @STAND_STILL
-b ié d òng @HOLD_POSITION
 ān j ìng @QUIET
-f àng x ià @DROP
-zh āng z uǐ @DROP
-ch ī g uàn g uàn @EAT_CANNED_FOOD
-q ù n á @GO_GET_IT
-z ǒu @WALK
-q ù @WALK
-l ái @COME
-l ái zh è @COME
-d ào w ǒ zh è ér l ái @COME
-g ēn w ǒ z ǒu @FOLLOW
-ch ū q ù w án @GO_OUT
-ch ū q ù l iū l iū @GO_OUT
-z uò @SIT
-zh àn zh e @STAND_STILL
-w ò g è sh ǒu @SHAKE_HAND
-t ái sh ǒu @SHAKE_HAND
-j ī g è zh ǎng @HIGH_FIVE
-p āi sh ǒu @HIGH_FIVE
-d ěng zh e @HOLD_POSITION
-t íng @HOLD_POSITION
-b ù zh ǔn d òng @HOLD_POSITION
-b ù x ǔ d òng @HOLD_POSITION
-l ǎo sh í d iǎn @HOLD_POSITION
-d ěng d ěng @HOLD_POSITION
-s ōng k āi @DROP
-s ōng k ǒu @DROP
 b ì z uǐ @QUIET
 b ié j iào @QUIET
 b ù x ǔ j iào @QUIET
-K AH1 M HH IY1 R @COME
-SH EY1 K HH AE1 N D Z @SHAKE_HAND
-HH AY1 F AY1 V @HIGH_FIVE
-S IH1 T @SIT
-L AY1 D AW1 N @LIE_DOWN
-S T AE1 N D AH1 P @STAND_UP
-W EY1 T @WAIT
-F AA1 L OW0 M IY1 @FOLLOW
-R OW1 L OW1 V ER0 @ROLL_OVER
-S P IH1 N @SPIN
-K AH1 M B AE1 K @COME
-D R AA1 P IH1 T @DROP
-P L EY1 D EH1 D @PLAY_DEAD
+d ěng d ěng @HOLD_POSITION
+b ié d òng @HOLD_POSITION
+b ù zh ǔn d òng @HOLD_POSITION
+b ù x ǔ d òng @HOLD_POSITION
+l ǎo sh í d iǎn @HOLD_POSITION
+b ù k ě y ǐ @HOLD_POSITION
+g ēn w ǒ z ǒu @FOLLOW
+g ēn zh e w ǒ @FOLLOW
+g ēn sh àng @FOLLOW
+g ēn w ǒ l ái @FOLLOW
+g uò l ái @COME
+h uí l ái @COME
+l ái zh è @COME
+d ào w ǒ zh è ér l ái @COME
+z ǒu sh àng q ián l ái @COME
+z ài g uò l ái d iǎn @APPROACH
+z ài g uò l ái x iē @APPROACH
+k ào j ìn d iǎn @APPROACH
+w ǎng h òu t uì @BACK_UP
+k ào h òu @BACK_UP
+t uì h òu @BACK_UP
+h òu t uì @BACK_UP
+w ǎng h òu sh āo sh āo @BACK_UP
+z uò x ià @SIT
+d ūn x ià @SIT
+p ā x ià @LIE_DOWN
+t ǎng x ià @LIE_DOWN
+zh àn q ǐ l ái @STAND_UP
+q ǐ l ái @STAND_UP
+zh àn h ǎo @STAND_UP
+zh àn zh e @STAND_UP
+w ò sh ǒu @SHAKE_HAND
+w ò g è sh ǒu @SHAKE_HAND
+t ái sh ǒu @SHAKE_HAND
+w ò sh ǒu sh ǒu @SHAKE_HAND
+sh ǒu sh ǒu @SHAKE_HAND
+j ī zh ǎng @HIGH_FIVE
+j ī g è zh ǎng @HIGH_FIVE
+p āi sh ǒu @HIGH_FIVE
+zh uàn q uān @SPIN
+zh uǎn y ī q uān @SPIN
+zh uǎn g è q uān @SPIN
+zh uǎn y ī zh uǎn @SPIN
+t ǔ d iào @DROP
+f àng x ià @DROP
+s ōng k āi @DROP
+s ōng k ǒu @DROP
+zh āng z uǐ @DROP
+b ù k ě y ǐ ch ī @DROP
+b ù k ě y ǐ y ǎo @DROP
+zh uāng s ǐ @PLAY_DEAD
+d ào x ià l ái @PLAY_DEAD

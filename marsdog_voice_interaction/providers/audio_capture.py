@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -35,7 +35,8 @@ class BufferedAudioCapture:
     def __init__(self, sample_rate: int, device: Any, sounddevice: Any,
                  buffer_sec: float, read_timeout_sec: float,
                  history_sec: float = 0.0, arecord_device: Any = None,
-                 reconnect_interval_sec: float = 0.0) -> None:
+                 reconnect_interval_sec: float = 0.0,
+                 listener: Callable[[float, np.ndarray], None] | None = None) -> None:
         self.sample_rate = sample_rate
         self.device = device
         # PortAudio display names and ALSA PCM identifiers are different.
@@ -58,6 +59,8 @@ class BufferedAudioCapture:
         self._history_lock = threading.Lock()
         self._delivery_active = self.history_sec <= 0.0
         self._deliver_after = 0.0
+        # Sees every chunk, including standby audio; must return immediately.
+        self.listener = listener
         self._thread = threading.Thread(target=self._run, name="voice-microphone", daemon=True)
 
     def start(self) -> None:
@@ -101,6 +104,12 @@ class BufferedAudioCapture:
                 except queue.Full:
                     self._gap.set()
                     self._discard()
+        listener = self.listener
+        if listener is not None:
+            try:
+                listener(captured_at, samples)
+            except Exception:
+                logger.exception("Microphone listener failed")
 
     def snapshot(self, end_monotonic: float, duration_sec: float) -> np.ndarray:
         """Copy bounded microphone history ending at a hardware wake event."""

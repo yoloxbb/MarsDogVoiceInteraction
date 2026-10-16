@@ -140,6 +140,7 @@ class AudioSherpaProvider(BaseProvider):
         self._chunk_callback: (
             Callable[[np.ndarray, int], None] | None
         ) = None
+        self._standby_listener: Callable[[float, np.ndarray], None] | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────
 
@@ -249,6 +250,19 @@ class AudioSherpaProvider(BaseProvider):
     ) -> None:
         """Observe live microphone chunks without opening a second device."""
         self._chunk_callback = callback
+
+    def set_standby_listener(
+        self, listener: Callable[[float, np.ndarray], None] | None,
+    ) -> bool:
+        """Feed every microphone chunk, standby included, to ``listener``.
+
+        Only the always-open microphone (``wake_history_sec`` > 0) hears
+        standby audio; returns False otherwise.
+        """
+        self._standby_listener = listener
+        if self._buffered_capture is not None:
+            self._buffered_capture.listener = listener
+        return bool(self._wake_history_sec)
 
     def set_utterance_id(self, utterance_id: str) -> None:
         """Associate the next capture with the node's utterance ID."""
@@ -481,6 +495,7 @@ class AudioSherpaProvider(BaseProvider):
                 history_sec=self._wake_history_sec,
                 arecord_device=self._arecord_device,
                 reconnect_interval_sec=self._reconnect_interval_sec,
+                listener=self._standby_listener,
             )
             self._buffered_capture.start()
         return self._buffered_capture
@@ -497,7 +512,7 @@ class AudioSherpaProvider(BaseProvider):
                 "has_voice": bool(samples.size)}
 
     def prepare_for_wakeup(self, received_monotonic: float) -> None:
-        """Drop the wake word from the command stream before the next VAD turn."""
+        """Resume delivery at the node's boundary, including any bounded overlap."""
         if self._wake_history_sec and self.available:
             self._ensure_buffered_capture().start_delivery(received_monotonic)
 

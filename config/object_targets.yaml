@@ -1,4 +1,4 @@
-version: "2026-08-31-v1"
+version: "2026-10-15-v2"
 
 # Canonical names must exactly match the visual detector class names consumed
 # downstream.  Aliases are matched against normalized ASR text, longest first.
@@ -14,7 +14,7 @@ targets:
   - name: dog bowl
     aliases: [dog bowl, pet bowl, 狗碗, 饭碗, 食盆]
   - name: dog leash
-    aliases: [dog leash, leash, 牵引绳, 狗绳]
+    aliases: [dog leash, leash, 牵引绳, 狗绳, 狗绳子]
   - name: dog treat bag
     aliases: [dog treat bag, treat bag, 狗零食袋, 零食袋]
   - name: dog food can

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future
+import json
 from pathlib import Path
 import sys
 import threading
@@ -122,8 +123,10 @@ class _NodeHarness:
     _poll = VoiceInteractionNode._poll
     _poll_direct_mock = VoiceInteractionNode._poll_direct_mock
     _handle_wakeup = VoiceInteractionNode._handle_wakeup
+    _normalize_wakeup_direction = VoiceInteractionNode._normalize_wakeup_direction
     _poll_wake_identity_result = VoiceInteractionNode._poll_wake_identity_result
     _publish_wake_identity_result = VoiceInteractionNode._publish_wake_identity_result
+    _utterance_speaker_event_fields = VoiceInteractionNode._utterance_speaker_event_fields
     _identify_wake_speaker = VoiceInteractionNode._identify_wake_speaker
     _begin_interaction = VoiceInteractionNode._begin_interaction
     _refresh_interaction_activity = (
@@ -203,6 +206,239 @@ class _NodeHarness:
         raise AssertionError("silence must not enter speech processing")
 
 
+def test_sound_source_event_is_published_while_idle_without_starting_voice_capture():
+    audio, wakeup = _FakeAudio(), _FakeWakeup()
+    node = _NodeHarness(audio, wakeup)
+    node._interaction_active = False
+    node._interaction_id = ""
+    sound = {
+        "event_type": "EVT_VOICE_SOUND_SOURCE_DETECTED", "sound_id": "sound-1",
+        "interaction_id": "", "wake_id": "", "utterance_id": "",
+        "doa": 95.0, "doa_valid": True,
+    }
+    node._sound_source = SimpleNamespace(poll=lambda: [sound])
+    node._poll()
+    assert node.published == [sound]
+    assert audio.start_count == 0 and node._last_interaction_time == 100.0
+    assert node._interaction_active is False and wakeup.poll_count == 1
+
+
+@pytest.mark.parametrize("word", ["这儿", "这里这里", "到这来"])
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("direction", [
+    {"wake_angle": 0, "wake_angle_valid": True},
+    {"wake_angle": 95, "wake_angle_valid": True},
+    {"wake_angle": -1, "wake_angle_valid": False},
+    {"wake_angle": False},
+    {"wake_angle": -1, "wake_angle_valid": True},
+    {"wake_angle": 95, "wake_angle_valid": False},
+    {"wake_angle": 95},
+    {"wake_angle": 95, "wake_angle_valid": "true"},
+    {"wake_angle": float("nan"), "wake_angle_valid": True},
+    {"wake_angle": False, "wake_angle_valid": True},
+    {"wake_angle": "95", "wake_angle_valid": True},
+])
+def test_call_here_preserves_session_capture_and_pending_work(monkeypatch, word, active, direction):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    audio = _FakeAudio()
+    audio.capturing = active
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._interaction_active = active
+    node._interaction_id = "existing-session" if active else ""
+    node._wake_speaker_enabled = True
+    node._latest_wake_id = "existing-wake"
+    future = Future()
+    pending = (node._interaction_id, node._latest_wake_id, future)
+    node._pending_wake_identity = pending
+    cleared = []
+    node._speech_processing = SimpleNamespace(clear=lambda: cleared.append(True))
+    latest_audio = {"utterance_id": "existing-utterance"}
+    node._latest_audio = latest_audio
+    before = (node._interaction_id, node._last_interaction_time, node._last_wake_received,
+              node._last_wake_word, node._state_machine.state, node._state_machine.previous_state)
+
+    # False means the current utterance may continue, even when a notification is sent.
+    assert not node._handle_wakeup({
+        "wake_word": word, "received_monotonic": 101.0,
+        "wake_provider": "respeaker_sherpa", **direction,
+    }, audio)
+
+    accepted = (active and direction.get("wake_angle_valid") is True
+                and type(direction.get("wake_angle")) in (int, float)
+                and 0 <= direction["wake_angle"] < 360)
+    assert len(node.published) == int(accepted)
+    if accepted:
+        event = node.published[0]
+        assert event["event_type"] == "EVT_VOICE_CALL_HERE"
+        assert event["wake_word"] == word
+        assert event["interaction_id"] == event["wake_id"] == ""
+        assert event["utterance_id"]
+        assert event["speaker_status"] == "not_checked"
+        assert event["should_trigger_behavior_tree"] is event["is_executable"] is False
+        assert event["wake_angle_valid"] is True
+        assert event["wake_angle"] == direction["wake_angle"]
+    else:
+        assert getattr(node, "_last_call_here_received", float("-inf")) == float("-inf")
+    assert node._interaction_active is active
+    assert before == (node._interaction_id, node._last_interaction_time, node._last_wake_received,
+                      node._last_wake_word, node._state_machine.state, node._state_machine.previous_state)
+    assert node._latest_wake_id == "existing-wake"
+    assert node._latest_audio is latest_audio and node._pending_wake_identity is pending
+    assert not future.cancelled() and cleared == []
+    assert audio.capturing is active and audio.start_count == audio.cancel_count == 0
+
+
+def test_call_here_requires_prior_wakeup_without_consuming_debounce(monkeypatch):
+    clock = [101.0]
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: clock[0])
+    audio, wakeup = _FakeAudio(), _FakeWakeup()
+    node = _NodeHarness(audio, wakeup)
+    node._interaction_active = False
+    node._interaction_id = ""
+    wakeup.events.append({"wake_word": "这儿", "wake_angle": 95, "wake_angle_valid": True})
+    node._poll()
+    assert node.published == []
+    assert not node._interaction_active and audio.start_count == 0
+    clock[0] += 0.1
+    wakeup.events.append({"wake_word": "这里这里", "wake_angle": 95, "wake_angle_valid": True})
+    node._poll()
+    assert node.published == []
+    wakeup.events.append({"wake_word": "旺财旺财", "wake_angle": 95})
+    node._poll()
+    assert [event["event_type"] for event in node.published] == ["EVT_VOICE_WAKEUP"]
+    assert node._interaction_active and audio.start_count == 1
+    clock[0] += 0.1
+    wakeup.events.append({"wake_word": "这儿", "wake_angle": 95, "wake_angle_valid": True})
+    node._poll()
+    assert node.published[-1]["event_type"] == "EVT_VOICE_CALL_HERE"
+    wakeup.events.append({"wake_word": "这里这里", "wake_angle": 95, "wake_angle_valid": True})
+    node._poll()
+    assert len(node.published) == 2
+
+
+@pytest.mark.parametrize("word", ["这儿", "这里这里", "到这来"])
+@pytest.mark.parametrize("active", [False, True])
+def test_device_keyword_requires_an_awake_session(monkeypatch, word, active):
+    from marsdog_voice_interaction.providers.wakeup_respeaker_serial import WakeupReSpeakerSerialProvider
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    event = WakeupReSpeakerSerialProvider({})._parse_event({
+        "type": "keyword", "keyword": word, "id": 101,
+        "score": 0.08, "threshold": 0.02, "min_score": 0.02,
+        "doa": 95, "doa_valid": True, "doa_age_ms": 80, "audio_age_ms": 180,
+        "_received_monotonic": 101.0,
+    })
+    audio, wakeup = _FakeAudio(), _FakeWakeup()
+    node = _NodeHarness(audio, wakeup)
+    node._interaction_active = active
+    node._interaction_id = "awake-session" if active else ""
+    wakeup.events.append(event)
+    node._poll()
+    business = [event for event in node.published if event["event_type"] == "EVT_VOICE_CALL_HERE"]
+    assert len(business) == int(active)
+    if active:
+        assert business[0]["intent_source"] == "respeaker_keyword"
+    assert node._interaction_active is active
+
+
+def test_call_here_does_not_supersede_an_in_flight_utterance(monkeypatch):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    audio, wakeup = _FakeAudio(), _FakeWakeup()
+    node = _NodeHarness(audio, wakeup)
+    node._latest_wake_id = "current-wake"
+    wakeup.events.append({"wake_word": "到这来", "wake_angle": 95, "wake_angle_valid": True})
+    assert not VoiceInteractionNode._wakeup_supersedes_utterance(node, "current-wake")
+    assert node.published[0]["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert node._latest_wake_id == "current-wake"
+
+
+def test_call_here_rejections_do_not_hide_the_next_valid_keyword(monkeypatch):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    for fields in [
+        {"received_monotonic": 99.5, "wake_angle": 95, "wake_angle_valid": True},
+        {"wake_angle": -1, "wake_angle_valid": True},
+        {"wake_angle": 95, "wake_angle_valid": False},
+    ]:
+        assert not node._handle_wakeup({"wake_word": "这儿", **fields}, None)
+    assert node.published == []
+    assert not node._handle_wakeup({
+        "wake_word": "这儿", "wake_angle": 0, "wake_angle_valid": True,
+    }, None)
+    assert len(node.published) == 1 and node.published[0]["wake_angle"] == 0
+
+
+def test_call_here_stops_publishing_after_stop_listening(monkeypatch):
+    clock = [101.0]
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: clock[0])
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    keyword = {"wake_word": "这儿", "wake_angle": 95, "wake_angle_valid": True}
+    node._handle_wakeup(keyword, None)
+    node._end_interaction("stop_listening")
+    assert not node._interaction_active
+    clock[0] += 1.0
+    before = list(node.published)
+    node._handle_wakeup(keyword, None)
+    assert node.published == before
+
+
+def test_call_here_wire_event_does_not_inherit_wake_or_identity(monkeypatch):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._latest_wake_id = "current-wake"
+    node._config = {}
+    wire = []
+    node._audio_pub = SimpleNamespace(publish=lambda message: wire.append(json.loads(message.data)))
+    node._publish = lambda event: VoiceInteractionNode._publish(node, event)
+    assert not node._handle_wakeup({
+        "wake_word": "这儿", "wake_provider": "respeaker_sherpa",
+        "wake_angle": 73, "wake_angle_valid": True, "wake_angle_age_ms": 20,
+        "wake_confidence": 1.0, "wake_keyword_id": 5,
+        "interaction_id": "old-session", "wake_id": "old-wake",
+        "speaker_id": "owner", "speaker_confidence": 0.9,
+        "speaker_role": "owner", "speaker_status": "matched",
+    }, node._providers["audio"])
+    assert len(wire) == 1
+    event = wire[0]
+    assert event["schema_version"] == 2 and event["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert event["interaction_id"] == event["wake_id"] == "" and event["utterance_id"]
+    assert event["speaker_id"] == "unknown" and event["speaker_confidence"] == 0.0
+    assert event["speaker_status"] == "not_checked"
+    assert event["header"]["frame_id"] == "microphone_array"
+    assert event["wake_angle"] == 73 and event["wake_angle_valid"] is True
+    assert event["wake_word"] == "这儿" and event["wake_keyword_id"] == 5
+    assert event["intent_source"] == "respeaker_sherpa" and event["dispatch_role"] == "call_here"
+    assert event["is_executable"] is event["should_trigger_behavior_tree"] is False
+
+
+@pytest.mark.parametrize("event_type", ["EVT_VOICE_WAKEUP", "EVT_VOICE_CALL_HERE"])
+@pytest.mark.parametrize("active", [False, True])
+def test_direct_mock_call_here_requires_an_awake_session(monkeypatch, event_type, active):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    event = {"event_type": event_type, "wake_word": "这儿", "wake_angle": 95, "wake_angle_valid": True}
+    provider = SimpleNamespace(poll_event=lambda: event)
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._interaction_active = active
+    node._interaction_id = "awake-session" if active else ""
+    node._poll_direct_mock(provider)
+    assert len(node.published) == int(active)
+    if active:
+        assert node.published[0]["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert node._interaction_active is active
+
+
+@pytest.mark.parametrize("enrolling", [False, True])
+def test_call_here_rejects_stale_events_and_respects_enrollment(monkeypatch, enrolling):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    audio = _FakeAudio()
+    node = _NodeHarness(audio, _FakeWakeup())
+    if enrolling:
+        node._enrollment.speaker_session = SimpleNamespace(done=False)
+    assert not node._handle_wakeup({
+        "wake_word": "这儿", "received_monotonic": 101.0 if enrolling else 98.0,
+    }, audio)
+    assert node.published == [] and audio.start_count == 0
+
+
 def test_silence_does_not_refresh_idle_timer_and_wakeup_recovers(
     monkeypatch: Any,
 ) -> None:
@@ -230,7 +466,7 @@ def test_silence_does_not_refresh_idle_timer_and_wakeup_recovers(
     assert node.published[-1]["state_reason"] == "interaction_timeout"
     assert node.published[-1]["interaction_id"] == "interaction-test"
 
-    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2"})
+    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2", "wake_angle": 0.0})
     clock[0] = 112.0
     node._poll()
 
@@ -311,7 +547,7 @@ def test_refused_capture_start_drops_the_new_utterance_id(
     """A refused start must not leave its ID claiming the device."""
     audio = _FakeAudio(start_result=False)
     wakeup = _FakeWakeup()
-    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1"})
+    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1", "wake_angle": 0.0})
     node = _NodeHarness(audio, wakeup)
     monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
 
@@ -334,7 +570,7 @@ def test_wakeup_during_capture_cancels_the_stale_worker_first(
     audio = _FakeAudio()
     audio.capturing = True
     wakeup = _FakeWakeup()
-    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1"})
+    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1", "wake_angle": 0.0})
     node = _NodeHarness(audio, wakeup)
     monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
 
@@ -350,7 +586,7 @@ def test_wakeup_without_an_active_capture_does_not_cancel(
 ) -> None:
     audio = _FakeAudio()
     wakeup = _FakeWakeup()
-    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1"})
+    wakeup.events.append({"wake_word": "xiao3 wei1 xiao3 wei1", "wake_angle": 0.0})
     node = _NodeHarness(audio, wakeup)
     monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
 
@@ -369,7 +605,7 @@ def test_rewake_during_capture_keeps_session_and_refreshes_idle(
     node = _NodeHarness(audio, wakeup)
     clock = [105.0]
     monkeypatch.setattr(node_module.time, "monotonic", lambda: clock[0])
-    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2"})
+    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2", "wake_angle": 0.0})
 
     node._poll()
 
@@ -384,13 +620,13 @@ def test_rewake_during_capture_keeps_session_and_refreshes_idle(
     assert first_wake_id
 
     clock[0] = 105.2
-    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2"})
+    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2", "wake_angle": 0.0})
     node._poll()
     assert audio.cancel_count == 1
     assert node._latest_wake_id == first_wake_id
 
     clock[0] = 106.0
-    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2"})
+    wakeup.events.append({"wake_word": "ni2 hao3 wang4 cai2", "wake_angle": 0.0})
     node._poll()
     assert node._interaction_id == "interaction-test"
     assert node._last_interaction_time == 106.0
@@ -1464,6 +1700,7 @@ def test_wakeup_provider_reconnects_after_reader_thread_stops(
 
     monkeypatch.setattr(wakeup_module, "XFYunSerialReader", FakeReader)
     provider = WakeupXFYunSerialProvider({
+        "port": "/dev/test-wakeup",
         "reconnect_interval_sec": 0.0,
     })
     provider.start()
@@ -1508,3 +1745,224 @@ def test_real_wakeup_provider_is_retained_when_usb_is_missing_at_start(
 
     assert isinstance(provider, ReconnectingProvider)
     assert provider.started
+
+
+def test_unknown_or_unapproved_mock_wakeup_type_never_generates_fake_wakes():
+    node = SimpleNamespace(_config={"mock": {"enabled": False}})
+    for provider_type in ("respeaker_typo", "mock"):
+        with pytest.raises(ValueError):
+            VoiceInteractionNode._build_wakeup(node, {"type": provider_type})
+
+
+def test_flex_factory_retains_provider_while_handshake_is_pending(monkeypatch):
+    from marsdog_voice_interaction.providers.wakeup_respeaker_serial import WakeupReSpeakerSerialProvider
+    monkeypatch.setattr(WakeupReSpeakerSerialProvider, "start", lambda self: None)
+    node = SimpleNamespace(_config={"mock": {"enabled": False}})
+    provider = VoiceInteractionNode._build_wakeup(node, {"type": "respeaker_serial"})
+    assert isinstance(provider, WakeupReSpeakerSerialProvider)
+    assert not provider.is_available()
+
+
+def test_flex_wake_uses_full_snapshot_window_and_bounded_command_overlap(monkeypatch):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    audio = _FakeAudio()
+    snapshots, boundaries = [], []
+    audio.wake_audio_snapshot = lambda end, duration: snapshots.append((end, duration))
+    audio.prepare_for_wakeup = boundaries.append
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._wake_speaker_enabled = True
+    node._wake_command_pre_roll_sec = 0.3
+    assert node._handle_wakeup({"wake_word": "旺财旺财", "received_monotonic": 101.0,
+                               "wake_angle": 95.0, "wake_angle_valid": True}, audio)
+    assert snapshots == [(101.0, 2.5)]
+    assert boundaries == [100.7]
+    assert audio.start_count == 1
+    assert node.published[0]["event_type"] == "EVT_VOICE_WAKEUP"
+
+
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("direction", [
+    {"wake_angle": -1},
+    {"wake_angle": -1, "wake_angle_valid": True},
+    {"wake_angle": 95, "wake_angle_valid": False},
+    {"wake_angle": 0, "wake_angle_valid": False},
+    {"wake_angle": False},
+    {"wake_angle": 95, "wake_angle_valid": "false"},
+    {"wake_angle": float("nan")},
+    {"wake_angle": float("inf")},
+    {},
+])
+def test_invalid_wake_direction_still_starts_or_refreshes_listening(
+    monkeypatch, active, direction,
+):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    audio = _FakeAudio()
+    audio.capturing = active
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._interaction_active = active
+    node._interaction_id = "existing-session" if active else ""
+    node._wake_speaker_enabled = True
+    node._latest_wake_id = "existing-wake"
+    future = Future()
+    pending = (node._interaction_id, node._latest_wake_id, future)
+    node._pending_wake_identity = pending
+    cleared = []
+    node._speech_processing = SimpleNamespace(clear=lambda: cleared.append(True))
+    latest_audio = {"utterance_id": "existing-utterance"}
+    node._latest_audio = latest_audio
+    traces = []
+    node._trace = lambda record, **fields: traces.append((record, fields))
+
+    assert node._handle_wakeup({
+        "wake_word": "旺财旺财", "received_monotonic": 101.0, **direction,
+    }, audio)
+
+    wake = node.published[0]
+    assert wake["event_type"] == "EVT_VOICE_WAKEUP"
+    assert wake["wake_angle"] == -1.0
+    assert wake["wake_angle_valid"] is False
+    assert node._interaction_active
+    assert node._interaction_id
+    if active:
+        assert node._interaction_id == "existing-session"
+    assert node._latest_wake_id != "existing-wake"
+    assert wake["wake_id"] == node._latest_wake_id
+    # Missing audio affects identity only; it does not suppress the wake.
+    identity = node.published[1]
+    assert identity["event_type"] == "EVT_VOICE_WAKE_SPEAKER_RESULT"
+    assert identity["wake_id"] == wake["wake_id"]
+    assert identity["speaker_status"] == "unavailable"
+    assert node._last_interaction_time == 101.0
+    assert node._last_wake_received == 101.0
+    assert node._last_wake_word == "旺财旺财"
+    assert node._latest_audio is None
+    assert node._pending_wake_identity is None
+    assert future.cancelled()
+    assert cleared == [True]
+    assert audio.is_capturing()
+    assert audio.start_count == 1
+    assert audio.cancel_count == int(active)
+    assert any(name == "wake_direction_unavailable" for name, _ in traces)
+    assert any(name == "wakeup_accepted" for name, _ in traces)
+
+
+@pytest.mark.parametrize("direction", [
+    {"wake_angle": 0, "wake_angle_valid": True},
+    {"wake_angle": 95, "wake_angle_valid": True},
+    {"wake_angle": 0},  # Legacy providers omit the validity field.
+])
+def test_directionless_wake_preserves_debounce_and_next_valid_wake(monkeypatch, direction):
+    clock = [101.0]
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: clock[0])
+    audio = _FakeAudio()
+    wakeup = _FakeWakeup()
+    node = _NodeHarness(audio, wakeup)
+    node._interaction_active = False
+    node._interaction_id = ""
+    wakeup.events.append({"wake_word": "旺财旺财", "wake_angle": -1})
+
+    node._poll()
+    assert node._interaction_active
+    assert len(node.published) == 1
+    assert node.published[0]["wake_angle_valid"] is False
+
+    clock[0] += 0.1
+    wakeup.events.append({"wake_word": "旺财旺财", **direction})
+    node._poll()
+    assert len(node.published) == 1  # Duplicate inside the normal debounce window.
+    assert audio.start_count == 1
+    clock[0] += 1.0
+    wakeup.events.append({"wake_word": "旺财旺财", **direction})
+    node._poll()
+    assert [event["event_type"] for event in node.published] == ["EVT_VOICE_WAKEUP"] * 2
+    assert node.published[-1]["wake_angle"] == direction["wake_angle"]
+    assert node.published[-1]["wake_angle_valid"] is True
+    assert audio.start_count == 2
+
+
+@pytest.mark.parametrize("updates", [
+    {"doa": -1}, {"doa_valid": False}, {"doa": False},
+    {"doa_age_ms": 500, "audio_age_ms": 180},
+])
+def test_flex_invalid_direction_publishes_wake_and_starts_capture(monkeypatch, updates):
+    from marsdog_voice_interaction.providers.wakeup_respeaker_serial import WakeupReSpeakerSerialProvider
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    provider = WakeupReSpeakerSerialProvider({})
+    event = provider._parse_event({
+        "type": "wake", "keyword": "旺财旺财", "id": 1,
+        "score": 0.08, "threshold": 0.02, "min_score": 0.02,
+        "doa": 95, "doa_valid": True, "doa_age_ms": 80, "audio_age_ms": 180,
+        "_received_monotonic": 101.0, **updates,
+    })
+    assert event is not None  # Internal notification retains diagnostic metadata.
+    wakeup = _FakeWakeup()
+    wakeup.events.append(event)
+    audio = _FakeAudio()
+    node = _NodeHarness(audio, wakeup)
+    node._interaction_active = False
+    node._interaction_id = ""
+
+    node._poll()
+
+    assert len(node.published) == 1
+    assert node.published[0]["event_type"] == "EVT_VOICE_WAKEUP"
+    assert node.published[0]["wake_angle_valid"] is False
+    assert node.published[0]["wake_angle"] == -1.0
+    assert node.published[0]["wake_angle_age_ms"] == event["wake_angle_age_ms"]
+    assert node._interaction_active
+    assert audio.start_count == 1
+
+
+@pytest.mark.parametrize("received", [98.0, 102.0, float("nan"), float("inf"), "invalid"])
+def test_directionless_wake_does_not_bypass_event_freshness(monkeypatch, received):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    audio = _FakeAudio()
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._interaction_active = False
+    assert not node._handle_wakeup({
+        "wake_word": "旺财旺财", "received_monotonic": received,
+        "wake_angle": -1, "wake_angle_valid": False,
+    }, audio)
+    assert node.published == []
+    assert not node._interaction_active
+    assert audio.start_count == 0
+
+
+def test_directionless_wake_does_not_interrupt_enrollment(monkeypatch):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    audio = _FakeAudio()
+    node = _NodeHarness(audio, _FakeWakeup())
+    node._enrollment.speaker_session = SimpleNamespace(done=False)
+    assert not node._handle_wakeup({"wake_word": "旺财旺财", "wake_angle": -1}, audio)
+    assert node.published == []
+    assert audio.start_count == 0
+
+
+@pytest.mark.parametrize("direction", [
+    {"wake_angle": -1}, {"wake_angle": 95, "wake_angle_valid": False},
+])
+def test_direct_mock_accepts_wake_without_authorizing_its_direction(monkeypatch, direction):
+    monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
+    provider = MockEventProvider({"enabled": True})
+    event = {**provider.build_event("EVT_VOICE_WAKEUP"), **direction}
+    provider.poll_event = lambda: event
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._interaction_active = False
+    node._interaction_id = ""
+
+    node._poll_direct_mock(provider)
+
+    assert node.published[0]["event_type"] == "EVT_VOICE_WAKEUP"
+    assert node.published[0]["wake_angle_valid"] is False
+    assert node.published[0]["wake_angle"] == -1.0
+    assert node._interaction_active
+
+
+def test_failed_real_audio_initialization_cannot_create_mock_audio(monkeypatch):
+    monkeypatch.setattr(AudioSherpaProvider, "start", lambda self: None)
+    node = SimpleNamespace(_config={"mock": {"enabled": False}})
+    with pytest.raises(RuntimeError, match="refusing mock"):
+        VoiceInteractionNode._build_audio(node, {"type": "sherpa"})
+    for provider_type in ("sherpa_typo", "mock"):
+        with pytest.raises(ValueError):
+            VoiceInteractionNode._build_audio(node, {"type": provider_type})

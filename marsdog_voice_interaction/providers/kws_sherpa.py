@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from marsdog_voice_interaction.core.kws_repeat_policy import KWSRepeatPolicy
 from marsdog_voice_interaction.messages.intent_protocol import (
     COMMAND_KEY_TO_COMMAND_ID,
     COMMAND_KEY_TO_NLU,
@@ -62,15 +63,20 @@ class KWSSherpaProvider(BaseProvider):
         self._event_confidence = float(
             config.get("event_confidence", 0.90)
         )
-        self._guard_enabled = bool(config.get("negation_guard_enabled", False)) and (
-            str(config.get("publish_mode", "deferred")).strip().lower() == "immediate"
-        )
+        # Deferred publication also needs acoustic veto evidence when ASR
+        # loses a negation prefix. The node keeps whole-phrase control exceptions.
+        self._guard_enabled = bool(config.get("negation_guard_enabled", False))
         self._negation_keywords_file = str(config.get("negation_keywords_file", ""))
         self._guard_window_sec = float(config.get("negation_guard_window_sec", 0.25))
         if self._guard_enabled and (
             not math.isfinite(self._guard_window_sec) or self._guard_window_sec <= 0
         ):
             raise ValueError("negation_guard_window_sec must be a finite positive number")
+        self._repeat_policy = KWSRepeatPolicy.from_config(config)
+        self._repeat_key = ""
+        self._repeat_hits = 0
+        self._repeat_last_sec = 0.0
+        self._repeat_early_queued: set[str] = set()
 
         self._spotter: Any = None
         self._stream: Any = None
@@ -192,6 +198,10 @@ class KWSSherpaProvider(BaseProvider):
             self._audio_received_sec = 0.0
             self._pending_commands.clear()
             self._seen_actions.clear()
+            self._repeat_key = ""
+            self._repeat_hits = 0
+            self._repeat_last_sec = 0.0
+            self._repeat_early_queued.clear()
             self._utterance_decodes = 0
             self._utterance_hits = 0
             with self._event_lock:
@@ -302,12 +312,34 @@ class KWSSherpaProvider(BaseProvider):
         if labels is None or event_type is None:
             logger.warning("KWS ignored unmapped keyword label: %r", keyword)
             return
-        if command_key in self._seen_actions:
-            return
-        self._seen_actions.add(command_key)
         if self._guard_reason:
             logger.info("KWS command suppressed: command=%s reason=%s", command_key, self._guard_reason)
             return
+        # Count separate detections before the ordinary per-utterance dedupe.
+        # Different command labels or a long gap break the repeat sequence.
+        repeat_early = False
+        policy = self._repeat_policy
+        if command_key in policy.command_keys:
+            gap = self._audio_received_sec - self._repeat_last_sec
+            if self._repeat_key != command_key or gap > policy.max_gap_sec:
+                self._repeat_key = command_key
+                self._repeat_hits = 1
+                self._repeat_last_sec = self._audio_received_sec
+            elif gap >= policy.min_gap_sec:
+                self._repeat_hits += 1
+                self._repeat_last_sec = self._audio_received_sec
+            repeat_early = (
+                self._repeat_hits >= policy.min_hits
+                and command_key not in self._repeat_early_queued
+            )
+        else:
+            self._repeat_key = ""
+            self._repeat_hits = 0
+        if command_key in self._seen_actions and not repeat_early:
+            return
+        self._seen_actions.add(command_key)
+        if repeat_early:
+            self._repeat_early_queued.add(command_key)
 
         social, intent, control = labels
         event = classification_to_event(
@@ -332,6 +364,9 @@ class KWSSherpaProvider(BaseProvider):
             "action": command_key,
             "language": "zh-en",
         })
+        if repeat_early:
+            event["kws_repeat_early"] = True
+            event["kws_repeat_hits"] = self._repeat_hits
         if self._guard_enabled:
             event["kws_guard_window_ms"] = round(self._guard_window_sec * 1000.0, 2)
             self._pending_commands.append((self._audio_received_sec + self._guard_window_sec, event))

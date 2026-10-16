@@ -290,8 +290,7 @@ class XFYunSerialReader:
         while self._running:
             try:
                 if self._ser is None or not self._ser.is_open:
-                    time.sleep(0.05)
-                    continue
+                    raise serial.SerialException("Serial port unexpectedly closed")
 
                 # Read available bytes (at least 1, to avoid busy-wait)
                 data = self._ser.read(self._ser.in_waiting or 1)
@@ -303,7 +302,9 @@ class XFYunSerialReader:
 
                 time.sleep(0.005)
 
-            except serial.SerialException as e:
+            except (serial.SerialException, OSError) as e:
+                # in_waiting uses ioctl and may raise a plain OSError on USB
+                # removal. Stop so the provider can resolve and reopen a port.
                 logger.error(f"Serial error: {e}")
                 self._running = False
                 self._last_error = str(e)

@@ -154,6 +154,18 @@ class ObjectTargetResolver:
                 )
         return None
 
+    def resolve_exact(self, mention: str) -> ObjectTargetMatch | None:
+        """Resolve one extracted noun, without matching part of another noun.
+
+        Full-sentence model routing uses ``resolve``; deterministic command
+        templates must not turn '篮球鞋' into a ball or '球和飞盘' into one target.
+        """
+        normalized = normalize_object_text(mention)
+        for normalized_alias, object_name, alias in self._alias_routes:
+            if normalized == normalized_alias:
+                return ObjectTargetMatch(object_name, mention, alias, self.version)
+        return None
+
     def unsupported_slots(self, asr_text: str) -> list[dict[str, str]]:
         """Build explicit NONE slots for an unsupported object mention."""
 
