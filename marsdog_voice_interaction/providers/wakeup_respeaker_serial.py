@@ -85,13 +85,15 @@ class WakeupReSpeakerSerialProvider(BaseProvider):
         # Keep invalid direction metadata so downstream can skip orientation.
         angle, doa_age, audio_age = -1.0, -1.0, -1.0
         valid = False
+        snapshot_valid = False
         queue_ms = max(0.0, (time.monotonic() - received) * 1000.0)
         try:
             angle = _number(raw["doa"])
             doa_age = _number(raw["doa_age_ms"])
             audio_age = _number(raw["audio_age_ms"])
-            valid = (raw.get("doa_valid") is True and 0 <= angle < 360
-                     and doa_age >= 0 and audio_age >= 0
+            snapshot_valid = (raw.get("doa_valid") is True and 0 <= angle < 360
+                              and doa_age >= 0 and audio_age >= 0)
+            valid = (snapshot_valid
                      and doa_age + audio_age + queue_ms <= self.max_angle_age_ms)
         except (KeyError, ValueError, TypeError, OverflowError):
             pass
@@ -113,7 +115,11 @@ class WakeupReSpeakerSerialProvider(BaseProvider):
             "wake_angle_source": str(raw.get("doa_source", "none")),
             "received_monotonic": received,
             "latency_ms": queue_ms,
+            "_wake_angle_stale": snapshot_valid and not valid,
         }
+        if doa_age >= 0 and audio_age >= 0:
+            event["_wake_angle_measured_monotonic"] = received - (doa_age + audio_age) / 1000.0
+            event["_wake_angle_max_age_ms"] = self.max_angle_age_ms
         kind = "call-here" if event["event_type"] == EVT_VOICE_CALL_HERE else "wakeup"
         logger.info("Flex %s: word=%r score=%.4f angle=%.1f valid=%s age_ms=%.1f",
                     kind, word, score, event["wake_angle"], valid, event["wake_angle_age_ms"])

@@ -20,7 +20,9 @@ and message.get("doa_valid") is True
 `doa_valid=false` 不发布，字符串 `"true"/"false"` 也不按 JSON 布尔值处理；
 `start/end` 不触发。每条满足条件的 `update` 各发布一次，不要求先收到 `start`，
 不等待 `end`、录音截取或 YAMNet 分类。额外校验角度为有限的 `[0,360)` 数值，
-方向年龄非负，方向年龄加主机排队时间不超过 600 ms，避免队列里的旧角度触发行为。
+方向年龄非负，方向年龄加截至发布的全部主机等待时间不超过 600 ms，避免旧角度触发行为。
+发布前再次检查时效；`doa_age_ms` 和 `header.stamp` 对应同一发布时间，
+`sound_trigger_stamp` 始终保留原始更新接收时间。
 
 设备这类 JSON 没有具体声音类别；本事件表示“检测到有有效方向的声音活动”。
 `speech=0` 的非人声同样允许通过。当前事件不使用声音类别白名单。
@@ -32,7 +34,7 @@ and message.get("doa_valid") is True
 | `event_type` | `EVT_VOICE_SOUND_SOURCE_DETECTED` |
 | `sound_id` | 此次有效更新事件的唯一 ID，用于下游去重 |
 | `sound_trigger_stamp` | CDC 更新的接收时间，Unix 秒 |
-| `doa/doa_valid/doa_age_ms/doa_source` | 设备原始角度、有效性、包含主机排队时间的方向年龄、来源 |
+| `doa/doa_valid/doa_age_ms/doa_source` | 设备原始角度、有效性、截至发布的方向年龄、来源 |
 | `header.stamp/header.frame_id` | 发布时间 / `microphone_array` |
 | `intent_source/dispatch_role` | `respeaker_vad/sound_source` |
 | `should_trigger_behavior_tree/is_executable` | `true/false`；交给 Tree 路由通用序列 |

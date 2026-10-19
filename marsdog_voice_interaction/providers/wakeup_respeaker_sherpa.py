@@ -127,9 +127,15 @@ class WakeupReSpeakerSherpaProvider(WakeupReSpeakerSerialProvider):
                     self._spotter.reset_stream(stream)
                     self._events.append(self._keyword_event(word, captured_at))
 
+    def _recent_bearing(self, heard_at: float, now: float) -> tuple[float, float, str] | None:
+        # Filter freshness before preferring auto over fixed-beam estimates.
+        since = max(heard_at - self._doa_window_sec, now - self.max_angle_age_ms / 1000.0)
+        return self.reader.recent_doa(since, heard_at)
+
     def _keyword_event(self, word: str, heard_at: float) -> dict[str, Any]:
-        doa = self.reader.recent_doa(heard_at - self._doa_window_sec, heard_at)
-        age_ms = -1.0 if doa is None else (heard_at - doa[0]) * 1000.0
+        now = time.monotonic()
+        doa = self._recent_bearing(heard_at, now)
+        age_ms = -1.0 if doa is None else max(0.0, now - doa[0]) * 1000.0
         event = {
             "header": {"frame_id": WAKE_ANGLE_FRAME_ID},
             "event_type": EVT_VOICE_CALL_HERE if word.strip() in CALL_HERE_KEYWORDS else "wakeup",
@@ -146,8 +152,11 @@ class WakeupReSpeakerSherpaProvider(WakeupReSpeakerSerialProvider):
             "wake_audio_age_ms": -1.0,
             "wake_angle_source": "none" if doa is None else doa[2],
             "received_monotonic": heard_at,
-            "latency_ms": max(0.0, (time.monotonic() - heard_at) * 1000.0),
+            "latency_ms": max(0.0, (now - heard_at) * 1000.0),
         }
+        if doa is not None:
+            event["_wake_angle_measured_monotonic"] = doa[0]
+            event["_wake_angle_max_age_ms"] = self.max_angle_age_ms
         kind = "call-here" if event["event_type"] == EVT_VOICE_CALL_HERE else "wakeup"
         logger.info("Sherpa %s: word=%r angle=%.1f valid=%s age_ms=%.1f",
                     kind, word, event["wake_angle"], event["wake_angle_valid"], age_ms)
@@ -157,11 +166,14 @@ class WakeupReSpeakerSherpaProvider(WakeupReSpeakerSerialProvider):
         # The Flex bearing is often taken at the start of a long wake word and
         # is past max_angle_age_ms by the time the word is recognized.
         heard_at = event["received_monotonic"]
-        doa = self.reader.recent_doa(heard_at - self._doa_window_sec, heard_at)
+        now = time.monotonic()
+        doa = self._recent_bearing(heard_at, now)
         if doa is None:
             return
         event.update(wake_angle=doa[1], wake_angle_valid=True,
-                     wake_angle_age_ms=(heard_at - doa[0]) * 1000.0, wake_angle_source=doa[2])
+                     wake_angle_age_ms=max(0.0, now - doa[0]) * 1000.0, wake_angle_source=doa[2],
+                     _wake_angle_measured_monotonic=doa[0],
+                     _wake_angle_max_age_ms=self.max_angle_age_ms)
         kind = "call-here" if event["event_type"] == EVT_VOICE_CALL_HERE else "wakeup"
         logger.info("Flex %s bearing taken from the word: angle=%.1f age_ms=%.1f source=%s",
                     kind, doa[1], event["wake_angle_age_ms"], doa[2])
@@ -175,9 +187,11 @@ class WakeupReSpeakerSherpaProvider(WakeupReSpeakerSerialProvider):
                     event = self._events.popleft()
                 except IndexError:
                     return None
-            # Do not replace an invalid device keyword bearing with historical DOA.
-            # The node owns acceptance and debounce, including the awake-state gate.
+            # Recover stale snapshots only for call-here; explicit invalid or
+            # malformed device bearings must still fail the node's direction gate.
             if event["event_type"] == EVT_VOICE_CALL_HERE:
+                if from_device and event.get("_wake_angle_stale"):
+                    self._recover_bearing(event)
                 return event
             if from_device and not event["wake_angle_valid"]:
                 self._recover_bearing(event)

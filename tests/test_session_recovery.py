@@ -1908,7 +1908,7 @@ def test_flex_invalid_direction_publishes_wake_and_starts_capture(monkeypatch, u
     assert node.published[0]["event_type"] == "EVT_VOICE_WAKEUP"
     assert node.published[0]["wake_angle_valid"] is False
     assert node.published[0]["wake_angle"] == -1.0
-    assert node.published[0]["wake_angle_age_ms"] == event["wake_angle_age_ms"]
+    assert node.published[0]["wake_angle_age_ms"] == pytest.approx(event["wake_angle_age_ms"])
     assert node._interaction_active
     assert audio.start_count == 1
 
@@ -1966,3 +1966,119 @@ def test_failed_real_audio_initialization_cannot_create_mock_audio(monkeypatch):
     for provider_type in ("sherpa_typo", "mock"):
         with pytest.raises(ValueError):
             VoiceInteractionNode._build_audio(node, {"type": provider_type})
+
+
+@pytest.fixture
+def direction_wire_node():
+    node = _NodeHarness(_FakeAudio(), _FakeWakeup())
+    node._config = {}
+    wire = []
+    node._audio_pub = SimpleNamespace(publish=lambda message: wire.append(json.loads(message.data)))
+    node._publish = lambda event: VoiceInteractionNode._publish(node, event)
+    return node, wire
+
+
+@pytest.mark.parametrize("path, expected_age", [("serial", 460), ("sherpa", 300), ("recovered", 300)])
+def test_bearing_age_includes_provider_to_publish_delay(monkeypatch, direction_wire_node, path, expected_age):
+    from marsdog_voice_interaction.providers.wakeup_respeaker_sherpa import WakeupReSpeakerSherpaProvider
+    clock = [101.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "time", lambda: 1700000000.0 + clock[0])
+    provider = WakeupReSpeakerSherpaProvider({})
+    provider.reader._note_doa({"doa": 73, "doa_valid": True, "doa_age_ms": 0,
+                               "doa_source": "auto"}, 100.9)
+    if path == "sherpa":
+        event = provider._keyword_event("旺财旺财", 101.0)
+    else:
+        event = provider._parse_event({
+            "type": "wake", "keyword": "旺财旺财", "id": 1,
+            "score": 0.08, "threshold": 0.02, "min_score": 0.02,
+            "doa": 95, "doa_valid": True, "doa_age_ms": 80 if path == "serial" else 1100,
+            "audio_age_ms": 180, "_received_monotonic": 101.0,
+        })
+        if path == "recovered":
+            provider._recover_bearing(event)
+    node, wire = direction_wire_node
+    clock[0] += 0.2
+    assert node._handle_wakeup(event, None)
+    published = wire[0]
+    assert published["wake_angle_valid"] is True
+    assert published["wake_angle_age_ms"] == pytest.approx(expected_age)
+    assert published["header"]["stamp"] == pytest.approx(1700000101.2)
+    assert not any(key.startswith("_") for key in published)
+
+
+@pytest.mark.parametrize("word", ["旺财旺财", "这里这里"])
+def test_direction_expiring_during_publication_preserves_only_real_wake(monkeypatch, direction_wire_node, word):
+    clock = [101.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    node, wire = direction_wire_node
+    def publish_after_delay(event):
+        clock[0] += 0.01
+        return VoiceInteractionNode._publish(node, event)
+    node._publish = publish_after_delay
+    event = {
+        "wake_word": word, "received_monotonic": 101.0,
+        "wake_angle": 73, "wake_angle_valid": True, "wake_angle_age_ms": 596,
+        "_wake_angle_measured_monotonic": 100.404, "_wake_angle_max_age_ms": 600,
+    }
+    accepted = node._handle_wakeup(event, node._providers["audio"])
+    if word == "旺财旺财":
+        assert accepted and len(wire) == 1
+        assert wire[0]["wake_angle_valid"] is False and wire[0]["wake_angle"] == -1
+        assert wire[0]["wake_angle_age_ms"] == pytest.approx(606)
+        assert node._providers["audio"].start_count == 1
+    else:
+        assert not accepted and wire == []
+        assert not hasattr(node, "_last_call_here_received")
+        # A rejected publication must leave the keyword debounce window free.
+        node._publish = lambda event: VoiceInteractionNode._publish(node, event)
+        node._handle_wakeup({**event, "received_monotonic": clock[0],
+                             "_wake_angle_measured_monotonic": clock[0] - 0.1}, None)
+        assert len(wire) == 1 and wire[0]["event_type"] == "EVT_VOICE_CALL_HERE"
+
+
+def test_call_here_expiring_before_node_handling_does_not_consume_debounce(monkeypatch, direction_wire_node):
+    monkeypatch.setattr(time, "monotonic", lambda: 101.4)
+    node, wire = direction_wire_node
+    node._handle_wakeup({
+        "wake_word": "这里这里", "received_monotonic": 101.0,
+        "wake_angle": 73, "wake_angle_valid": True, "wake_angle_age_ms": 300,
+        "_wake_angle_measured_monotonic": 100.7, "_wake_angle_max_age_ms": 600,
+    }, None)
+    assert wire == [] and not hasattr(node, "_last_call_here_received")
+
+
+@pytest.mark.parametrize("delay, expected_count", [(0.2, 1), (0.7, 0)])
+def test_sound_source_age_and_header_follow_publication_time(monkeypatch, direction_wire_node, delay, expected_count):
+    from marsdog_voice_interaction.core.sound_source import SoundSourceEventRouter
+    clock = [101.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "time", lambda: 1700000000.0 + clock[0])
+    router = SoundSourceEventRouter(None, {}, clock=lambda: clock[0], wall_clock=time.time)
+    event = router._event({
+        "type": "vad", "state": "update", "doa": 73, "doa_valid": True,
+        "doa_age_ms": 30, "_received_monotonic": 101.0,
+    }, 101.0)
+    node, wire = direction_wire_node
+    clock[0] += delay
+    node._publish(event)
+    assert len(wire) == expected_count
+    if wire:
+        assert wire[0]["doa_age_ms"] == pytest.approx(230)
+        assert wire[0]["header"]["stamp"] == pytest.approx(1700000101.2)
+        assert wire[0]["sound_trigger_stamp"] == 1700000101.0
+        assert event["doa_age_ms"] == 30  # Refreshing never mutates or accumulates age.
+
+
+@pytest.mark.parametrize("age, valid", [(600.0, True), (600.001, False)])
+def test_published_direction_respects_inclusive_age_limit(monkeypatch, direction_wire_node, age, valid):
+    monkeypatch.setattr(time, "monotonic", lambda: 101.0)
+    node, wire = direction_wire_node
+    event = {
+        "event_type": "EVT_VOICE_CALL_HERE", "wake_angle": 73, "wake_angle_valid": True,
+        "_wake_angle_measured_monotonic": 101.0 - age / 1000,
+        "_wake_angle_max_age_ms": 600,
+    }
+    assert node._publish(event) is valid
+    assert len(wire) == int(valid)

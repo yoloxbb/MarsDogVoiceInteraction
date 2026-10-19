@@ -95,6 +95,9 @@ score 是模型匹配分值，不是正确概率。保留原始分数及两种�
 
 Flex 方向可用条件：doa_valid 为 JSON true，doa 在 [0,360)，年龄非负且有限，
 `doa_age_ms + audio_age_ms + 主机排队时间 <= max_angle_age_ms`（默认 600 ms）。
+主机排队时间计算到发布时刻，包含 provider 解码、节点轮询和发布前等待；
+内部保存方向测量时刻，更新年龄时不会将已经计入的延迟重复相加。
+`wake_angle_age_ms` 与 `header.stamp` 均以发布时间为准，发布前再次检查方向时效。
 这里不包含不可测的设备发送/USB 延迟，不保证精确音频同步。
 Provider 将无效方向标记为 `wake_angle=-1, wake_angle_valid=false`，保留年龄用于诊断。
 节点仍发布 `EVT_VOICE_WAKEUP`，开始或刷新会话、启动命令录音，并按配置处理唤醒声纹。
@@ -200,7 +203,11 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
 也不取消现有录音和语音任务。正常唤醒词继续使用原流程。
 
 位置通知通过会话和方向条件后才在节点防抖，不占用正常唤醒的去重窗口。
-原始无效方向不使用历史 DOA 补偿；未唤醒或无效方向的命中也不占用防抖窗口。
+使用 `respeaker_sherpa` 时，原始方向标志和数值有效、但快照年龄超限的命中，
+允许在 `doa_window_sec` 内恢复方向；候选先按当前总年龄不超过 `max_angle_age_ms` 筛选，
+再优先选最新的 auto 方向。显式无效或畸形方向仍拒绝，不从历史补偿。
+缓存 wake/keyword 的测量时间需扣除 `doa_age_ms + audio_age_ms`，VAD/status 仅扣除 `doa_age_ms`。
+发布前方向过期仍拒绝通知；未唤醒、无效或未成功发布的命中均不占用防抖窗口。
 新事件的 `interaction_id/wake_id` 为空，`utterance_id` 为通知唯一 ID，两个执行标志均为 false。
 完整字段和下游语义见 [ROS2 契约](ROS2_CONTRACT.md#呼唤位置关键词)。
 
@@ -216,8 +223,9 @@ sherpa KWS 模型能认出 12 声。语音负责人这边没空，下游执行�
   继承 `respeaker_serial`，固件唤醒照常；另起一个 sherpa 关键词识别线程，在常开麦克风（待机音频，
   `audio.wake_history_sec > 0`）上听 `config/wake_keywords.txt` 里的唤醒词。两路谁先认出算谁，
   `dedupe_sec`（1.5 秒）内的第二个当同一声丢掉。位置呼唤通知由节点通过会话/方向条件后单独防抖。
-- sherpa 唤醒的方向取 `doa_window_sec`（2 秒）内 Flex 串口任意消息里最新的有效 `doa`，优先
-  `doa_source=auto`；没有就按无效方向发（`wake_angle=-1`、`wake_angle_valid=false`）。
+- sherpa 唤醒的方向取 `doa_window_sec`（2 秒）内 Flex 串口任意消息里的方向，
+  当前版本先筛选总年龄不超过 `max_angle_age_ms` 的候选，再优先取最新 `doa_source=auto`；
+  没有就按无效方向发（`wake_angle=-1`、`wake_angle_valid=false`）。解码等待也计入方向年龄。
   `received_monotonic` 是认出时那块音频的采集时间，声纹快照和指令录音都以它为准。
 - 为此改的原有文件：`respeaker_serial_reader.py` 记下各消息里的有效方向（`recent_doa`）；
   `audio_capture.py` 的 `BufferedAudioCapture` 加 `listener`，每块音频（含待机）都交给它；
@@ -254,6 +262,9 @@ sherpa KWS 模型能认出 12 声。语音负责人这边没空，下游执行�
   `doa_window_sec`（2 秒）内 Flex 串口消息里最新的有效 `doa`（优先 `doa_source=auto`），补成有效方向，
   `wake_angle_age_ms` 按补上的那条算；这段时间里没有有效方向就照旧发无效方向。日志 `Flex wakeup bearing taken from the word`。
 - `respeaker_serial` 类型不受影响；没动 `max_angle_age_ms` 和 `respeaker_serial_reader.py`。
+- 2026-10-19 更新：上述恢复现在同样受 600 ms 总年龄限制，2 秒仅为历史检索窗口。
+  已修复 reader 缓存识别快照漏算 `audio_age_ms`，并支持 CALL_HERE 的过期快照恢复；
+  发布前重新计算年龄和检查有效性，方向年龄与发布时间对齐。
 - 验证：`tests/test_respeaker_sherpa_wakeup.py` 加 2 项（过期方向补上、窗口内没有方向保持无效）；
   全量测试改前 218 失败 602 通过、改后 218 失败 604 通过，失败的用例一模一样（与本改动无关）。
   要重启语音节点才生效。

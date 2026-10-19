@@ -110,7 +110,7 @@ providers:
       sherpa_keywords_file: wake_keywords.txt
       sherpa_keywords_threshold: 0.25
       sherpa_num_threads: 1
-      doa_window_sec: 2.0   # sherpa 唤醒取这段时间里 Flex 报的最新有效方向
+      doa_window_sec: 2.0   # 历史检索窗口；sherpa/过期快照恢复仍须符合 600 ms 方向年龄上限
       dedupe_sec: 1.5       # 两路先后认出同一声，间隔内的后一个丢掉
   audio:
     type: sherpa

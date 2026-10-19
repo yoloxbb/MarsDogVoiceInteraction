@@ -296,7 +296,10 @@ GO_TO_LOCATION=44、FETCH_FROM_LOCATION=45。
 这是独立通知：`interaction_id/wake_id` 为空，`utterance_id` 为通知唯一 ID，
 两个执行标志均为 false；不启动或刷新会话，也不触发唤醒声纹。
 仅在 Voice 已经处于唤醒会话、设备 `doa_valid=true` 且角度有效、不等于 -1 时发布，
-方向还须通过年龄检查；未唤醒、会话已结束或方向无效时不发布，不以历史 DOA 补偿。
+方向还须通过截至发布时间的年龄检查；未唤醒、会话已结束或方向无效时不发布。
+`respeaker_sherpa` 对原始方向有效但快照过期的命中，可恢复词内仍新鲜的方向；
+显式无效或畸形方向不补偿。历史检索窗口默认 2 秒，恢复后的总年龄仍不得超过 600 ms。
+`wake_angle_age_ms` 与 `header.stamp` 对齐，下游还须计入发布之后的传输和执行排队时间。
 用 `(utterance_id,event_type)` 去重；不能当作唤醒或 COME 命令。
 关键词和方向仍使用 `wake_*` 字段，通知本身不创建或刷新会话。
 完整约定见 [位置呼唤关键词](ROS2_CONTRACT.md#呼唤位置关键词)。

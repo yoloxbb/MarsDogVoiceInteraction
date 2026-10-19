@@ -139,18 +139,35 @@ class ReSpeakerSerialReader:
         angle, age = message.get("doa"), message.get("doa_age_ms")
         if (message.get("doa_valid") is not True
                 or isinstance(angle, bool) or not isinstance(angle, (int, float))
-                or isinstance(age, bool) or not isinstance(age, (int, float))
-                or not (math.isfinite(angle) and 0 <= angle < 360 and math.isfinite(age) and age >= 0)):
+                or isinstance(age, bool) or not isinstance(age, (int, float))):
+            return
+        try:
+            angle, age = float(angle), float(age)
+            if not (math.isfinite(angle) and 0 <= angle < 360 and math.isfinite(age) and age >= 0):
+                return
+            if message.get("type") in ("wake", "keyword"):
+                # These bearings belong to an earlier recognition audio frame.
+                audio_age = message.get("audio_age_ms")
+                if isinstance(audio_age, bool) or not isinstance(audio_age, (int, float)):
+                    return
+                audio_age = float(audio_age)
+                if not math.isfinite(audio_age) or audio_age < 0:
+                    return
+                age += audio_age
+        except OverflowError:
+            return
+        measured = received - age / 1000.0
+        if not math.isfinite(measured):
             return
         with self._lock:
-            self._doas.append((received - age / 1000.0, float(angle), str(message.get("doa_source", ""))))
+            self._doas.append((measured, angle, str(message.get("doa_source", ""))))
 
     def recent_doa(self, since: float, until: float) -> tuple[float, float, str] | None:
         """Latest valid bearing measured in [since, until]; firmware "auto" estimates beat fixed beams."""
         with self._lock:
             hits = [doa for doa in self._doas if since <= doa[0] <= until]
         auto = [doa for doa in hits if doa[2] == "auto"]
-        return (auto or hits or [None])[-1]
+        return max(auto or hits, key=lambda doa: doa[0], default=None)
 
     def get_message(self) -> dict[str, Any] | None:
         with self._lock:

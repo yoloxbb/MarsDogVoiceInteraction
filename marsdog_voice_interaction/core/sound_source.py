@@ -65,6 +65,8 @@ class SoundSourceEventRouter:
             "dispatch_role": "sound_source", "action": "NONE",
             "is_executable": False, "should_trigger_behavior_tree": True,
             "latency_ms": queue_ms, "slots": slots,
+            "_doa_measured_monotonic": received - age / 1000.0,
+            "_doa_max_age_ms": self._max_doa_age_ms,
         }
 
     def poll(self) -> list[dict[str, Any]]:

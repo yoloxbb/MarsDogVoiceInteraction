@@ -32,7 +32,7 @@ wake_id                                     str            每次有效硬件唤
 wake_word                                   str            唤醒词原文（如 "xiao3 wei1 xiao3 wei1"）
 wake_angle                                  float          硬件原始方向角（度），未标定；Flex 无效时 -1
 wake_angle_valid                            bool           方向是否可用；false 不得用于转向
-wake_angle_age_ms                           float          Flex 方向总年龄（含主机排队）；未知 -1
+wake_angle_age_ms                           float          Flex 方向截至发布时间的总年龄；未知 -1
 wake_audio_age_ms                           float          Flex 候选音频帧到事件入队时间；未知 -1
 wake_angle_source                           str            硬件方向来源，如 auto / none
 wake_provider                               str            来源标识，Flex 为 respeaker_serial
@@ -98,6 +98,9 @@ Voice 在开启或刷新唤醒会话前检查方向：`wake_angle=-1`、布尔�
 `wake_event_max_age_sec`、防抖和声纹注册期间拦截约束。
 有效的 `0°` 正常接受；旧设备有数值角度但没有有效性字段时保留兼容。
 下游仍须检查方向有效性和年龄，防止历史事件或排队后过期的方向触发转向/接近。
+Flex 方向内部保存测量时刻，发布前统一更新年龄并重新检查有效性；
+`wake_angle_age_ms` 与 `header.stamp` 对应同一发布时间，下游只需再补发布之后的传输/排队时间。
+普通唤醒在发布前方向过期仍发 WAKEUP，方向标为无效，不影响会话建立或识别。
 详见 [ReSpeaker 接入说明](RESPEAKER_INTEGRATION.md)。
 
 ### event_type 枚举
@@ -124,7 +127,11 @@ ReSpeaker 固件普通 KWS 表中的“这儿”“这里这里”“到这来�
 
 事件保留 `wake_word/wake_provider/wake_keyword_id/wake_confidence` 及
 `wake_angle/wake_angle_valid/wake_angle_age_ms/wake_angle_source`；这些字段在此表示
-关键词及其方向，不能据此当作唤醒。方向无效时不发布，也不使用历史 DOA 补偿绕过检查。
+关键词及其方向，不能据此当作唤醒。使用 `respeaker_sherpa` 时，原始方向数值和标志有效、
+但快照因年龄超限而失效的命中，可从词内历史恢复仍新鲜的方向；显式无效或畸形数据仍拒绝。
+历史检索窗口 `doa_window_sec` 默认 2 秒，但候选方向到当前时刻仍不得超过
+`max_angle_age_ms`（默认 600 ms），发布前再次检查。没有合格方向时不发布。
+缓存 wake/keyword 方向的测量时刻同时扣除 `doa_age_ms` 和 `audio_age_ms`，不能将旧快照重新计时。
 `interaction_id/wake_id` 固定为空，独立 `utterance_id` 可用于消息去重；不继承已有会话身份，
 `speaker_id=unknown,speaker_role=undetermined,speaker_status=not_checked`。
 设备普通 KWS 的 `wake_provider/intent_source=respeaker_keyword`；
@@ -143,7 +150,9 @@ ReSpeaker 固件普通 KWS 表中的“这儿”“这里这里”“到这来�
 
 该事件使用 `sound_id` 去重，`interaction_id/wake_id/utterance_id` 为空，
 不继承唤醒主人身份、不改变语音会话。`doa` 来自有效 update；
-`doa_age_ms` 包含固件方向年龄和主机排队时间，下游须检查接收时的时效。
+`doa_age_ms` 包含固件方向年龄和截至发布的全部主机等待时间，与 `header.stamp` 对齐；
+发布前过期的声源更新不发布，`sound_trigger_stamp` 保留原始更新接收时间。
+下游须再补发布之后的传输/排队时间，检查接收和执行时的时效。
 `should_trigger_behavior_tree=true,is_executable=false,dispatch_role=sound_source` 请求通用行为路由；
 Tree 需增加此事件的映射。完整字段、配置和监听命令见 [声源事件](SOUND_SOURCE_EVENTS.md)。
 

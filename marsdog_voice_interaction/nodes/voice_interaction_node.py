@@ -24,6 +24,7 @@ except ImportError:
     VoiceTask = None  # type: ignore[assignment]
 
 from marsdog_voice_interaction.core.command_lexicon import CommandLexicon
+from marsdog_voice_interaction.core.direction_freshness import refresh_direction_age
 from marsdog_voice_interaction.core.kws_repeat_policy import KWSRepeatPolicy
 from marsdog_voice_interaction.core.object_target_resolver import (
     ObjectTargetResolver,
@@ -55,6 +56,7 @@ from marsdog_voice_interaction.messages.voice_event_types import (
     EVT_VOICE_COMMAND_KNOWN,
     EVT_VOICE_COMMAND_UNKNOWN,
     EVT_VOICE_NEUTRAL,
+    EVT_VOICE_SOUND_SOURCE_DETECTED,
     EVT_VOICE_WAKEUP,
     EVT_VOICE_WAKE_SPEAKER_RESULT,
     speaker_to_voice_event,
@@ -1370,6 +1372,7 @@ class VoiceInteractionNode(Node):
         if session is not None and not session.done:
             self._trace("wakeup_ignored", result="speaker_enrollment_active")
             return False
+        event = refresh_direction_age(event, now)
         wake_word = str(event.get("wake_word", ""))
         if (event.get("event_type") == EVT_VOICE_CALL_HERE
                 or wake_word.strip() in CALL_HERE_KEYWORDS):
@@ -1392,7 +1395,6 @@ class VoiceInteractionNode(Node):
                 if abs(received - last_call) < self._wake_debounce_sec:
                     self._trace("call_here_ignored", result="debounced")
                     return False
-                self._last_call_here_received = received
                 notification = self._normalize_wakeup_direction(event)
                 notification.update({
                     "event_type": EVT_VOICE_CALL_HERE,
@@ -1405,7 +1407,9 @@ class VoiceInteractionNode(Node):
                     "social": "CALL", "intent": "NONE", "action": "NONE", "control": "NONE",
                     "is_executable": False, "should_trigger_behavior_tree": False,
                 })
-                self._publish(notification)
+                if self._publish(notification) is False:
+                    return False
+                self._last_call_here_received = received
             self._trace("call_here_accepted", result="published", wake_word=wake_word)
             # Continue processing the current utterance, if there is one.
             return False
@@ -2872,7 +2876,7 @@ class VoiceInteractionNode(Node):
         ).strip()
         return normalize_chinese_numbers(cleaned)
 
-    def _publish(self, partial: dict[str, Any]) -> None:
+    def _publish(self, partial: dict[str, Any]) -> bool:
         value = dict(partial)
         with self._interaction_lock:
             value.setdefault("interaction_id", self._interaction_id)
@@ -2881,6 +2885,16 @@ class VoiceInteractionNode(Node):
         value.setdefault(
             "previous_state", self._state_machine.previous_state.value
         )
+        value = refresh_direction_age(value, time.monotonic())
+        if value.get("event_type") == EVT_VOICE_CALL_HERE and value.get("wake_angle_valid") is not True:
+            self._trace("call_here_ignored", result="invalid_direction")
+            return False
+        if (value.get("event_type") == EVT_VOICE_SOUND_SOURCE_DETECTED
+                and value.get("doa_valid") is not True):
+            self._trace("sound_source_ignored", result="invalid_direction")
+            return False
+        if any(key in value for key in ("_wake_angle_measured_monotonic", "_doa_measured_monotonic")):
+            value["header"] = {**value.get("header", {}), "stamp": time.time()}
         event = normalize_audio_event(value)
         message = String()
         message.data = json.dumps(event, ensure_ascii=False)
@@ -2945,6 +2959,7 @@ class VoiceInteractionNode(Node):
             } if event.get("sound_id") else {}),
             payload=event,
         )
+        return True
 
     def _process_enrollment_audio(self, audio_data: dict[str, Any]) -> None:
         started = time.perf_counter()
