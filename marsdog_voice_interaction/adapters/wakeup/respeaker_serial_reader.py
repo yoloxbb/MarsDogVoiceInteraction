@@ -85,6 +85,8 @@ class ReSpeakerSerialReader:
         self.connection_id = 0
         # (measured_monotonic, doa, doa_source) from any message, for host-side keyword spotting.
         self._doas: deque[tuple[float, float, str]] = deque(maxlen=64)
+        # Valid active VAD and keyword bearings, indexed by actual measurement time.
+        self._call_doas: deque[tuple[float, float, str]] = deque(maxlen=256)
         self._thread: threading.Thread | None = None
         self.last_error: str | None = None
         self.resolved_port: str | None = None
@@ -133,34 +135,67 @@ class ReSpeakerSerialReader:
             self._keyword_messages.clear()
             self._vad_messages.clear()
             self._doas.clear()
+            self._call_doas.clear()
             self.connection_id += 1
 
-    def _note_doa(self, message: dict[str, Any], received: float) -> None:
+    def _note_doa(self, message: dict[str, Any], received: float) -> dict[str, Any]:
+        kind = message.get("type")
+        if kind == "vad":
+            if (message.get("state") not in ("start", "update")
+                    or message.get("active", True) is not True):
+                return {"cache_result": "invalid_state"}
+        elif kind not in ("wake", "keyword"):
+            return {"cache_result": "unsupported_type"}
         angle, age = message.get("doa"), message.get("doa_age_ms")
         if (message.get("doa_valid") is not True
                 or isinstance(angle, bool) or not isinstance(angle, (int, float))
                 or isinstance(age, bool) or not isinstance(age, (int, float))):
-            return
+            return {"cache_result": "invalid_doa"}
         try:
             angle, age = float(angle), float(age)
             if not (math.isfinite(angle) and 0 <= angle < 360 and math.isfinite(age) and age >= 0):
-                return
-            if message.get("type") in ("wake", "keyword"):
+                return {"cache_result": "invalid_angle_or_age"}
+            if kind in ("wake", "keyword"):
                 # These bearings belong to an earlier recognition audio frame.
                 audio_age = message.get("audio_age_ms")
                 if isinstance(audio_age, bool) or not isinstance(audio_age, (int, float)):
-                    return
+                    return {"cache_result": "invalid_audio_age"}
                 audio_age = float(audio_age)
                 if not math.isfinite(audio_age) or audio_age < 0:
-                    return
+                    return {"cache_result": "invalid_audio_age"}
                 age += audio_age
         except OverflowError:
-            return
+            return {"cache_result": "numeric_overflow"}
         measured = received - age / 1000.0
         if not math.isfinite(measured):
-            return
+            return {"cache_result": "invalid_measured_time"}
+        result = "wake_only" if kind == "wake" else "out_of_order"
         with self._lock:
             self._doas.append((measured, angle, str(message.get("doa_source", ""))))
+            if (kind in ("vad", "keyword")
+                    and (not self._call_doas or measured > self._call_doas[-1][0])):
+                self._call_doas.append((measured, angle, str(message.get("doa_source", ""))))
+                result = "stored"
+        return {"cache_result": result, "measured_monotonic": measured, "total_age_ms": age}
+
+    def recent_call_doa(self, since: float, until: float) -> tuple[float, float, str] | None:
+        """Latest valid VAD/keyword direction measured in the acoustic interval."""
+        with self._lock:
+            ready, generation = self.ready, self.connection_id
+            selected = (next((doa for doa in reversed(self._call_doas)
+                              if since <= doa[0] <= until), None) if ready else None)
+            latest = self._call_doas[-1] if self._call_doas else None
+            count = len(self._call_doas)
+        now = time.monotonic()
+        logger.info("CALL_DIRECTION %s", json.dumps({
+            "record": "call_direction", "connection_id": generation,
+            "result": "not_ready" if not ready else "matched" if selected else "no_sample",
+            "window_start": since, "window_end": until, "queried_monotonic": now,
+            "sample_count": count, "selected": selected, "latest": latest,
+            "selected_age_ms": max(0.0, now - selected[0]) * 1000.0 if selected else None,
+            "latest_age_ms": max(0.0, now - latest[0]) * 1000.0 if latest else None,
+        }, ensure_ascii=False, separators=(",", ":")))
+        return selected
 
     def recent_doa(self, since: float, until: float) -> tuple[float, float, str] | None:
         """Latest valid bearing measured in [since, until]; firmware "auto" estimates beat fixed beams."""
@@ -224,8 +259,16 @@ class ReSpeakerSerialReader:
             received = time.monotonic()
             for message in decoder.feed(raw):
                 kind = message.get("type")
+                decision = {"cache_result": "not_ready"}
                 if self.ready:
-                    self._note_doa(message, received)
+                    # Validate direction/state before recording a bearing. Raw
+                    # queues also retain invalid recognitions and VAD boundaries.
+                    decision = self._note_doa(message, received)
+                if kind in ("wake", "keyword", "vad"):
+                    logger.info("RESPEAKER_DOA %s", json.dumps({
+                        "record": "respeaker_doa", "connection_id": self.connection_id,
+                        "received_monotonic": received, "raw": message, **decision,
+                    }, ensure_ascii=False, separators=(",", ":")))
                 if kind == "pong" and pending_ping is not None:
                     pending_ping = None
                     last_pong = received

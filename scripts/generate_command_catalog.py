@@ -165,7 +165,8 @@ def render(catalog: dict, rules: dict) -> dict[Path, str]:
         executable = c["control"] == "DO" and c.get("emotion", "NONE") == "NONE"
         writer.writerow([row, c["command_key"], c["command_id"], c["event_type"], " | ".join(c["phrases"]),
                          " | ".join(catalog["phrase_variants"].get(c["command_key"], [])), c["behavior"], c["secondary_behavior"], c["notes"],
-                         str(executable).lower(), str(executable or social).lower(), "social_reaction" if social else "specific_command"])
+                         str(executable).lower(), str(executable or social).lower(),
+                         "call" if c["command_key"] == "CALL_NAME" else "social_reaction" if social else "specific_command"])
         if c["command_key"] in rules["kws_command_keys"]:
             for phrase in c["phrases"]:
                 # Long/social/parameter utterances stay on the whole-ASR path.

@@ -27,6 +27,7 @@ header.frame_id                             str            原始阵列角坐标
 event_type                                  str            事件类型（见下方枚举）
 interaction_id                              str            一次唤醒到会话结束共享的会话 ID
 utterance_id                                str            单次语音的唯一 ID（同一句话的所有事件共享）
+call_kind                                   str            呼唤子类 here / name；其他事件为空
 wake_id                                     str            每次有效硬件唤醒的唯一 ID；会话内再次唤醒会更新
 
 wake_word                                   str            唤醒词原文（如 "xiao3 wei1 xiao3 wei1"）
@@ -111,36 +112,45 @@ Flex 方向内部保存测量时刻，发布前统一更新年龄并重新检查
 | `EVT_VOICE_WAKEUP` | 硬件或 pipeline Mock 唤醒，携带 `wake_id`、`wake_word` / `wake_angle` / `wake_confidence`；声纹未完成时 `speaker_status=pending`，不表示呼名语义 |
 | `EVT_VOICE_WAKE_SPEAKER_RESULT` | 同一 `interaction_id` + `wake_id` 的唤醒声纹最终结果；不执行命令 |
 
-#### 呼唤位置关键词
+#### 统一呼唤（2026-10-19）
 
-ReSpeaker 固件普通 KWS 表中的“这儿”“这里这里”“到这来”通过 `type=keyword`
-单独发布 `EVT_VOICE_CALL_HERE`，不发布 `EVT_VOICE_WAKEUP` 或唤醒声纹结果。
-三个词不在默认主机 `config/wake_keywords.txt` 中，也不占用固件最多三个唤醒词的名额。
-普通 KWS 支持 16 个词；主机 Sherpa 没有此三词容量限制。
-设备持续识别，但 Voice 仅在已经处于唤醒会话时发布：
-原始设备 `doa_valid` 必须严格为 JSON true，角度必须是有效数值且不等于 -1，
-并通过方向年龄检查；在主机对应 `wake_angle_valid=true,0 <= wake_angle < 360`。
-未唤醒、会话已结束、命中早于当前会话或方向无效时不发布。
-不会创建或刷新语音会话、启动命令录音、
-清理待处理语音或打断当前录音。旧配置的串口 wake 或主机 Sherpa 若返回这三个词，
-也使用同一事件；其他普通 `keyword` 均忽略，不能落入唤醒分支。
+固件位置关键词“这儿／这里这里／到这来”、词库 CALL_NAME 和 Model Intent 的
+social=CALL 均发布 `EVT_VOICE_CALL`。`call_kind=here|name` 表示位置呼唤／昵称呼唤，
+`intent_source` 必填，保留 respeaker_keyword、respeaker_sherpa、command_lexicon、rkllm 等来源。
+硬件 `EVT_VOICE_WAKEUP` 和明确的 COME 动作保持独立；模型同时识别到呼唤和明确动作时，
+仍分别发布呼唤事件与原动作事件。旧 CALL_HERE、CALL_NAME、COMMAND_CALL_NAME 事件名
+仅兼容输入，公开话题不双发旧事件。
 
-事件保留 `wake_word/wake_provider/wake_keyword_id/wake_confidence` 及
-`wake_angle/wake_angle_valid/wake_angle_age_ms/wake_angle_source`；这些字段在此表示
-关键词及其方向，不能据此当作唤醒。使用 `respeaker_sherpa` 时，原始方向数值和标志有效、
-但快照因年龄超限而失效的命中，可从词内历史恢复仍新鲜的方向；显式无效或畸形数据仍拒绝。
-历史检索窗口 `doa_window_sec` 默认 2 秒，但候选方向到当前时刻仍不得超过
-`max_angle_age_ms`（默认 600 ms），发布前再次检查。没有合格方向时不发布。
-缓存 wake/keyword 方向的测量时刻同时扣除 `doa_age_ms` 和 `audio_age_ms`，不能将旧快照重新计时。
-`interaction_id/wake_id` 固定为空，独立 `utterance_id` 可用于消息去重；不继承已有会话身份，
-`speaker_id=unknown,speaker_role=undetermined,speaker_status=not_checked`。
-设备普通 KWS 的 `wake_provider/intent_source=respeaker_keyword`；
-`intent_category=call_here,dispatch_role=call_here`，
-`social=CALL,intent=NONE,action=NONE,control=NONE`，
-`is_executable=false,should_trigger_behavior_tree=false`。这是独立通知；
-需要下游响应时按新事件显式接入，不能复用唤醒会话入口或据此直接执行 COME。
-关键词通知通过会话和方向检查后才在节点防抖，互不占用正常唤醒的去重窗口；
-未唤醒或方向无效的命中不占用关键词防抖窗口。事件时效和声纹录入占用检查仍适用。
+只在已有唤醒会话内发布；会话结束、关键词早于会话或整条通知过期时拒绝。
+呼唤通知本身不创建／刷新会话，不取消录音和识别任务，不触发唤醒声纹。
+`interaction_id` 关联当前会话，`wake_id` 为空，`utterance_id` 标识话语／通知。
+固件通知使用 unknown/not_checked，不继承唤醒者身份；ASR 呼唤保留本句声纹结果。
+
+方向使用 `doa/doa_valid/doa_age_ms/doa_source`，坐标系仍为 microphone_array；
+`wake_angle` 为 -1、`wake_angle_valid=false`，不能再用 wake_* 方向驱动呼唤响应。
+现有串口线程在消息入队前筛选 `type=vad,state=start|update` 和 `type=keyword` 的方向；
+VAD 显式 active 必须为 true，keyword 无 state 要求。只有 doa_valid 严格 JSON true、有限非布尔角度
+`0 <= doa < 360`、有限非负年龄才更新方向历史。VAD 测量时刻为接收 monotonic 减 doa_age_ms；
+keyword 还需减去 audio_age_ms，不能用识别通知的接收时刻刷新旧快照。VAD end 不更新方向。
+无效或乱序测量不覆盖缓存、不延长有效期；断线／重连清空缓存并使在途快照无效。
+采集独立于 sound_source.enabled；关闭通用声源事件仍可给呼唤提供方向。
+
+默认连续录音保留原始音频块时间，根据 VAD 的真实语音起止采样点得到采集区间，
+在排队／ASR 前固定该区间内最新的有效方向（包括“未找到方向”）。之后的声音不能补填
+或替换旧句方向。没有可靠采集时间的旧／外部 provider 按无方向处理，不读取全局最新值。
+固件缺少精确词边界，按关键词接收前 2 秒窗口取样；该窗口仅用于关联，不能延长时效。
+主机时间仍不包含不可测的设备／USB 延迟，多人同时说话不保证方向与身份唯一对应。
+
+发布前按测量时刻重算年龄并检查当前串口连接，上限为 min(600 ms, max_angle_age_ms)，放宽唤醒方向配置不会放宽呼唤。
+`header.stamp` 对应发布时间；方向过期／缺失／断线仍发布呼唤，标为
+`doa=-1,doa_valid=false`。已知的过期方向年龄保留用于诊断，未知年龄为 -1。
+下游仅在方向有效且接收／执行时仍新鲜时使用；无方向时跳过转向。
+
+统一字段 `social=CALL,intent=NONE,action=NONE,control=NONE`，
+`intent_category=call,dispatch_role=call,is_executable=false,should_trigger_behavior_tree=false`。
+同一句只发一个呼唤；固件以接收时间减音频年龄估计声学时间，与 ASR 区间关联去重。
+一条固件命中至多关联一句 ASR，避免误吞相邻语句；不同 ASR 语句保持独立。
+原有 Tree 对 CALL_NAME 的过滤不会自动迁移，需显式接入新事件和方向检查。
 
 #### 通用声音声源
 
@@ -190,7 +200,7 @@ Tree 对同一 `interaction_id` 的新 `wake_id` 更新声源和身份关联，�
 #### 确定性产品词库与兼容指令
 | event_type | command_id | 说明 |
 |---|---|---|
-| `EVT_VOICE_COMMAND_CALL_NAME` | `CMD_CALL_NAME` | 词库昵称调用：小狗/小坏蛋/跟屁虫等；仅表示社交呼名，固定不可执行，不携带硬件唤醒语义 |
+| `EVT_VOICE_CALL` | `CMD_CALL_NAME` | 词库昵称调用：小狗/小坏蛋/跟屁虫等；仅表示社交呼名，固定不可执行，不携带硬件唤醒语义 |
 | `EVT_VOICE_COMMAND_PRAISE` | `CMD_PRAISE` | 词库精确命中的夸赞表达；非动作命令，以 `social_reaction` 授权 Tree 一次性反应，不占用 Model Intent 的 `EVT_VOICE_PRAISE` |
 | `EVT_VOICE_COMMAND_SCOLD` | `CMD_SCOLD` | 词库精确命中的责备表达；非动作命令，以 `social_reaction` 授权 Tree 一次性反应，不占用 Model Intent 的 `EVT_VOICE_SCOLD` |
 | `EVT_VOICE_COMMAND_WALK` | `CMD_WALK` | 独立短语“去”精确命中或“走开”；“去+地点”由地点句式处理，“走”归 FOLLOW |
@@ -222,17 +232,13 @@ Tree 对同一 `interaction_id` 的新 `wake_id` 更新声源和身份关联，�
 上表保留常用核心事件和旧版兼容事件，不重复列出完整产品词库。对产品表中
 已明确 `ACT_*` 的行，确定性事件名按 `EVT_VOICE_COMMAND_<ACT 后缀>` 生成，
 例如 `ACT_EAT_MEAL → EVT_VOICE_COMMAND_EAT_MEAL`。无独立 `ACT_*` 的同类表达可归并到
-`EVT_VOICE_COMMAND_CALL_NAME/PRAISE/SCOLD` 或
+`EVT_VOICE_CALL` 或 `EVT_VOICE_COMMAND_PRAISE/SCOLD` 或
 `EVT_VOICE_COMMAND_TOILET/CLEAN/SLEEP/PLAY`。
 完整的短语、事件和动作名对应以 `config/command_catalog.yaml` 为权威源。
 
-硬件唤醒、兼容 Model Intent 呼名映射和词库昵称调用是三个独立事件：硬件或 pipeline Mock
-唤醒固定为 `EVT_VOICE_WAKEUP`，没有 `utterance_id`；只有显式启用可选 Model Intent provider 时，`social=CALL`
-沿用 `EVT_VOICE_CALL_NAME`；词库昵称固定为 `EVT_VOICE_COMMAND_CALL_NAME`，携带
-当前语句的 `utterance_id`、`command_id=CMD_CALL_NAME`、
-`dispatch_role=specific_command` 和词库匹配槽位，但其语义固定为
-`CALL|NONE|NONE`、`action=NONE`、`is_executable=false`、
-`should_trigger_behavior_tree=false`。它不得作为硬件唤醒或通用动作指令。
+硬件唤醒为 `EVT_VOICE_WAKEUP`；位置关键词、词库昵称和 Model Intent 呼唤统一为
+`EVT_VOICE_CALL`，通过 call_kind 和 intent_source 区分。词库保留 CMD_CALL_NAME 和匹配槽位，
+其 call_kind=name、dispatch_role=call，两个执行标志均为 false；完整方向和会话契约见上文。
 
 词库 `PRAISE/SCOLD` 的三轴分别为 `PRAISE|NONE|NONE` 和
 `SCOLD|NONE|NONE`，并固定 `action=NONE`、`is_executable=false`、
@@ -249,7 +255,7 @@ Tree 对同一 `interaction_id` 的新 `wake_id` 更新声源和身份关联，�
 #### Model Intent 意图分类业务事件
 | event_type | 触发条件 |
 |---|---|
-| `EVT_VOICE_CALL_NAME` | `social=CALL` |
+| `EVT_VOICE_CALL` | `social=CALL` |
 | `EVT_VOICE_PRAISE` | `social=PRAISE` |
 | `EVT_VOICE_SCOLD` | `social=SCOLD` |
 | `EVT_VOICE_COMFORT` | `social=COMFORT` |
@@ -277,7 +283,7 @@ Model Intent 继续使用下游已定义的上述业务事件名。经显式白�
 `EVT_VOICE_COMMAND_KNOWN`，禁止猜测具体动作。
 
 Voice 不再发布任何 `EVT_VOICE_INTENT_*`。本次硬件唤醒由旧的
-`EVT_VOICE_CALL_NAME` 迁移为 `EVT_VOICE_WAKEUP`，属于事件名破坏性变更；本次未修改
+`EVT_VOICE_CALL` 迁移为 `EVT_VOICE_WAKEUP`，属于事件名破坏性变更；本次未修改
 Tree、Vision 或 Action，不能把 Voice 发布成功视为这些下游已经完成迁移。
 
 #### Model Intent 找物/捡取目标物门控
@@ -326,7 +332,7 @@ ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短
 匹配成功时：
 
 - 43 个启用路由组均必须声明非空且唯一的 `command_key/command_id/event_type`；目录
-  禁止使用 `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的
+  除 CALL_NAME 可使用统一 EVT_VOICE_CALL 外，禁止使用 `EVT_VOICE_WAKEUP`、Model Intent 业务分类事件和已停用的
   `EVT_VOICE_INTENT_*`。缺失、重复或越界时节点启动失败；
 - 所有目录条目只发布自身的具体特殊事件，不额外发布
   `EVT_VOICE_COMMAND_KNOWN`；
@@ -334,7 +340,7 @@ ASR 文本首先使用 `config/command_catalog.yaml` 做规范化后的完整短
   `dispatch_role=specific_command`，PRAISE/SCOLD 使用 `social_reaction`；
 - 可执行性以 `should_trigger_behavior_tree=true` 为准；核心指令的 `control` 使用
   新三轴语义（例如 QUIET 为 `BARK|STOP`）。词库呼名使用
-  `EVT_VOICE_COMMAND_CALL_NAME`，其语义为 `CALL|NONE|NONE`。词库
+  `EVT_VOICE_CALL`，其语义为 `CALL|NONE|NONE`。词库
   `PRAISE/SCOLD` 使用 `EVT_VOICE_COMMAND_PRAISE/SCOLD`，分别使用
   `PRAISE|NONE|NONE` 和 `SCOLD|NONE|NONE`。三类词库社交事件均为非动作事件，
   `is_executable=false`；CALL_NAME 固定 `should_trigger_behavior_tree=false`，

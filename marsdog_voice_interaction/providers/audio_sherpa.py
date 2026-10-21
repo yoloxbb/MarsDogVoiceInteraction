@@ -1250,6 +1250,7 @@ class AudioSherpaProvider(BaseProvider):
         chunks: list[np.ndarray] = []
         segments: list[dict[str, Any]] = []
         sample_count = 0
+        chunk_times: list[tuple[int, int, float]] = []
         resync_samples = 0
         quiet_samples = 0
         speech_started: float | None = None
@@ -1258,7 +1259,12 @@ class AudioSherpaProvider(BaseProvider):
         try:
             while not cancel_event.is_set():
                 self._set_capture_phase(cancel_event, "buffered_read")
-                chunk = capture.read()
+                read_chunk = getattr(capture, "read_chunk", None)
+                if callable(read_chunk):
+                    timed_chunk = read_chunk()
+                    captured_at, chunk = timed_chunk if timed_chunk is not None else (None, None)
+                else:
+                    captured_at, chunk = None, capture.read()
                 if chunk is None:
                     # Allow the producer to try both backends, each with its
                     # own no-data deadline; also bound a stuck device open.
@@ -1284,6 +1290,8 @@ class AudioSherpaProvider(BaseProvider):
                         break
                     continue
                 chunks.append(chunk)
+                if captured_at is not None:
+                    chunk_times.append((sample_count, chunk.size, captured_at))
                 sample_count += chunk.size
                 elapsed = sample_count / self._sample_rate
                 # KWS sees only this consumer's utterance, never queued future audio.
@@ -1322,6 +1330,20 @@ class AudioSherpaProvider(BaseProvider):
             "has_voice": bool(speech.size), "utterance_id": utterance_id,
             "capture_end_reason": exit_reason,
         }
+        if segments and chunk_times:
+            # VAD boundaries refer to the original stream, before preroll/merging.
+            def at_sample(index: int, *, end: bool = False) -> float | None:
+                for offset, size, ended in chunk_times:
+                    inside = (offset < index <= offset + size if end
+                              else offset <= index < offset + size)
+                    if inside:
+                        return ended - (offset + size - index) / self._sample_rate
+                return None
+            speech_start = at_sample(min(int(s["start"]) for s in segments))
+            speech_end = at_sample(max(int(s["end"]) for s in segments), end=True)
+            if speech_start is not None and speech_end is not None:
+                result.update(speech_started_monotonic=speech_start,
+                              speech_ended_monotonic=speech_end)
         if self._audio_debug.enabled and not cancel_event.is_set():
             result["debug_audio_dir"] = self._save_capture_debug(
                 utterance_id, captured, segments, speech,

@@ -1,12 +1,12 @@
 # 表格行到事件的人工审核映射；标准词句和行为说明从 XLSX 读取。
-version: 2026-10-16-workbook-v14
+version: 2026-10-19-workbook-v15
 source: docs/语音识别内容.xlsx
 sheet: Sheet1
 rows:
   3:
     command_key: CALL_NAME
     command_id: CMD_CALL_NAME
-    event_type: EVT_VOICE_COMMAND_CALL_NAME
+    event_type: EVT_VOICE_CALL
     core: false
     emotion: CALL
     control: NONE

@@ -14,7 +14,7 @@ from marsdog_voice_interaction.messages.intent_protocol import (
     classification_to_event,
 )
 from marsdog_voice_interaction.messages.voice_event_types import (
-    EVT_VOICE_CALL_NAME,
+    EVT_VOICE_CALL,
     EVT_VOICE_COMMAND_APPROACH,
     EVT_VOICE_COMMAND_BACK_UP,
     EVT_VOICE_COMMAND_CLEAN,
@@ -51,7 +51,7 @@ from marsdog_voice_interaction.messages.voice_event_types import (
 
 
 _SOCIAL_EVENTS = {
-    "CALL": EVT_VOICE_CALL_NAME,
+    "CALL": EVT_VOICE_CALL,
     "PRAISE": EVT_VOICE_PRAISE,
     "SCOLD": EVT_VOICE_SCOLD,
     "COMFORT": EVT_VOICE_COMFORT,
@@ -408,6 +408,9 @@ def route_classification_events(
             continue
         event = dict(base)
         event["event_type"] = event_type
+        if event_type == EVT_VOICE_CALL:
+            from marsdog_voice_interaction.core.call_event import normalize_call
+            event = normalize_call(event)
         event["slots"] = [
             *base["slots"],
             {"key": "derived_axis", "value": derived_axis},

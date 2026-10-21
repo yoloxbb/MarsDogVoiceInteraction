@@ -1,8 +1,8 @@
 ﻿source_rows,command_key,command_id,event_type,standard_phrases,variants,behavior,secondary_behavior,notes,is_executable,should_trigger_behavior_tree,dispatch_role
-3,CALL_NAME,CMD_CALL_NAME,EVT_VOICE_COMMAND_CALL_NAME,小火小火 | 小狗 | 跟屁虫 | 嘬嘬嘬,小狗狗,"主人：
+3,CALL_NAME,CMD_CALL_NAME,EVT_VOICE_CALL,小火小火 | 小狗 | 跟屁虫 | 嘬嘬嘬,小狗狗,"主人：
 找人+过来
 他人：
-找人（但不主动过来去）",采用通用序列,1、唤醒后只要识别到人体，无需重新唤醒，直到人离开画面30s后需重新唤醒,false,false,specific_command
+找人（但不主动过来去）",采用通用序列,1、唤醒后只要识别到人体，无需重新唤醒，直到人离开画面30s后需重新唤醒,false,false,call
 4,QUIET,CMD_QUIET,EVT_VOICE_COMMAND_QUIET,安静 | 闭嘴 | 别叫 | 不许叫,别叫了 | 安静点 | 不要叫,停止叫声（如有）,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
 5,HOLD_POSITION,CMD_HOLD_POSITION,EVT_VOICE_COMMAND_HOLD_POSITION,等等 | 定 | 别动 | 停 | 不准动 | 不许动 | 老实点 | 不可以 | No,别动啊 | 不要动 | 不许动啊 | 停下 | 停止 | 停下来 | 等着 | 等一下,停止运动+眼珠子左右移动观察人,采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command
 6,FOLLOW,CMD_FOLLOW,EVT_VOICE_COMMAND_FOLLOW,走 | 跟我走 | 跟着我 | 跟上 | 跟我来,跟着我走,跟人随行（需要使用UWB信标，如无UWB仅单次短暂跟声源移动3m）,不采用通用序列,（训练后技能，需成长解锁，研发展示演示无需解锁）,true,true,specific_command

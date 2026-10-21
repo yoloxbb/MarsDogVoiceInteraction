@@ -13,7 +13,8 @@ from marsdog_voice_interaction.messages.intent_protocol import (
 from marsdog_voice_interaction.messages.audio_event import WAKE_ANGLE_FRAME_ID
 from marsdog_voice_interaction.messages.voice_event_types import (
     ACTION_TO_VOICE_EVENT,
-    EVT_VOICE_CALL_NAME,
+    CALL_EVENT_TYPES,
+    EVT_VOICE_CALL,
     EVT_VOICE_COMFORT,
     EVT_VOICE_FOLK_ID,
     EVT_VOICE_HAPPY,
@@ -53,7 +54,7 @@ _COMMANDS = (
 
 MOCK_AUDIO_EVENT_TYPES = (
     EVT_VOICE_WAKEUP,
-    EVT_VOICE_CALL_NAME,
+    EVT_VOICE_CALL,
     EVT_VOICE_MASTER_ID,
     EVT_VOICE_FOLK_ID,
     EVT_VOICE_UNMASTER_ID,
@@ -166,7 +167,7 @@ class MockEventProvider(BaseProvider):
                 executable=True,
             )
             event["action"] = command_key
-        elif event_type == EVT_VOICE_CALL_NAME:
+        elif event_type in CALL_EVENT_TYPES:
             event = classification_to_event(
                 social="CALL", intent="NONE", control="NONE",
                 asr_text="旺财看看我", source="mock_event", confidence=1.0,
@@ -233,4 +234,7 @@ class MockEventProvider(BaseProvider):
             ),
             "previous_state": "interaction",
         })
+        if event_type in CALL_EVENT_TYPES:
+            from marsdog_voice_interaction.core.call_event import normalize_call
+            event = normalize_call(event)
         return event

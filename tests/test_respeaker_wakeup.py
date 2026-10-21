@@ -66,7 +66,7 @@ def test_only_wake_can_open_a_session(kind):
 def test_selected_firmware_keywords_are_notifications_with_optional_direction(word, valid):
     provider = WakeupReSpeakerSerialProvider({})
     event = provider._parse_event(wake(type="keyword", keyword=word, id=101, doa_valid=valid))
-    assert event["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert event["event_type"] == "EVT_VOICE_CALL"
     assert event["wake_provider"] == "respeaker_keyword"
     assert event["wake_word"] == word and event["wake_keyword_id"] == 101
     assert event["wake_angle_valid"] is valid
@@ -207,7 +207,7 @@ def test_handshake_event_delivery_heartbeat_and_reenumeration(monkeypatch):
         assert event["wake_angle_valid"]
         first.incoming.append(line(wake(type="keyword", keyword="这儿", id=101)))
         keyword = eventually(provider.poll_event)
-        assert keyword["event_type"] == "EVT_VOICE_CALL_HERE"
+        assert keyword["event_type"] == "EVT_VOICE_CALL"
         assert keyword["wake_provider"] == "respeaker_keyword"
         assert keyword["wake_word"] == "这儿" and keyword["wake_angle_valid"]
         eventually(lambda: len(first.writes) >= 2)

@@ -1,5 +1,5 @@
 # 由 XLSX 和 command_catalog_rules.yaml 生成，请勿直接编辑。
-version: 2026-10-16-workbook-v14
+version: 2026-10-19-workbook-v15
 source_name: docs/语音识别内容.xlsx
 source_sheet: Sheet1
 source_sha256: 7ff2adc8e7b280b7f6ad1f3583320f18063fb2358a8238c5ad0acb8223d925ed
@@ -191,7 +191,7 @@ expansion:
 commands:
 - command_key: CALL_NAME
   command_id: CMD_CALL_NAME
-  event_type: EVT_VOICE_COMMAND_CALL_NAME
+  event_type: EVT_VOICE_CALL
   core: false
   emotion: CALL
   control: NONE
@@ -284,6 +284,7 @@ commands:
   phrases:
   - 过来
   - 来
+  - 回来
   - 来这
   - 到我这儿来
   - 走上前来

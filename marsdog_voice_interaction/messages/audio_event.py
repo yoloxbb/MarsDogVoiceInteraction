@@ -19,6 +19,7 @@ _TEMPLATE: dict[str, Any] = {
     "interaction_id": "",
     "utterance_id": "",
     "wake_id": "",
+    "call_kind": "",
     "wake_word": "",
     "wake_angle": 0.0,
     "wake_confidence": 0.0,
@@ -154,7 +155,8 @@ def normalize_audio_event(data: Any) -> dict[str, Any]:
     )
     if not event["doa_valid"]:
         event["doa"] = -1.0
-        event["doa_age_ms"] = -1.0
+        if not math.isfinite(event["doa_age_ms"]) or event["doa_age_ms"] < 0:
+            event["doa_age_ms"] = -1.0
     if not math.isfinite(event["sound_trigger_stamp"]) or event["sound_trigger_stamp"] < 0:
         event["sound_trigger_stamp"] = 0.0
     return event

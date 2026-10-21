@@ -23,7 +23,7 @@ import numpy as np
 from marsdog_voice_interaction.messages.audio_event import WAKE_ANGLE_FRAME_ID
 from marsdog_voice_interaction.messages.voice_event_types import (
     CALL_HERE_KEYWORDS,
-    EVT_VOICE_CALL_HERE,
+    EVT_VOICE_CALL,
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
 from marsdog_voice_interaction.providers.wakeup_respeaker_serial import WakeupReSpeakerSerialProvider
@@ -138,7 +138,8 @@ class WakeupReSpeakerSherpaProvider(WakeupReSpeakerSerialProvider):
         age_ms = -1.0 if doa is None else max(0.0, now - doa[0]) * 1000.0
         event = {
             "header": {"frame_id": WAKE_ANGLE_FRAME_ID},
-            "event_type": EVT_VOICE_CALL_HERE if word.strip() in CALL_HERE_KEYWORDS else "wakeup",
+            "event_type": EVT_VOICE_CALL if word.strip() in CALL_HERE_KEYWORDS else "wakeup",
+            "call_kind": "here" if word.strip() in CALL_HERE_KEYWORDS else "",
             "wake_provider": "respeaker_sherpa",
             "wake_keyword_id": self._keyword_ids.get(word, 1),
             "wake_word": word,
@@ -157,7 +158,7 @@ class WakeupReSpeakerSherpaProvider(WakeupReSpeakerSerialProvider):
         if doa is not None:
             event["_wake_angle_measured_monotonic"] = doa[0]
             event["_wake_angle_max_age_ms"] = self.max_angle_age_ms
-        kind = "call-here" if event["event_type"] == EVT_VOICE_CALL_HERE else "wakeup"
+        kind = "call-here" if event["event_type"] == EVT_VOICE_CALL else "wakeup"
         logger.info("Sherpa %s: word=%r angle=%.1f valid=%s age_ms=%.1f",
                     kind, word, event["wake_angle"], event["wake_angle_valid"], age_ms)
         return event
@@ -174,7 +175,7 @@ class WakeupReSpeakerSherpaProvider(WakeupReSpeakerSerialProvider):
                      wake_angle_age_ms=max(0.0, now - doa[0]) * 1000.0, wake_angle_source=doa[2],
                      _wake_angle_measured_monotonic=doa[0],
                      _wake_angle_max_age_ms=self.max_angle_age_ms)
-        kind = "call-here" if event["event_type"] == EVT_VOICE_CALL_HERE else "wakeup"
+        kind = "call-here" if event["event_type"] == EVT_VOICE_CALL else "wakeup"
         logger.info("Flex %s bearing taken from the word: angle=%.1f age_ms=%.1f source=%s",
                     kind, doa[1], event["wake_angle_age_ms"], doa[2])
 
@@ -187,11 +188,8 @@ class WakeupReSpeakerSherpaProvider(WakeupReSpeakerSerialProvider):
                     event = self._events.popleft()
                 except IndexError:
                     return None
-            # Recover stale snapshots only for call-here; explicit invalid or
-            # malformed device bearings must still fail the node's direction gate.
-            if event["event_type"] == EVT_VOICE_CALL_HERE:
-                if from_device and event.get("_wake_angle_stale"):
-                    self._recover_bearing(event)
+            # The node attaches a shared live VAD snapshot to call candidates.
+            if event["event_type"] == EVT_VOICE_CALL:
                 return event
             if from_device and not event["wake_angle_valid"]:
                 self._recover_bearing(event)

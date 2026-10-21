@@ -144,6 +144,11 @@ class BufferedAudioCapture:
             self._gap.clear()
 
     def read(self) -> np.ndarray | None:
+        chunk = self.read_chunk()
+        return None if chunk is None else chunk[1]
+
+    def read_chunk(self) -> tuple[float, np.ndarray] | None:
+        """Return the host capture timestamp with samples, even after buffering."""
         if self._gap.is_set():
             self._discard()
             self._gap.clear()
@@ -157,7 +162,7 @@ class BufferedAudioCapture:
         if time.monotonic() - captured_at > self.buffer_sec:
             self._discard()
             raise AudioCaptureGap("microphone buffered audio expired")
-        return samples
+        return captured_at, samples
 
     def _run(self) -> None:
         try:

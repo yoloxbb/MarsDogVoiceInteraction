@@ -24,6 +24,10 @@ except ImportError:
     VoiceTask = None  # type: ignore[assignment]
 
 from marsdog_voice_interaction.core.command_lexicon import CommandLexicon
+from marsdog_voice_interaction.core.call_event import (
+    CallDeduplicator, bind_utterance_direction, direction_snapshot, is_call,
+    invalidate_disconnected_direction, normalize_call,
+)
 from marsdog_voice_interaction.core.direction_freshness import refresh_direction_age
 from marsdog_voice_interaction.core.kws_repeat_policy import KWSRepeatPolicy
 from marsdog_voice_interaction.core.object_target_resolver import (
@@ -52,7 +56,6 @@ from marsdog_voice_interaction.messages.intent_protocol import NLU_PROTOCOL
 from marsdog_voice_interaction.messages.voice_event_types import (
     CALL_HERE_KEYWORDS,
     EVT_STATE_CHANGED,
-    EVT_VOICE_CALL_HERE,
     EVT_VOICE_COMMAND_KNOWN,
     EVT_VOICE_COMMAND_UNKNOWN,
     EVT_VOICE_NEUTRAL,
@@ -1131,7 +1134,7 @@ class VoiceInteractionNode(Node):
         event = direct_mock.poll_event()  # type: ignore[attr-defined]
         if event is not None:
             event_type = str(event.get("event_type", ""))
-            if (event_type == EVT_VOICE_CALL_HERE
+            if (is_call(event)
                     or str(event.get("wake_word", "")).strip() in CALL_HERE_KEYWORDS):
                 self._handle_wakeup(event, self._providers.get("audio"))
             elif event_type == EVT_VOICE_WAKEUP:
@@ -1374,38 +1377,35 @@ class VoiceInteractionNode(Node):
             return False
         event = refresh_direction_age(event, now)
         wake_word = str(event.get("wake_word", ""))
-        if (event.get("event_type") == EVT_VOICE_CALL_HERE
+        if (is_call(event)
                 or wake_word.strip() in CALL_HERE_KEYWORDS):
+            audio_age = event.get("wake_audio_age_ms")
+            call_anchor = received
+            if (type(audio_age) in (int, float) and math.isfinite(audio_age) and audio_age >= 0):
+                call_anchor -= audio_age / 1000.0
             # Hold the session lock through publication so stop_listening cannot
             # end the interaction between the active check and the notification.
             with self._interaction_lock:
                 if not self._interaction_active:
                     self._trace("call_here_ignored", result="not_awake")
                     return False
-                if received < self._interaction_started_time:
+                if call_anchor < self._interaction_started_time:
                     self._trace("call_here_ignored", result="before_interaction")
-                    return False
-                angle = event.get("wake_angle")
-                if (event.get("wake_angle_valid") is not True
-                        or isinstance(angle, bool) or not isinstance(angle, (int, float))
-                        or not math.isfinite(angle) or not 0 <= angle < 360):
-                    self._trace("call_here_ignored", result="invalid_direction")
                     return False
                 last_call = getattr(self, "_last_call_here_received", -math.inf)
                 if abs(received - last_call) < self._wake_debounce_sec:
                     self._trace("call_here_ignored", result="debounced")
                     return False
-                notification = self._normalize_wakeup_direction(event)
+                notification = normalize_call(event)
+                notification.update(direction_snapshot(
+                    self._providers.get("wakeup"), received - 2.0, received,
+                ))
                 notification.update({
-                    "event_type": EVT_VOICE_CALL_HERE,
-                    "interaction_id": "", "wake_id": "", "utterance_id": uuid.uuid4().hex,
+                    "interaction_id": self._interaction_id, "wake_id": "", "utterance_id": uuid.uuid4().hex,
+                    "_call_anchor": call_anchor,
                     "speaker_id": "unknown", "speaker_role": "undetermined",
                     "speaker_status": "not_checked", "speaker_confidence": 0.0,
                     "speaker_reason": "",
-                    "intent_source": str(event.get("wake_provider", "wake_keyword")),
-                    "intent_category": "call_here", "dispatch_role": "call_here",
-                    "social": "CALL", "intent": "NONE", "action": "NONE", "control": "NONE",
-                    "is_executable": False, "should_trigger_behavior_tree": False,
                 })
                 if self._publish(notification) is False:
                     return False
@@ -1904,6 +1904,7 @@ class VoiceInteractionNode(Node):
     def _queue_speech(
         self, audio_data: dict[str, Any], utterance_id: str | None,
     ) -> None:
+        audio_data = bind_utterance_direction(audio_data, self._providers.get("wakeup"))
         utterance_id = utterance_id or uuid.uuid4().hex
         tracker = self._command_tracker
         if tracker.utterance_id != utterance_id:
@@ -2012,6 +2013,7 @@ class VoiceInteractionNode(Node):
         recognition: dict[str, Any] | None = None,
         command_tracker: UtteranceCommandTracker | None = None,
     ) -> bool:
+        audio_data = bind_utterance_direction(audio_data, self._providers.get("wakeup"))
         tracker = command_tracker if command_tracker is not None else self._command_tracker
         pipeline_started = recognition["started"] if recognition is not None else time.perf_counter()
         utterance_wake_id = (
@@ -2370,6 +2372,8 @@ class VoiceInteractionNode(Node):
                 **speaker_event_fields,
                 "latency_ms": round(lexicon_latency_ms, 3),
             })
+            if is_call(direct_event):
+                direct_event.update(audio_data["_call_direction"])
             final_event_type = direct_match.event_type
             published_event_types: list[str] = []
             if direct_match.emit_known_event:
@@ -2522,6 +2526,8 @@ class VoiceInteractionNode(Node):
             latency_ms=round(intent_latency_ms, 2),
         )
         for event in routed_events:
+            if is_call(event):
+                event.update(audio_data["_call_direction"])
             event.update({
                 "utterance_id": utterance_id,
                 "asr_text": text,
@@ -2877,8 +2883,22 @@ class VoiceInteractionNode(Node):
         return normalize_chinese_numbers(cleaned)
 
     def _publish(self, partial: dict[str, Any]) -> bool:
-        value = dict(partial)
+        # Keep the session gate and wire publication atomic against stop_listening.
         with self._interaction_lock:
+            return VoiceInteractionNode._publish_audio_event(self, partial)
+
+    def _publish_audio_event(self, partial: dict[str, Any]) -> bool:
+        value = dict(partial)
+        call = is_call(value)
+        if call:
+            value = normalize_call(value)
+            if not value.get("_call_direction_bound"):
+                value.update(direction_snapshot(None, None, None))
+            value = invalidate_disconnected_direction(value, self._providers.get("wakeup"))
+        with self._interaction_lock:
+            if call and not self._interaction_active:
+                self._trace("call_ignored", result="not_awake")
+                return False
             value.setdefault("interaction_id", self._interaction_id)
             value.setdefault("wake_id", getattr(self, "_latest_wake_id", ""))
         value.setdefault("state", self._state_machine.state.value)
@@ -2886,14 +2906,19 @@ class VoiceInteractionNode(Node):
             "previous_state", self._state_machine.previous_state.value
         )
         value = refresh_direction_age(value, time.monotonic())
-        if value.get("event_type") == EVT_VOICE_CALL_HERE and value.get("wake_angle_valid") is not True:
-            self._trace("call_here_ignored", result="invalid_direction")
-            return False
+        if call:
+            deduplicator = getattr(self, "_call_deduplicator", None)
+            if deduplicator is None:
+                deduplicator = self._call_deduplicator = CallDeduplicator(
+                    getattr(self, "_wake_debounce_sec", 0.8))
+            if not deduplicator.accept(value):
+                self._trace("call_ignored", result="duplicate")
+                return False
         if (value.get("event_type") == EVT_VOICE_SOUND_SOURCE_DETECTED
                 and value.get("doa_valid") is not True):
             self._trace("sound_source_ignored", result="invalid_direction")
             return False
-        if any(key in value for key in ("_wake_angle_measured_monotonic", "_doa_measured_monotonic")):
+        if call or any(key in value for key in ("_wake_angle_measured_monotonic", "_doa_measured_monotonic")):
             value["header"] = {**value.get("header", {}), "stamp": time.time()}
         event = normalize_audio_event(value)
         message = String()
@@ -2954,9 +2979,10 @@ class VoiceInteractionNode(Node):
             language=str(event.get("language", "")),
             slots=event.get("slots", []),
             **({
-                "sound_id": event["sound_id"], "doa": event["doa"],
+                "doa": event["doa"], "doa_source": event["doa_source"],
                 "doa_valid": event["doa_valid"], "doa_age_ms": event["doa_age_ms"],
-            } if event.get("sound_id") else {}),
+            } if call or event.get("sound_id") else {}),
+            **({"sound_id": event["sound_id"]} if event.get("sound_id") else {}),
             payload=event,
         )
         return True

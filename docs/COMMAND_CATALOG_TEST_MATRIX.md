@@ -2,7 +2,7 @@
 
 由 `scripts/generate_command_catalog.py` 生成。修改 XLSX 和审核规则后重新生成。
 
-版本 `2026-10-16-workbook-v14`，来源 [docs/语音识别内容.xlsx](语音识别内容.xlsx) 的 Sheet1。
+版本 `2026-10-19-workbook-v15`，来源 [docs/语音识别内容.xlsx](语音识别内容.xlsx) 的 Sheet1。
 共 49 个功能条目：43 个固定路由（含 ASR 呼名），4 个参数句式、1个闲聊兜底和1个声源入口。
 标准词句 222 条，受控整句扩展 2220 条，复用口语/ASR变体 123 条，共 2565 个精确入口。
 `source_rows` 是 Excel 实际行号。叫两声/说话优先 BARK；去/走开/翻滚等旧独立路由已移出本版。
@@ -12,7 +12,7 @@ BT=true 表示 Voice 允许下游接收，不证明 Tree/Action 已实现或真�
 
 | Excel行 | 命令 | 标准词句 | 事件 / 编号 |
 |---|---|---|---|
-| 3 | CALL_NAME | 小火小火、小狗、跟屁虫、嘬嘬嘬 | `EVT_VOICE_COMMAND_CALL_NAME` / `CMD_CALL_NAME` |
+| 3 | CALL_NAME | 小火小火、小狗、跟屁虫、嘬嘬嘬 | `EVT_VOICE_CALL` / `CMD_CALL_NAME` |
 | 4 | QUIET | 安静、闭嘴、别叫、不许叫 | `EVT_VOICE_COMMAND_QUIET` / `CMD_QUIET` |
 | 5 | HOLD_POSITION | 等等、定、别动、停、不准动、不许动、老实点、不可以、No | `EVT_VOICE_COMMAND_HOLD_POSITION` / `CMD_HOLD_POSITION` |
 | 6 | FOLLOW | 走、跟我走、跟着我、跟上、跟我来 | `EVT_VOICE_COMMAND_FOLLOW` / `CMD_FOLLOW` |

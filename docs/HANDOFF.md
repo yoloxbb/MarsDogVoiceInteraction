@@ -76,7 +76,7 @@ EVT_STATE_CHANGED
 
 `EVT_VOICE_WAKEUP` 现在只表示硬件或 pipeline Mock 唤醒。Model Intent 的呼名事件映射仍
 作为兼容协议保留，但正式配置关闭意图提供器；词库昵称调用发布
-`EVT_VOICE_COMMAND_CALL_NAME`（`CMD_CALL_NAME`）。词库夸赞/责备分别发布
+`EVT_VOICE_CALL`（`CMD_CALL_NAME`）。词库夸赞/责备分别发布
 `EVT_VOICE_COMMAND_PRAISE/SCOLD`，不占用 Model Intent 的
 `EVT_VOICE_PRAISE/SCOLD`。三类词库社交事件均保持 `is_executable=false`；其中
 昵称固定 `should_trigger_behavior_tree=false`，不得直接唤醒或执行通用动作；

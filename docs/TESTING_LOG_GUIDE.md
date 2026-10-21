@@ -45,8 +45,8 @@ Voice 日志不能证明动作已经执行。
 - 新表49个功能条目：43个固定路由、4个参数句式、1个闲聊兜底、1个声源入口；Sheet1实际行号写入 source_rows。
   行为主/次序列、备注及全局约束保留为元数据，Voice通过不代表下游完成动作。
 - 21 组核心训练指令是完整词库的子集。硬件或 pipeline Mock 唤醒发布
-  `EVT_VOICE_WAKEUP`；Model Intent 呼名继续发布 `EVT_VOICE_CALL_NAME`。词库昵称、
-  夸赞、责备分别发布 `EVT_VOICE_COMMAND_CALL_NAME/PRAISE/SCOLD`。昵称固定
+  `EVT_VOICE_WAKEUP`；Model Intent 呼名继续发布 `EVT_VOICE_CALL`。词库昵称、
+  夸赞、责备分别发布 `EVT_VOICE_CALL`、`EVT_VOICE_COMMAND_PRAISE/SCOLD`。昵称固定
   `should_trigger_behavior_tree=false`；PRAISE/SCOLD 保持 `is_executable=false`，
   但以 `dispatch_role=social_reaction`、`should_trigger_behavior_tree=true` 授权 Tree
   生成一次性社交反应。Voice 发布成功仍不能证明 Action 或硬件已经执行。
@@ -191,6 +191,27 @@ VOICE_TRACE {"record":"interaction_end"...}
 
 每个 `event_publish` 都带完整的 `payload`，可直接从日志复核 ROS2 JSON；正式验收仍
 应同时保存 `/perception/audio_event` 原文，防止只验证了日志而没有验证传输接口。
+
+ReSpeaker 方向诊断使用默认 INFO 级别，无需切换 DEBUG。修改后需重启 Voice 节点：
+
+- `RESPEAKER_DOA`：串口线程逐条记录 wake／keyword／VAD 原始 JSON（`raw`）、
+  `connection_id`、`received_monotonic` 和 `cache_result`。有效样本另带
+  `measured_monotonic`、`total_age_ms`；keyword／wake 总年龄包括 `audio_age_ms`。
+  `stored` 表示写入呼唤缓存，`out_of_order` 表示测量时刻不比最新样本新，
+  `wake_only` 只写入唤醒历史；其他原因包括 `not_ready`、`invalid_state`、
+  `invalid_doa`、`invalid_angle_or_age`、`invalid_audio_age`、`numeric_overflow`、`invalid_measured_time`。
+- `CALL_DIRECTION`：取角窗口、匹配结果、缓存样本数、`selected`／`latest` 和各自当前年龄。
+  两个样本字段均为 `[measured_monotonic, doa, doa_source]`，没有样本时为 null。
+  `no_sample` 但 `latest` 非空表示当前缓存有方向，但不在本句窗口内；
+  `invalid_window` 表示缺少可靠的音频起止时间，`reader_unavailable`／`not_ready` 表示采集不可用。
+  `connection_changed` 表示取角期间连接发生变化。
+- 缓存 `stored`／取角 `matched` 不等于发布时仍有效；结合 `event_publish` 的
+  `doa_valid`、`doa_age_ms` 判断是否在发布前超过 600 ms。普通事件的
+  `wake_angle=0,wake_angle_valid=false` 是模板默认值，不能作方向证据。
+
+```bash
+rg 'RESPEAKER_DOA|CALL_DIRECTION|"record":"event_publish"' log/voice_interaction_*.log
+```
 
 确定性词库建议使用以下逐条记录格式；核心用例使用 `CORE-*`，全量词库用例另使用
 `CATALOG-*` 并记录对应的 `source_rows`。当前 222 条短语的期望值已经整理在

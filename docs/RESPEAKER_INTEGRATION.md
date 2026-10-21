@@ -76,7 +76,7 @@ ros2 launch marsdog_voice_interaction voice.launch.py
    超长输入行整行丢弃，不能把行尾 JSON 当作新事件。
 4. Provider 将 keyword/score/doa 转为共享唤醒字段。节点原有流程生成
    interaction_id / wake_id，立即发布 EVT_VOICE_WAKEUP，再异步发布关联声纹结果。
-   普通 keyword 仅接受“这儿／这里这里／到这来”，转为 EVT_VOICE_CALL_HERE，
+   普通 keyword 仅接受“这儿／这里这里／到这来”，转为 EVT_VOICE_CALL（call_kind=here），
    不进入上述唤醒会话；其余普通关键词忽略。
 5. `AudioSherpaProvider` 继续使用一条录音流，待机保留 3 秒历史音频；没有唤醒词
    时长时，声纹截取使用配置的 2.5 秒窗口。
@@ -172,7 +172,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
 最多三个是 Flex 固件唤醒词表的容量；主机 Sherpa 没有此三词限制，
 `config/wake_keywords.txt` 保留“旺财旺财／小火小火／小狗／跟屁虫”四个词。
 “这儿／这里这里／到这来”使用 Flex 独立的普通 KWS 表（容量 16），
-设备持续识别并上报 `type=keyword`，Voice 仅在已经处于唤醒会话且方向有效时发布通知；
+设备持续识别并上报 `type=keyword`，Voice 仅在已经处于唤醒会话时发布通知；方向无效时照常发布并标记 doa_valid=false；
 不占用固件唤醒词名额，也不再由默认主机词表识别。
 
 | ID | phrase（无声调拼音） | name |
@@ -195,21 +195,24 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
 `add_keyword` 已存在同 ID 时会报错，不应重复执行；`set_keywords` 是整表覆盖，应避免用于增量添加。
 查询 `get_commands` 确认原有固件唤醒词没有变化。串口只能由一个程序使用，Voice 占用时先释放端口。
 
-命中时必须同时满足：Voice 已经处于唤醒会话、设备 `doa_valid=true`、角度为有效数值且不等于 -1，
-并通过方向年龄检查；未唤醒、会话已结束或方向无效时不发布。
-符合条件后在 `/perception/audio_event` 发布 `EVT_VOICE_CALL_HERE`，保留关键词和方向字段，
-`wake_provider/intent_source=respeaker_keyword`；
-不发布 `EVT_VOICE_WAKEUP`，不创建或刷新会话，不启动命令录音或唤醒声纹，
-也不取消现有录音和语音任务。正常唤醒词继续使用原流程。
+命中后仅在已有唤醒会话内发布 `EVT_VOICE_CALL`，call_kind=here，
+intent_source 为 respeaker_keyword／对应识别来源。通知不创建或刷新会话，不取消当前录音或识别任务。
+位置关键词与 ASR 词库／Model Intent 的昵称呼唤使用同一公开事件，保留来源和 here/name 子类。
 
-位置通知通过会话和方向条件后才在节点防抖，不占用正常唤醒的去重窗口。
-使用 `respeaker_sherpa` 时，原始方向标志和数值有效、但快照年龄超限的命中，
-允许在 `doa_window_sec` 内恢复方向；候选先按当前总年龄不超过 `max_angle_age_ms` 筛选，
-再优先选最新的 auto 方向。显式无效或畸形方向仍拒绝，不从历史补偿。
-缓存 wake/keyword 的测量时间需扣除 `doa_age_ms + audio_age_ms`，VAD/status 仅扣除 `doa_age_ms`。
-发布前方向过期仍拒绝通知；未唤醒、无效或未成功发布的命中均不占用防抖窗口。
-新事件的 `interaction_id/wake_id` 为空，`utterance_id` 为通知唯一 ID，两个执行标志均为 false。
-完整字段和下游语义见 [ROS2 契约](ROS2_CONTRACT.md#呼唤位置关键词)。
+串口线程先筛选方向，再将原始消息放入各自队列。VAD 仅接受 start/update，显式 active 必须为 true；
+keyword 没有 state 要求。仅 doa_valid 严格为 true、角度有限且在 [0,360)、年龄有效的样本更新缓存。
+VAD 方向计入 doa_age_ms，keyword 快照还须计入 audio_age_ms，避免把旧方向当作当前方向。
+无效更新和 VAD end 不覆盖／刷新旧样本，乱序测量忽略；原始队列仍保留边界和无方向的关键词通知。
+缓存独立于 sound_source.enabled，断线重连清空。按关键词接收前 2 秒窗口或本句音频区间
+固定方向，ASR 排队前绑定，发布时重新计算总年龄（默认不得超过 600 ms）。
+event_publish 日志同时展示呼唤的 doa、doa_valid、doa_age_ms、doa_source。
+没有合格方向或方向过期时仍发布呼唤，doa=-1、doa_valid=false，下游跳过转向。
+方向、年龄、来源使用 doa/doa_valid/doa_age_ms/doa_source；wake_* 只保留关键词诊断，
+wake_angle_valid=false。interaction_id 关联当前会话，wake_id 为空，两个执行标志仍为 false。
+
+同次固件／ASR 命中按声学时间去重；未唤醒或整条过期的命中不占用去重状态。
+完整迁移和下游语义见 [ROS2 契约](ROS2_CONTRACT.md#统一呼唤2026-10-19)。
+2026-10-19 的统一契约取代下方历史记录中针对 CALL_HERE 的方向恢复规则。
 
 设备词表写入后立即生效；主机接收路由需重新启动 Voice 节点。
 真人命中率及短词误报率须现场验证。

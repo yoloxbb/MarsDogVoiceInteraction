@@ -20,8 +20,7 @@ from marsdog_voice_interaction.messages.intent_event_router import (
 )
 from marsdog_voice_interaction.messages.voice_event_types import (
     ACTION_TO_VOICE_EVENT,
-    EVT_VOICE_CALL_NAME,
-    EVT_VOICE_COMMAND_CALL_NAME,
+    EVT_VOICE_CALL,
     EVT_VOICE_FOLK_ID,
     EVT_VOICE_COMMAND_FETCH,
     EVT_VOICE_COMMAND_KNOWN,
@@ -142,17 +141,16 @@ def test_hardware_wakeup_and_catalog_nickname_use_distinct_events() -> None:
 
     assert nickname is not None
     assert nickname.command_id == "CMD_CALL_NAME"
-    assert nickname.event_type == EVT_VOICE_COMMAND_CALL_NAME
-    assert nickname.event_type != EVT_VOICE_CALL_NAME
+    assert nickname.event_type == EVT_VOICE_CALL
     assert nickname.event_type != EVT_VOICE_WAKEUP
     nickname_event = nickname.to_event(asr_text="小狗", language="zh")
     assert nickname_event["raw_nlu_tag"] == "CALL|NONE|NONE"
-    assert nickname_event["intent_category"] == "social"
+    assert nickname_event["intent_category"] == "call"
     assert nickname_event["action"] == "NONE"
     assert not nickname_event["is_executable"]
     assert not nickname_event["should_trigger_behavior_tree"]
     assert derive_intent_routes("CALL", "NONE", "NONE") == [
-        (EVT_VOICE_CALL_NAME, "social")
+        (EVT_VOICE_CALL, "social")
     ]
 
 

@@ -146,7 +146,7 @@ class DirectCommandMatch:
         raw_nlu_tag = ""
         if social and intent and semantic_control:
             raw_nlu_tag = make_intent_tag(social, intent, semantic_control)
-        return {
+        event = {
             "event_type": self.event_type,
             "asr_text": asr_text,
             "social": social,
@@ -171,6 +171,10 @@ class DirectCommandMatch:
             "should_trigger_behavior_tree": triggers_behavior_tree,
             "language": language or "zh",
         }
+        if self.command_key == "CALL_NAME":
+            from marsdog_voice_interaction.core.call_event import normalize_call
+            event = normalize_call(event)
+        return event
 
     def to_kws_event(
         self,
@@ -509,11 +513,9 @@ class CommandLexicon:
                 f"Command entry {index} uses retired INTENT event_type "
                 f"{event_type!r}"
             )
-        if (
-            event_type
-            in voice_event_types.MODEL_INTENT_CLASSIFICATION_EVENT_TYPES
-            or event_type == voice_event_types.EVT_VOICE_WAKEUP
-        ):
+        if ((event_type in voice_event_types.MODEL_INTENT_CLASSIFICATION_EVENT_TYPES
+             or event_type == voice_event_types.EVT_VOICE_WAKEUP)
+                and not (command_key == "CALL_NAME" and event_type == voice_event_types.EVT_VOICE_CALL)):
             raise ValueError(
                 f"Command entry {index} reuses reserved non-catalog "
                 f"event_type {event_type!r}"

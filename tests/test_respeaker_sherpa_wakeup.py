@@ -79,14 +79,14 @@ def test_call_here_keywords_use_a_separate_event(monkeypatch, word, kind):
     now = time.monotonic()
     provider.reader._note_doa(vad(73, age_ms=0), now)
     host_event = provider._keyword_event(word, now)
-    assert host_event["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert host_event["event_type"] == "EVT_VOICE_CALL"
     assert host_event["wake_word"] == word and host_event["wake_angle"] == 73
     serial = [dict(firmware_wake(now), type=kind, keyword=word)]
     monkeypatch.setattr(provider.reader, "get_message", lambda: serial.pop(0) if serial and kind == "wake" else None)
     monkeypatch.setattr(provider.reader, "get_keyword_message", lambda: serial.pop(0) if serial else None)
     provider._events.append(host_event)
     first = provider.poll_event()
-    assert first["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert first["event_type"] == "EVT_VOICE_CALL"
     assert first["wake_provider"] == ("respeaker_keyword" if kind == "keyword" else "respeaker_serial")
     # Only the node knows if the session is awake; it owns keyword debounce.
     assert provider.poll_event()["wake_provider"] == "respeaker_sherpa"
@@ -102,9 +102,9 @@ def test_call_here_and_real_wakes_have_independent_deduplication(monkeypatch, wo
         provider._events.append(provider._keyword_event(word, now + index * 0.1))
     assert [provider.poll_event()["wake_word"] for _ in words] == list(words)
     provider._events.append(provider._keyword_event("这里这里", now + 0.2))
-    assert provider.poll_event()["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert provider.poll_event()["event_type"] == "EVT_VOICE_CALL"
     provider._events.append(provider._keyword_event("到这来", now + 2.0))
-    assert provider.poll_event()["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert provider.poll_event()["event_type"] == "EVT_VOICE_CALL"
 
 
 @pytest.mark.parametrize("updates", [
@@ -118,7 +118,7 @@ def test_call_here_cannot_recover_invalid_direction_from_recent_doa(monkeypatch,
     serial = [dict(firmware_wake(now), type="keyword", keyword="这儿", **updates)]
     monkeypatch.setattr(provider.reader, "get_keyword_message", lambda: serial.pop(0) if serial else None)
     event = provider.poll_event()
-    assert event["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert event["event_type"] == "EVT_VOICE_CALL"
     assert event["wake_angle_valid"] is False and event["wake_angle"] == -1
     # Rejected notifications do not consume a provider debounce window.
     serial.append(dict(firmware_wake(now + 0.1), type="keyword", keyword="这儿"))
@@ -182,7 +182,7 @@ def test_latest_cached_bearing_uses_measurement_time_instead_of_arrival_order():
 
 @pytest.mark.parametrize("word", ["这儿", "这里这里", "到这来"])
 @pytest.mark.parametrize("kind", ["wake", "keyword"])
-def test_call_here_recovers_stale_snapshot_using_fresh_bearing(monkeypatch, word, kind):
+def test_call_candidate_defers_stale_direction_to_the_nodes_vad_cache(monkeypatch, word, kind):
     monkeypatch.setattr(time, "monotonic", lambda: 100.0)
     provider = WakeupReSpeakerSherpaProvider({})
     provider.reader._ready.set()
@@ -192,9 +192,10 @@ def test_call_here_recovers_stale_snapshot_using_fresh_bearing(monkeypatch, word
     queue = provider.reader._messages if kind == "wake" else provider.reader._keyword_messages
     queue.append(raw)
     event = provider.poll_event()
-    assert event["event_type"] == "EVT_VOICE_CALL_HERE"
-    assert event["wake_angle_valid"] is True and event["wake_angle"] == 73
-    assert event["wake_angle_age_ms"] == pytest.approx(200.0)
+    assert event["event_type"] == "EVT_VOICE_CALL"
+    assert event["call_kind"] == "here"
+    assert event["wake_angle_valid"] is False and event["wake_angle"] == -1
+    assert provider.reader.recent_call_doa(99.4, 100.0)[1] == 73
 
 
 @pytest.mark.parametrize("word", ["旺财旺财", "这里这里"])

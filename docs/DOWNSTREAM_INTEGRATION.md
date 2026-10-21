@@ -3,6 +3,8 @@
 对接基线：2026 年 10 月 15 日，AudioEvent v2。
 适用对象：行为树、业务调度、视觉取物和导航模块开发人员。
 
+AudioEvent v3 的事件名称与数据结构见 [语音模块事件与数据结构](DOWNSTREAM_INTEGRATION_V3.md)。
+
 Voice 负责识别语音并发布结构化事件。下游订阅事件，完成业务路由、权限判断、
 行为仲裁及执行。**地点点位由调用方自行实现**：Voice 发布的 `location_id` 只是
 地点语义标识，不包含地图、坐标或导航结果。
@@ -77,7 +79,7 @@ Voice 不提供目标跟踪 ID、地图坐标、靠近距离、行为优先级�
 |---|---|---|---|---|
 | 已确认的动作命令 | `specific_command` | true | true | 白名单及参数校验后交给行为调度 |
 | 词库夸赞、责备 | `social_reaction` | false | true | 交给明确接入的一次性社交反应处理器 |
-| 词库呼名 `CALL_NAME` | `specific_command` | false | false | 不作为动作，也不作为硬件唤醒 |
+| 词库呼名 `CALL_NAME` | `call` | false | false | 不作为动作，也不作为硬件唤醒 |
 | 参数句式的未知物品或地点 | `recognition_summary` | false | false | 保留原始名称，记录未支持原因 |
 | Model Intent 的 `KNOWN` 摘要 | `semantic_classification` | false | false | 仅展示或记录，不二次执行 |
 | `speech`、`UNKNOWN` 等 | 空或诊断角色 | false | false | 转写或诊断，不触发动作 |
@@ -112,7 +114,7 @@ Voice 不提供目标跟踪 ID、地图坐标、靠近距离、行为优先级�
 | 安静、别叫 | `EVT_VOICE_COMMAND_QUIET` | `CMD_QUIET` | 停止发声，不等同底盘急停 |
 | 厉害、太厉害了、乖狗狗、小宝贝、小跟屁虫 | `EVT_VOICE_COMMAND_PRAISE` | `CMD_PRAISE` | 按社交分支处理 |
 | 我生气了、罚你站着、罚你不准吃饭 | `EVT_VOICE_COMMAND_SCOLD` | `CMD_SCOLD` | 责备反应，不拆出站立或进食动作 |
-| 小狗、跟屁虫 | `EVT_VOICE_COMMAND_CALL_NAME` | `CMD_CALL_NAME` | 两个标志均 false，不代替唤醒 |
+| 小狗、跟屁虫 | `EVT_VOICE_CALL` | `CMD_CALL_NAME` | 两个标志均 false，不代替唤醒 |
 | 去拿球、把球拿来 | `EVT_VOICE_COMMAND_FETCH` | `CMD_FETCH_OBJECT` | 读取并校验规范物品名称 |
 | 去房间、到客厅去、回狗窝 | `EVT_VOICE_COMMAND_GO_TO_LOCATION` | `CMD_GO_TO_LOCATION` | 读取地点 ID，由调用方绑定点位；完整句子优先于单字“去” |
 
@@ -291,18 +293,18 @@ GO_TO_LOCATION=44、FETCH_FROM_LOCATION=45。
 旧 `wake_id` 的迟到结果不能覆盖新唤醒的身份和声源方向。
 唤醒事件的 `utterance_id` 为空，不能套用普通语句的去重键。
 
-“这儿”“这里这里”“到这来”放在 ReSpeaker 固件普通 KWS 表，由 `type=keyword`
-发布 `EVT_VOICE_CALL_HERE`，`wake_provider/intent_source=respeaker_keyword`。
-这是独立通知：`interaction_id/wake_id` 为空，`utterance_id` 为通知唯一 ID，
-两个执行标志均为 false；不启动或刷新会话，也不触发唤醒声纹。
-仅在 Voice 已经处于唤醒会话、设备 `doa_valid=true` 且角度有效、不等于 -1 时发布，
-方向还须通过截至发布时间的年龄检查；未唤醒、会话已结束或方向无效时不发布。
-`respeaker_sherpa` 对原始方向有效但快照过期的命中，可恢复词内仍新鲜的方向；
-显式无效或畸形方向不补偿。历史检索窗口默认 2 秒，恢复后的总年龄仍不得超过 600 ms。
-`wake_angle_age_ms` 与 `header.stamp` 对齐，下游还须计入发布之后的传输和执行排队时间。
-用 `(utterance_id,event_type)` 去重；不能当作唤醒或 COME 命令。
-关键词和方向仍使用 `wake_*` 字段，通知本身不创建或刷新会话。
-完整约定见 [位置呼唤关键词](ROS2_CONTRACT.md#呼唤位置关键词)。
+“这儿／这里这里／到这来”和词库／模型昵称呼唤统一发布 EVT_VOICE_CALL，
+call_kind=here|name，intent_source 保留实际识别来源。interaction_id 关联当前会话，wake_id 为空，
+utterance_id 标识本句。两个执行标志均为 false；不创建或刷新会话，不启动唤醒声纹。
+仅在已有会话中发布，方向无效也保留呼唤通知。
+
+方向读取 doa/doa_valid/doa_age_ms/doa_source；仅使用实时有效 VAD update，ASR 前绑定本句快照。
+发布前重算方向年龄，默认 600 ms；无效时 doa=-1，下游跳过转向。header.stamp 为发布时间，
+下游还须补充传输和执行排队时间。不要读取 wake_angle 或把该事件当作 WAKEUP／COME。
+用 (interaction_id,utterance_id,event_type) 去重；固件／ASR 同次命中 Voice 已按声学时间去重。
+旧 CALL_HERE、CALL_NAME、COMMAND_CALL_NAME 名称仅兼容输入，新话题不双发。
+Tree 必须显式接入新事件，不能仅改事件名就复用唤醒会话入口。
+完整约定见 [统一呼唤](ROS2_CONTRACT.md#统一呼唤2026-10-19)。
 
 一句话可同时产生身份事件、`speech` 和具体命令。这些是同一句话的不同信息，
 不能只用 `utterance_id` 整句去重。业务事件采用

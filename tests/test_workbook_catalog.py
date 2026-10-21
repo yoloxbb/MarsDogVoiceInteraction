@@ -61,7 +61,7 @@ def test_every_fixed_workbook_phrase_is_covered_and_duplicate_bark_wins(lexicon)
             assert match.source_rows == ((20,) if phrase in {"叫两声", "说话"} else (row,))
     for phrase in ("小火小火", "小狗", "跟屁虫", "嘬嘬嘬"):
         event = lexicon.match(phrase).to_event(asr_text=phrase, language="zh")
-        assert event["event_type"] == "EVT_VOICE_COMMAND_CALL_NAME"
+        assert event["event_type"] == "EVT_VOICE_CALL"
         assert not event["is_executable"] and not event["should_trigger_behavior_tree"]
 
 

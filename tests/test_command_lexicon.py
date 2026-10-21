@@ -78,12 +78,10 @@ def test_catalog_special_events_are_unique_and_share_only_reviewed_actions() -> 
         not event_type.startswith("EVT_VOICE_INTENT_")
         for event_type in event_types
     )
-    assert set(event_types).isdisjoint(
-        MODEL_INTENT_CLASSIFICATION_EVENT_TYPES
-    )
+    assert set(event_types) & MODEL_INTENT_CLASSIFICATION_EVENT_TYPES == {"EVT_VOICE_CALL"}
     assert (
         set(event_types) & MODEL_INTENT_EVENT_TYPES
-        <= MODEL_INTENT_SHARED_COMMAND_EVENT_TYPES
+        <= MODEL_INTENT_SHARED_COMMAND_EVENT_TYPES | {"EVT_VOICE_CALL"}
     )
 
 
@@ -135,7 +133,7 @@ def test_catalog_rejects_executable_social_event(tmp_path: Path) -> None:
 
 def test_catalog_rejects_duplicate_special_event_names(tmp_path: Path) -> None:
     raw = yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8"))
-    raw["commands"][1]["event_type"] = raw["commands"][0]["event_type"]
+    raw["commands"][2]["event_type"] = raw["commands"][1]["event_type"]
     catalog_path = tmp_path / "command_catalog.yaml"
     catalog_path.write_text(
         yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
@@ -797,9 +795,9 @@ def test_expanded_catalog_match_publishes_event_and_skips_intent_model() -> None
     [
         (
             "小狗",
-            "EVT_VOICE_COMMAND_CALL_NAME",
+            "EVT_VOICE_CALL",
             "CALL",
-            "social",
+            "call",
         ),
         (
             "真聪明",
@@ -842,7 +840,7 @@ def test_social_catalog_event_uses_event_specific_tree_authority(
     is_reaction = emotion in {"PRAISE", "SCOLD"}
     assert direct["should_trigger_behavior_tree"] is is_reaction
     assert direct["dispatch_role"] == (
-        "social_reaction" if is_reaction else "specific_command"
+        "social_reaction" if is_reaction else "call"
     )
     assert node._state_machine.state == (
         State.EXECUTION if is_reaction else State.ATTENTION

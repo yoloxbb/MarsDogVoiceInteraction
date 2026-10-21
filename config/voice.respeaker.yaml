@@ -103,7 +103,7 @@ providers:
       handshake_timeout_sec: 2.0
       heartbeat_sec: 10.0
       reconnect_interval_sec: 2.0
-      max_angle_age_ms: 600.0  # 仅限制转向方向；过期仍发布唤醒并启动识别。
+      max_angle_age_ms: 600.0  # 方向有效期；呼唤最多 600 ms，过期仍发布事件并标记方向无效。
       # type 为 respeaker_sherpa 时，主机 sherpa 同时在常开麦克风上听唤醒词，和固件谁先认出算谁；
       # 10-15 录音 15 声：固件认出 7、sherpa 12、合起来 14。需要 audio.wake_history_sec > 0。
       sherpa_model_dir: ../../models/wakeup/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20

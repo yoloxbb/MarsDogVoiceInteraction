@@ -11,7 +11,7 @@ from marsdog_voice_interaction.adapters.wakeup.respeaker_serial_reader import Re
 from marsdog_voice_interaction.messages.audio_event import WAKE_ANGLE_FRAME_ID
 from marsdog_voice_interaction.messages.voice_event_types import (
     CALL_HERE_KEYWORDS,
-    EVT_VOICE_CALL_HERE,
+    EVT_VOICE_CALL,
 )
 from marsdog_voice_interaction.providers.base import BaseProvider
 
@@ -99,7 +99,8 @@ class WakeupReSpeakerSerialProvider(BaseProvider):
             pass
         event = {
             "header": {"frame_id": WAKE_ANGLE_FRAME_ID},
-            "event_type": EVT_VOICE_CALL_HERE if word.strip() in CALL_HERE_KEYWORDS else "wakeup",
+            "event_type": EVT_VOICE_CALL if word.strip() in CALL_HERE_KEYWORDS else "wakeup",
+            "call_kind": "here" if word.strip() in CALL_HERE_KEYWORDS else "",
             "wake_provider": "respeaker_keyword" if kind == "keyword" else "respeaker_serial",
             "wake_keyword_id": keyword_id,
             "wake_word": word,
@@ -120,7 +121,7 @@ class WakeupReSpeakerSerialProvider(BaseProvider):
         if doa_age >= 0 and audio_age >= 0:
             event["_wake_angle_measured_monotonic"] = received - (doa_age + audio_age) / 1000.0
             event["_wake_angle_max_age_ms"] = self.max_angle_age_ms
-        kind = "call-here" if event["event_type"] == EVT_VOICE_CALL_HERE else "wakeup"
+        kind = "call-here" if event["event_type"] == EVT_VOICE_CALL else "wakeup"
         logger.info("Flex %s: word=%r score=%.4f angle=%.1f valid=%s age_ms=%.1f",
                     kind, word, score, event["wake_angle"], valid, event["wake_angle_age_ms"])
         return event

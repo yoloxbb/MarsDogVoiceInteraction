@@ -781,9 +781,11 @@ MarsDogVoiceInteraction/
 
 - `EVT_VOICE_WAKEUP` 到终止 `EVT_STATE_CHANGED` 必须保持同一个
   `interaction_id`。
-- `EVT_VOICE_WAKEUP` 只表示硬件或 pipeline Mock 唤醒；Model Intent 呼名发布
-  `EVT_VOICE_CALL_NAME`，昵称词库发布 `EVT_VOICE_COMMAND_CALL_NAME`。两类呼名均为
-  社交语义，`should_trigger_behavior_tree=false`，不得作为硬件唤醒或通用动作指令。
+- `EVT_VOICE_WAKEUP` 只表示硬件或 pipeline Mock 唤醒；位置关键词、昵称词库和
+  Model Intent 呼唤统一为 `EVT_VOICE_CALL`，用 `call_kind=here|name` 和 `intent_source`
+  区分。会话内呼唤始终发布，方向来自有效 VAD／keyword 测量并按本句绑定，使用 `doa*` 字段；无效／过期方向
+  标为 false，下游跳过转向。两个执行标志均为 false，不代替硬件唤醒或 COME 动作。
+  详见 [统一呼唤契约](docs/ROS2_CONTRACT.md#统一呼唤2026-10-19)。
 - 词库 `PRAISE/SCOLD` 发布 `EVT_VOICE_COMMAND_PRAISE/SCOLD`，保持
   `is_executable=false`，但以 `dispatch_role=social_reaction`、
   `should_trigger_behavior_tree=true` 授权 Tree 生成一次性社交反应。
@@ -802,6 +804,7 @@ MarsDogVoiceInteraction/
 
 ## 延伸文档
 
+- [AudioEvent v3 事件与数据结构](docs/DOWNSTREAM_INTEGRATION_V3.md)
 - [下游开发对接文档](docs/DOWNSTREAM_INTEGRATION.md)
 - [下游命令映射表 CSV](docs/DOWNSTREAM_COMMAND_MAP.csv)
 - [2026 年 10 月 13 日识别改动说明](docs/RECOGNITION_CHANGES_2026-10-13.md)

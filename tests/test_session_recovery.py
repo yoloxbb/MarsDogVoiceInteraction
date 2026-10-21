@@ -263,20 +263,18 @@ def test_call_here_preserves_session_capture_and_pending_work(monkeypatch, word,
         "wake_provider": "respeaker_sherpa", **direction,
     }, audio)
 
-    accepted = (active and direction.get("wake_angle_valid") is True
-                and type(direction.get("wake_angle")) in (int, float)
-                and 0 <= direction["wake_angle"] < 360)
+    accepted = active
     assert len(node.published) == int(accepted)
     if accepted:
         event = node.published[0]
-        assert event["event_type"] == "EVT_VOICE_CALL_HERE"
+        assert event["event_type"] == "EVT_VOICE_CALL"
         assert event["wake_word"] == word
-        assert event["interaction_id"] == event["wake_id"] == ""
+        assert event["interaction_id"] == "existing-session" and event["wake_id"] == ""
         assert event["utterance_id"]
         assert event["speaker_status"] == "not_checked"
         assert event["should_trigger_behavior_tree"] is event["is_executable"] is False
-        assert event["wake_angle_valid"] is True
-        assert event["wake_angle"] == direction["wake_angle"]
+        assert event["doa_valid"] is False and event["doa"] == -1
+        assert event["wake_angle_valid"] is False
     else:
         assert getattr(node, "_last_call_here_received", float("-inf")) == float("-inf")
     assert node._interaction_active is active
@@ -310,7 +308,7 @@ def test_call_here_requires_prior_wakeup_without_consuming_debounce(monkeypatch)
     clock[0] += 0.1
     wakeup.events.append({"wake_word": "这儿", "wake_angle": 95, "wake_angle_valid": True})
     node._poll()
-    assert node.published[-1]["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert node.published[-1]["event_type"] == "EVT_VOICE_CALL"
     wakeup.events.append({"wake_word": "这里这里", "wake_angle": 95, "wake_angle_valid": True})
     node._poll()
     assert len(node.published) == 2
@@ -333,7 +331,7 @@ def test_device_keyword_requires_an_awake_session(monkeypatch, word, active):
     node._interaction_id = "awake-session" if active else ""
     wakeup.events.append(event)
     node._poll()
-    business = [event for event in node.published if event["event_type"] == "EVT_VOICE_CALL_HERE"]
+    business = [event for event in node.published if event["event_type"] == "EVT_VOICE_CALL"]
     assert len(business) == int(active)
     if active:
         assert business[0]["intent_source"] == "respeaker_keyword"
@@ -347,7 +345,7 @@ def test_call_here_does_not_supersede_an_in_flight_utterance(monkeypatch):
     node._latest_wake_id = "current-wake"
     wakeup.events.append({"wake_word": "到这来", "wake_angle": 95, "wake_angle_valid": True})
     assert not VoiceInteractionNode._wakeup_supersedes_utterance(node, "current-wake")
-    assert node.published[0]["event_type"] == "EVT_VOICE_CALL_HERE"
+    assert node.published[0]["event_type"] == "EVT_VOICE_CALL"
     assert node._latest_wake_id == "current-wake"
 
 
@@ -356,15 +354,13 @@ def test_call_here_rejections_do_not_hide_the_next_valid_keyword(monkeypatch):
     node = _NodeHarness(_FakeAudio(), _FakeWakeup())
     for fields in [
         {"received_monotonic": 99.5, "wake_angle": 95, "wake_angle_valid": True},
-        {"wake_angle": -1, "wake_angle_valid": True},
-        {"wake_angle": 95, "wake_angle_valid": False},
     ]:
         assert not node._handle_wakeup({"wake_word": "这儿", **fields}, None)
     assert node.published == []
     assert not node._handle_wakeup({
         "wake_word": "这儿", "wake_angle": 0, "wake_angle_valid": True,
     }, None)
-    assert len(node.published) == 1 and node.published[0]["wake_angle"] == 0
+    assert len(node.published) == 1 and node.published[0]["doa_valid"] is False
 
 
 def test_call_here_stops_publishing_after_stop_listening(monkeypatch):
@@ -399,18 +395,18 @@ def test_call_here_wire_event_does_not_inherit_wake_or_identity(monkeypatch):
     }, node._providers["audio"])
     assert len(wire) == 1
     event = wire[0]
-    assert event["schema_version"] == 2 and event["event_type"] == "EVT_VOICE_CALL_HERE"
-    assert event["interaction_id"] == event["wake_id"] == "" and event["utterance_id"]
+    assert event["schema_version"] == 2 and event["event_type"] == "EVT_VOICE_CALL"
+    assert event["interaction_id"] == node._interaction_id and event["wake_id"] == "" and event["utterance_id"]
     assert event["speaker_id"] == "unknown" and event["speaker_confidence"] == 0.0
     assert event["speaker_status"] == "not_checked"
     assert event["header"]["frame_id"] == "microphone_array"
-    assert event["wake_angle"] == 73 and event["wake_angle_valid"] is True
+    assert event["doa"] == -1 and event["doa_valid"] is False
     assert event["wake_word"] == "这儿" and event["wake_keyword_id"] == 5
-    assert event["intent_source"] == "respeaker_sherpa" and event["dispatch_role"] == "call_here"
+    assert event["intent_source"] == "respeaker_sherpa" and event["dispatch_role"] == "call"
     assert event["is_executable"] is event["should_trigger_behavior_tree"] is False
 
 
-@pytest.mark.parametrize("event_type", ["EVT_VOICE_WAKEUP", "EVT_VOICE_CALL_HERE"])
+@pytest.mark.parametrize("event_type", ["EVT_VOICE_WAKEUP", "EVT_VOICE_CALL"])
 @pytest.mark.parametrize("active", [False, True])
 def test_direct_mock_call_here_requires_an_awake_session(monkeypatch, event_type, active):
     monkeypatch.setattr(node_module.time, "monotonic", lambda: 101.0)
@@ -422,7 +418,7 @@ def test_direct_mock_call_here_requires_an_awake_session(monkeypatch, event_type
     node._poll_direct_mock(provider)
     assert len(node.published) == int(active)
     if active:
-        assert node.published[0]["event_type"] == "EVT_VOICE_CALL_HERE"
+        assert node.published[0]["event_type"] == "EVT_VOICE_CALL"
     assert node._interaction_active is active
 
 
@@ -1985,7 +1981,8 @@ def test_bearing_age_includes_provider_to_publish_delay(monkeypatch, direction_w
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(time, "time", lambda: 1700000000.0 + clock[0])
     provider = WakeupReSpeakerSherpaProvider({})
-    provider.reader._note_doa({"doa": 73, "doa_valid": True, "doa_age_ms": 0,
+    provider.reader._note_doa({"type": "vad", "state": "update", "active": True,
+                               "doa": 73, "doa_valid": True, "doa_age_ms": 0,
                                "doa_source": "auto"}, 100.9)
     if path == "sherpa":
         event = provider._keyword_event("旺财旺财", 101.0)
@@ -2029,16 +2026,11 @@ def test_direction_expiring_during_publication_preserves_only_real_wake(monkeypa
         assert wire[0]["wake_angle_age_ms"] == pytest.approx(606)
         assert node._providers["audio"].start_count == 1
     else:
-        assert not accepted and wire == []
-        assert not hasattr(node, "_last_call_here_received")
-        # A rejected publication must leave the keyword debounce window free.
-        node._publish = lambda event: VoiceInteractionNode._publish(node, event)
-        node._handle_wakeup({**event, "received_monotonic": clock[0],
-                             "_wake_angle_measured_monotonic": clock[0] - 0.1}, None)
-        assert len(wire) == 1 and wire[0]["event_type"] == "EVT_VOICE_CALL_HERE"
+        assert not accepted and len(wire) == 1
+        assert wire[0]["doa_valid"] is False
 
 
-def test_call_here_expiring_before_node_handling_does_not_consume_debounce(monkeypatch, direction_wire_node):
+def test_call_here_expiring_before_node_handling_still_publishes(monkeypatch, direction_wire_node):
     monkeypatch.setattr(time, "monotonic", lambda: 101.4)
     node, wire = direction_wire_node
     node._handle_wakeup({
@@ -2046,7 +2038,7 @@ def test_call_here_expiring_before_node_handling_does_not_consume_debounce(monke
         "wake_angle": 73, "wake_angle_valid": True, "wake_angle_age_ms": 300,
         "_wake_angle_measured_monotonic": 100.7, "_wake_angle_max_age_ms": 600,
     }, None)
-    assert wire == [] and not hasattr(node, "_last_call_here_received")
+    assert len(wire) == 1 and wire[0]["doa_valid"] is False
 
 
 @pytest.mark.parametrize("delay, expected_count", [(0.2, 1), (0.7, 0)])
@@ -2076,9 +2068,9 @@ def test_published_direction_respects_inclusive_age_limit(monkeypatch, direction
     monkeypatch.setattr(time, "monotonic", lambda: 101.0)
     node, wire = direction_wire_node
     event = {
-        "event_type": "EVT_VOICE_CALL_HERE", "wake_angle": 73, "wake_angle_valid": True,
-        "_wake_angle_measured_monotonic": 101.0 - age / 1000,
-        "_wake_angle_max_age_ms": 600,
+        "event_type": "EVT_VOICE_CALL", "doa": 73, "doa_valid": True,
+        "_doa_measured_monotonic": 101.0 - age / 1000,
+        "_doa_max_age_ms": 600, "_call_direction_bound": True,
     }
-    assert node._publish(event) is valid
-    assert len(wire) == int(valid)
+    assert node._publish(event) is True
+    assert len(wire) == 1 and wire[0]["doa_valid"] is valid
